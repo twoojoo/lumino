@@ -59,6 +59,8 @@ type Options struct {
 	// BatchBlocks: block statements run until the next GO / "/" line (SQL
 	// Server, Oracle) instead of being tracked by BEGIN/END depth.
 	BatchBlocks bool
+	// ApplyEndsBlock: APPLY closes a BEGIN … block (CQL BEGIN BATCH … APPLY BATCH).
+	ApplyEndsBlock bool
 	// BodyRequired: block statements always have a BEGIN body, and ";"
 	// before it (PSQL declarations) doesn't terminate them (Firebird).
 	BodyRequired bool

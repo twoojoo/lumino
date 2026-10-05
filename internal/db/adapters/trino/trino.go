@@ -49,8 +49,8 @@ func NewDialect() *db.BaseDialect {
 	return &db.BaseDialect{
 		ID: "trino", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower, Params: db.ParamQuestion, LexOpts: lexOptions,
 		Reserved: reserved, KeywordSet: db.Merge(reserved, db.CommonKeywords, db.WordSet("CATALOGS SCHEMAS TABLES COLUMNS SESSION USE ANALYZE")),
-		FuncList: append(db.CommonFunctions, strings.Fields("approx_distinct approx_percentile array_agg date_add date_diff date_format date_trunc from_unixtime json_extract json_extract_scalar json_format json_parse map_agg regexp_extract regexp_like sequence split to_unixtime transform try try_cast")...),
-		TypeList: strings.Fields("boolean tinyint smallint integer bigint real double decimal varchar char varbinary json date time timestamp interval array map row uuid ipaddress"),
+		FuncList:       append(db.CommonFunctions, strings.Fields("approx_distinct approx_percentile array_agg date_add date_diff date_format date_trunc from_unixtime json_extract json_extract_scalar json_format json_parse map_agg regexp_extract regexp_like sequence split to_unixtime transform try try_cast")...),
+		TypeList:       strings.Fields("boolean tinyint smallint integer bigint real double decimal varchar char varbinary json date time timestamp interval array map row uuid ipaddress"),
 		QualifyCatalog: true,
 		BytesLit:       func(b []byte) string { return fmt.Sprintf("X'%X'", b) },
 	}

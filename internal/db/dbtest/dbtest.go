@@ -46,8 +46,18 @@ type Target struct {
 	Eventual bool
 	// ExtraObjects lists object types expected besides tables and views.
 	Expect []db.ObjectType
+	// Cassandra-like quirks: columns ordered by key then name, no NOT NULL,
+	// ORDER BY only within a partition, filters need ALLOW FILTERING.
+	UnorderedColumns bool
+	NoNotNull        bool
+	NoOrderBy        bool
+	FilterSuffix     string
+	// NoViews: only materialized views (Cassandra).
+	NoViews bool
 	// NoKeys: no primary keys or NOT NULL constraints (Trino).
 	NoKeys bool
+	// AfterLoad runs after the fixture (bulk data the script can't create).
+	AfterLoad func(ctx context.Context, c db.Conn) error
 	// Setup runs before the suite (e.g. waits for a slow server).
 	Setup func(t *testing.T)
 }
@@ -109,6 +119,11 @@ func Run(t *testing.T, tg Target) {
 	if err := Load(ctx, conn, tg.Fixture); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
+	if tg.AfterLoad != nil {
+		if err := tg.AfterLoad(ctx, conn); err != nil {
+			t.Fatalf("fixture data: %v", err)
+		}
+	}
 	caps := conn.Caps()
 	cat := conn.Catalog()
 	d := conn.Dialect()
@@ -167,7 +182,7 @@ func Run(t *testing.T, tg Target) {
 				t.Errorf("table %s missing: %v", n, have[db.ObjTable])
 			}
 		}
-		if caps.Views && !slices.Contains(have[db.ObjView], tg.id("customer_totals")) {
+		if caps.Views && !tg.NoViews && !slices.Contains(have[db.ObjView], tg.id("customer_totals")) {
 			t.Errorf("view customer_totals missing: %v", have[db.ObjView])
 		}
 		for _, ty := range tg.Expect {
@@ -206,7 +221,13 @@ func Run(t *testing.T, tg Target) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := colNames(cust); !slices.Equal(got, ids(&tg, "id", "name", "email", "created_at")) {
+		got := colNames(cust)
+		want := ids(&tg, "id", "name", "email", "created_at")
+		if tg.UnorderedColumns {
+			slices.Sort(got)
+			slices.Sort(want)
+		}
+		if !slices.Equal(got, want) {
 			t.Errorf("customers columns %v", got)
 		}
 		if tg.NoKeys {
@@ -215,7 +236,7 @@ func Run(t *testing.T, tg Target) {
 		if !slices.Equal(cust.PrimaryKey, ids(&tg, "id")) {
 			t.Errorf("customers pk %v", cust.PrimaryKey)
 		}
-		if c, _ := cust.Column(tg.id("name")); c.Nullable {
+		if c, _ := cust.Column(tg.id("name")); c.Nullable && !tg.NoNotNull {
 			t.Error("customers.name should be NOT NULL")
 		}
 		if c, _ := cust.Column(tg.id("email")); !c.Nullable {
@@ -298,7 +319,11 @@ func Run(t *testing.T, tg Target) {
 
 	t.Run("Streaming", func(t *testing.T) {
 		s := session(t, conn)
-		res, err := s.Execute(ctx, "SELECT * FROM "+d.Qualified(tg.ref("big"))+" ORDER BY "+d.Quote(tg.id("id")))
+		q := "SELECT * FROM " + d.Qualified(tg.ref("big"))
+		if !tg.NoOrderBy {
+			q += " ORDER BY " + d.Quote(tg.id("id"))
+		}
+		res, err := s.Execute(ctx, q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -469,6 +494,25 @@ func Run(t *testing.T, tg Target) {
 		// the session survives errors (also inside a transaction)
 		if v := scalar(t, s, "SELECT COUNT(*) FROM "+d.Qualified(tg.ref("customers"))); v == "" {
 			t.Fatal("session unusable after error")
+		}
+	})
+
+	t.Run("ValueTypes", func(t *testing.T) {
+		// every value is normalized to the documented Row value set
+		s := session(t, conn)
+		cols, rows, err := Query(ctx, s, "SELECT * FROM "+d.Qualified(tg.ref("all_types")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			for i, v := range r {
+				switch v.(type) {
+				case nil, string, int64, uint64, float64, bool, time.Time, []byte, []any, map[string]any:
+				default:
+					t.Errorf("column %s (%s): unnormalized value %T", cols[i].Name, cols[i].DBType, v)
+				}
+				_ = db.CellText(v, cols[i].Kind)
+			}
 		}
 	})
 

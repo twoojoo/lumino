@@ -218,7 +218,8 @@ func typesRoundTrip(t *testing.T, ctx context.Context, conn db.Conn, tg *Target)
 				}
 			}
 			lt := strings.ToLower(col.Type)
-			if col.Kind == db.KindText && col.Nullable && !strings.HasPrefix(lt, "enum") && !strings.HasPrefix(lt, "set") {
+			textual := strings.Contains(lt, "char") || strings.Contains(lt, "text") || strings.Contains(lt, "string") || strings.Contains(lt, "clob")
+			if col.Kind == db.KindText && col.Nullable && textual {
 				ch.Values[0].Value = ""
 				if _, err := db.ApplyChanges(ctx, s, caps, d, ref, []db.Change{ch}); err != nil {
 					t.Fatalf("write empty: %v", err)
@@ -312,7 +313,7 @@ func script(t *testing.T, ctx context.Context, conn db.Conn, tg *Target) {
 	d := conn.Dialect()
 	cust := d.Qualified(tg.ref("customers"))
 	sc := "-- leading comment\nSELECT COUNT(*) FROM " + cust + ";\n/* block; comment */\nSELECT " + d.Quote(tg.id("name")) +
-		" FROM " + cust + " WHERE " + d.Quote(tg.id("name")) + " = 'a;b';\n"
+		" FROM " + cust + " WHERE " + d.Quote(tg.id("name")) + " = 'a;b'" + tg.FilterSuffix + ";\n"
 	stmts := sqlx.Split(sc, d.Lex())
 	if len(stmts) != 2 {
 		t.Fatalf("split into %d statements: %+v", len(stmts), stmts)

@@ -40,6 +40,10 @@ type Change struct {
 	Values []ColValue
 }
 
+// Raw is a value rendered verbatim into the statement (never bound): a
+// validated literal for types a driver can't bind from text.
+type Raw string
+
 // ChangeBuilder is implemented by dialects whose DML differs from the
 // standard (ClickHouse mutations, Cassandra).
 type ChangeBuilder interface {
@@ -59,6 +63,9 @@ func BuildChange(d Dialect, ref ObjectRef, ch Change, literal bool) (string, []a
 func StandardChange(d Dialect, ref ObjectRef, ch Change, literal bool) (string, []any) {
 	var args []any
 	val := func(cv ColValue) string {
+		if r, ok := cv.Value.(Raw); ok {
+			return string(r)
+		}
 		if literal {
 			return d.Literal(cv.Value, cv.Kind)
 		}

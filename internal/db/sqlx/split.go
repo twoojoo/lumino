@@ -196,6 +196,10 @@ func (sp *splitter) run() []Statement {
 				if up == "BEGIN" {
 					body = true
 				}
+			case "APPLY":
+				if sp.o.ApplyEndsBlock {
+					depth = max(0, depth-1)
+				}
 			case "END":
 				switch sp.nextWord(i + 1) {
 				case "IF", "LOOP", "WHILE", "REPEAT", "FOR":

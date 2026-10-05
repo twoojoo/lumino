@@ -66,7 +66,7 @@ type dialect struct{ db.BaseDialect }
 func newDialect() *dialect {
 	return &dialect{db.BaseDialect{
 		ID: "clickhouse", QuoteL: "`", QuoteR: "`", Fold: db.FoldNone, Params: db.ParamQuestion, LexOpts: lexOptions,
-		Reserved: db.WordSet("SELECT FROM WHERE GROUP ORDER BY HAVING LIMIT JOIN AS ON AND OR NOT IN IS NULL TABLE DATABASE FORMAT SETTINGS FINAL"),
+		Reserved:   db.WordSet("SELECT FROM WHERE GROUP ORDER BY HAVING LIMIT JOIN AS ON AND OR NOT IN IS NULL TABLE DATABASE FORMAT SETTINGS FINAL"),
 		KeywordSet: keywords, FuncList: functions, TypeList: types, StringBackslash: true,
 		BytesLit: func(b []byte) string { return "unhex('" + hex.EncodeToString(b) + "')" },
 	}}

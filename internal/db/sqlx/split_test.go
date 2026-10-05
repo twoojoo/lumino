@@ -238,3 +238,12 @@ func TestReturnsRows(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitCQLBatch(t *testing.T) {
+	o := &Options{SlashComments: true, ApplyEndsBlock: true, BlockStart: func(w []string) bool { return w[0] == "BEGIN" }}
+	s := "BEGIN BATCH\nINSERT INTO t (a) VALUES (1);\nINSERT INTO t (a) VALUES (2);\nAPPLY BATCH;\n// c\nSELECT * FROM t;"
+	got := texts(Split(s, o))
+	if len(got) != 2 || !strings.HasSuffix(got[0], "APPLY BATCH") || got[1] != "SELECT * FROM t" {
+		t.Fatalf("got %q", got)
+	}
+}

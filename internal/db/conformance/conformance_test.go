@@ -6,12 +6,16 @@ package conformance
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/giovanni/lumino/internal/db"
+	_ "github.com/giovanni/lumino/internal/db/adapters/cassandra"
 	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
 	_ "github.com/giovanni/lumino/internal/db/adapters/cockroach"
 	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
@@ -205,5 +209,57 @@ func TestTrino(t *testing.T) {
 		BigRows: 100000,
 		Sleep:   "SELECT count(*) FROM tpch.sf100.lineitem WHERE comment LIKE '%xyz%'",
 		NoKeys:  true,
+	})
+}
+
+func TestScylla(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:    "scylla",
+		Config:  db.Config{Driver: "cassandra", Host: "127.0.0.1", Port: 55042},
+		Fixture: dbtest.Fixture("cassandra"),
+		Schema:  "lumino_test",
+		BigRows: 100000,
+		AfterLoad: func(ctx context.Context, c db.Conn) error {
+			// 100k rows in unlogged batches, 8 at a time
+			var wg sync.WaitGroup
+			errs := make(chan error, 8)
+			for w := 0; w < 8; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					s, err := c.Session(ctx)
+					if err != nil {
+						errs <- err
+						return
+					}
+					defer s.Close()
+					for b := w; b < 1000; b += 8 {
+						var sb strings.Builder
+						sb.WriteString("BEGIN UNLOGGED BATCH\n")
+						for i := b*100 + 1; i <= b*100+100; i++ {
+							fmt.Fprintf(&sb, "INSERT INTO lumino_test.big (id, label, v) VALUES (%d, 'row %d', %g);\n", i, i, float64(i)*0.5)
+						}
+						sb.WriteString("APPLY BATCH")
+						res, err := s.Execute(ctx, sb.String())
+						if err != nil {
+							errs <- err
+							return
+						}
+						res.Close()
+					}
+				}()
+			}
+			wg.Wait()
+			close(errs)
+			return <-errs
+		},
+		Samples:          map[string]string{"c_ts": "2024-02-29 13:14:15.123", "c_list": "-", "c_inet": "10.1.2.3", "c_varint": "123456789012345678901234567890"},
+		NoErrPosition:    true,
+		NoViews:          true,
+		Expect:           []db.ObjectType{db.ObjMatView},
+		UnorderedColumns: true,
+		NoNotNull:        true,
+		NoOrderBy:        true,
+		FilterSuffix:     " ALLOW FILTERING",
 	})
 }
