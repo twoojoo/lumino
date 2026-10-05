@@ -5,11 +5,14 @@
 package conformance
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/giovanni/lumino/internal/db"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
+	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
 	"github.com/giovanni/lumino/internal/db/dbtest"
 )
 
@@ -67,5 +70,20 @@ func TestTiDB(t *testing.T) {
 		Samples:       mysqlSamples,
 		NoErrPosition: true,
 		Expect:        []db.ObjectType{db.ObjSequence},
+	})
+}
+
+func TestSQLite(t *testing.T) {
+	dir, _ := filepath.Abs("../../../.dev")
+	_ = os.MkdirAll(dir, 0o755)
+	dbtest.Run(t, dbtest.Target{
+		Name:          "sqlite",
+		Config:        db.Config{Driver: "sqlite", File: filepath.Join(dir, "conformance.sqlite"), Params: map[string]string{"create": "true"}},
+		Fixture:       dbtest.Fixture("sqlite"),
+		Schema:        "main",
+		BigRows:       100000,
+		Sleep:         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+		Samples:       map[string]string{"c_dec": "12345678.1234"},
+		NoErrPosition: true,
 	})
 }
