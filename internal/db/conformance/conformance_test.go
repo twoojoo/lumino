@@ -13,6 +13,7 @@ import (
 
 	"github.com/giovanni/lumino/internal/db"
 	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
+	_ "github.com/giovanni/lumino/internal/db/adapters/cockroach"
 	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
@@ -176,5 +177,19 @@ func TestFirebird(t *testing.T) {
 		Sleep:   "SELECT COUNT(*) FROM big a, big b WHERE a.v + b.v < 0",
 		Samples: map[string]string{"c_int128": "170141183460469231731687303715884105727", "c_char": "abc", "c_ts": "2024-02-29 13:14:15.1234"},
 		Expect:  []db.ObjectType{db.ObjFunction, db.ObjProcedure, db.ObjSequence},
+	})
+}
+
+func TestCockroach(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:          "cockroach",
+		Config:        db.Config{Driver: "cockroachdb", Host: "127.0.0.1", Port: 55257, Database: "defaultdb", User: "root", TLS: db.TLSConfig{Mode: "disable"}},
+		Fixture:       dbtest.Fixture("cockroach"),
+		Schema:        "lumino_test",
+		BigRows:       100000,
+		Sleep:         "SELECT pg_sleep(30)",
+		Samples:       map[string]string{"c_arr": "{1,2,3}", "c_interval": "1 day 02:03:04"},
+		Expect:        []db.ObjectType{db.ObjMatView, db.ObjSequence},
+		NoErrPosition: true,
 	})
 }
