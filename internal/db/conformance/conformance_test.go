@@ -213,9 +213,17 @@ func TestTrino(t *testing.T) {
 }
 
 func TestScylla(t *testing.T) {
+	cqlSuite(t, "scylla", db.Config{Driver: "cassandra", Host: "127.0.0.1", Port: 55042})
+}
+
+func TestCassandra(t *testing.T) {
+	cqlSuite(t, "cassandra", db.Config{Driver: "cassandra", Host: "127.0.0.1", Port: 55043, User: "cassandra", Password: "cassandra"})
+}
+
+func cqlSuite(t *testing.T, name string, cfg db.Config) {
 	dbtest.Run(t, dbtest.Target{
-		Name:    "scylla",
-		Config:  db.Config{Driver: "cassandra", Host: "127.0.0.1", Port: 55042},
+		Name:    name,
+		Config:  cfg,
 		Fixture: dbtest.Fixture("cassandra"),
 		Schema:  "lumino_test",
 		BigRows: 100000,

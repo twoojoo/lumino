@@ -113,6 +113,20 @@ services:
     command: --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
     ports: ["127.0.0.1:55042:9042"]
 
+  cassandra:
+    image: cassandra:5.0
+    environment:
+      MAX_HEAP_SIZE: 768M
+      HEAP_NEWSIZE: 128M
+      CASSANDRA_AUTHENTICATOR: PasswordAuthenticator
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sed -i -e 's/^materialized_views_enabled: false/materialized_views_enabled: true/' \
+               -e 's/^user_defined_functions_enabled: false/user_defined_functions_enabled: true/' /etc/cassandra/cassandra.yaml
+        exec docker-entrypoint.sh cassandra -f
+    ports: ["127.0.0.1:55043:9042"]
+
   trino:
     image: trinodb/trino:476
     ports: ["127.0.0.1:55080:8080"]
@@ -125,7 +139,7 @@ services:
       USER_NAME: lumino
       USER_PASSWORD: lumino
       PASSWORD_ACCESS: "true"
-      PUBLIC_KEY_FILE: /keys/id_ed25519.pub
+      PUBLIC_KEY_DIR: /keys
       DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
     volumes:
       - ../../.dev/ssh:/keys:ro
