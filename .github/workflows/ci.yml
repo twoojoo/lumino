@@ -35,7 +35,7 @@ jobs:
       - run: make test GIO_TAGS=
 
   integration:
-    name: integration + UI screenshots (kind)
+    name: conformance of every adapter + UI screenshots
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +43,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $GIO_LINUX_DEPS xvfb mesa-utils libgl1-mesa-dri
-      - name: kind cluster (.dev/kubeconfig only)
-        run: make dev-up
+      # Oracle Free and Cassandra are too heavy for hosted runners: they run
+      # in the local suite (make db-up)
+      - name: development databases
+        run: make db-up DBS="postgres cockroach mysql mariadb tidb mssql clickhouse firebird scylla trino bastion"
       # headless Gio renders through EGL; Xvfb + Mesa llvmpipe provide it
       - run: xvfb-run -a make test-int GIO_TAGS=
       - if: always()
@@ -76,9 +78,8 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb libegl1 libgles2 libgl1-mesa-dri \
             libwayland-client0 libwayland-egl1 libwayland-cursor0 libxkbcommon-x11-0 libx11-xcb1 libxcursor1
-          printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > /tmp/empty-kubeconfig
           set +e
-          xvfb-run -a timeout 15 dist/linux-${{ matrix.arch }}/lumino --kubeconfig /tmp/empty-kubeconfig </dev/null
+          LUMINO_CONFIG_DIR=/tmp/lumino-smoke xvfb-run -a timeout 15 dist/linux-${{ matrix.arch }}/lumino </dev/null
           code=$?
           set -e
           [ "$code" = 124 ] || { echo "lumino exited early with $code"; exit 1; }
@@ -112,9 +113,9 @@ jobs:
       - name: smoke test (start, must stay up)
         shell: pwsh
         run: |
-          "apiVersion: v1`nkind: Config`nclusters: []`ncontexts: []`nusers: []" | Set-Content "$env:RUNNER_TEMP\empty-kubeconfig"
           & dist\windows-amd64\lumino.exe --version
-          $p = Start-Process -FilePath dist\windows-amd64\lumino.exe -ArgumentList "--kubeconfig", "$env:RUNNER_TEMP\empty-kubeconfig" -PassThru
+          $env:LUMINO_CONFIG_DIR = "$env:RUNNER_TEMP\lumino-smoke"
+          $p = Start-Process -FilePath dist\windows-amd64\lumino.exe -PassThru
           Start-Sleep -Seconds 15
           if ($p.HasExited) { throw "lumino exited early with $($p.ExitCode)" }
           Stop-Process -Id $p.Id
@@ -165,8 +166,7 @@ jobs:
         run: make package-macos
       - name: smoke test (start, must stay up)
         run: |
-          printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > "$RUNNER_TEMP/empty-kubeconfig"
-          dist/macos/Lumino.app/Contents/MacOS/lumino --kubeconfig "$RUNNER_TEMP/empty-kubeconfig" </dev/null &
+          LUMINO_CONFIG_DIR="$RUNNER_TEMP/lumino-smoke" dist/macos/Lumino.app/Contents/MacOS/lumino </dev/null &
           pid=$!
           sleep 15
           kill -0 $pid || { wait $pid; echo "lumino exited early with $?"; exit 1; }

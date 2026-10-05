@@ -11,7 +11,7 @@
           "name": "lumino",
           "version": ""
         },
-        "description": "Lumino — native Kubernetes IDE",
+        "description": "Lumino — native database IDE",
         "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,

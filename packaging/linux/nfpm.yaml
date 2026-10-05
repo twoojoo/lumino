@@ -8,9 +8,10 @@ section: devel
 priority: optional
 maintainer: twoojoo <giovanni.campeol.95@gmail.com>
 description: |
-  Native Kubernetes IDE powered by the k9s engine.
-  Live resource tables, logs, shell, port-forwards, Helm, XRay, YAML editing
-  with diff review, sanitizer, RBAC explorer and an AI assistant.
+  Fast, native database IDE: PostgreSQL, MySQL, MariaDB, SQLite, SQL Server,
+  Oracle, ClickHouse, CockroachDB, TiDB, Firebird, Cassandra/ScyllaDB, Trino.
+  SQL console with completion, streaming grids, table editing, DDL, SSH
+  tunnels, TLS and an AI assistant.
 homepage: https://github.com/twoojoo/lumino
 license: Proprietary
 depends:

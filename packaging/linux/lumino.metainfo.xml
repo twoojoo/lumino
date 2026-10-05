@@ -3,12 +3,14 @@
   <id>io.github.twoojoo.lumino</id>
   <metadata_license>CC0-1.0</metadata_license>
   <name>Lumino</name>
-  <summary>Native Kubernetes IDE powered by the k9s engine</summary>
+  <summary>Fast, native database IDE</summary>
   <description>
     <p>
-      Lumino is a fast, native desktop IDE for Kubernetes: live resource tables,
-      logs, shell, port-forwards, Helm, XRay, YAML editing with diff review,
-      cluster sanitizer, RBAC explorer and an AI assistant with read-only tools.
+      Lumino is a fast, native desktop IDE for databases: PostgreSQL, MySQL,
+      MariaDB, SQLite, SQL Server, Oracle, ClickHouse, CockroachDB, TiDB,
+      Firebird, Cassandra/ScyllaDB and Trino. SQL console with completion,
+      streaming result grids, table editing, DDL, SSH tunnels, TLS and an AI
+      assistant with read-only tools.
     </p>
   </description>
   <launchable type="desktop-id">lumino.desktop</launchable>

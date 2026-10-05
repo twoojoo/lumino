@@ -1,6 +1,6 @@
 # Lumino releases
 
-Downloads of **Lumino**, a native Kubernetes IDE. This repository only hosts
+Downloads of **Lumino**, a fast, native database IDE. This repository only hosts
 release packages; the source code is not public.
 
 Get the latest version from [Releases](https://github.com/twoojoo/lumino-releases/releases/latest):
@@ -20,7 +20,7 @@ Lumino updates itself from here (Preferences → Updates). Installs from
 Lumino release key (ed25519, `SHA256SUMS.txt.sig`, base64). Public key:
 
 ```
-pX1Dosf+ulIw6K2Q6uyYvCbwz99oGrYDw3AmXOLltvg=
+CK1TEM6TZg/WTFIoj/e46uM9J5TtSx7RFQ5P6fUXFGE=
 ```
 
 The self-updater refuses any file that doesn't match a checksum signed with
@@ -31,7 +31,7 @@ then verify the signature with any ed25519 tool, e.g. in Python with
 ```python
 import base64
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-key = Ed25519PublicKey.from_public_bytes(base64.b64decode("pX1Dosf+ulIw6K2Q6uyYvCbwz99oGrYDw3AmXOLltvg="))
+key = Ed25519PublicKey.from_public_bytes(base64.b64decode("CK1TEM6TZg/WTFIoj/e46uM9J5TtSx7RFQ5P6fUXFGE="))
 key.verify(base64.b64decode(open("SHA256SUMS.txt.sig").read()), open("SHA256SUMS.txt", "rb").read())
 print("signature ok")
 ```
