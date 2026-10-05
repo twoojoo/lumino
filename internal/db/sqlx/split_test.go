@@ -222,15 +222,15 @@ func TestLexLineState(t *testing.T) {
 
 func TestReturnsRows(t *testing.T) {
 	cases := map[string]bool{
-		"select 1":                          true,
-		"  (select 1)":                      true,
-		"-- c\nWITH x AS (select 1) select *": true,
-		"insert into t values (1)":          false,
+		"select 1":                              true,
+		"  (select 1)":                          true,
+		"-- c\nWITH x AS (select 1) select *":   true,
+		"insert into t values (1)":              false,
 		"insert into t values (1) returning id": true,
-		"update t set a=1":                  false,
-		"create table x (a int)":            false,
-		"show tables":                       true,
-		"DELETE FROM t OUTPUT deleted.*":    true,
+		"update t set a=1":                      false,
+		"create table x (a int)":                false,
+		"show tables":                           true,
+		"DELETE FROM t OUTPUT deleted.*":        true,
 	}
 	for s, want := range cases {
 		if got := ReturnsRows(s, &pgOpts); got != want {

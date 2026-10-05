@@ -234,7 +234,9 @@ func (c *catalog) Schemas(ctx context.Context, _ string) ([]db.Schema, error) {
 	return out, nil
 }
 
-func (c *catalog) master(schema string) string { return c.d.QuoteAlways(schemaOr(schema)) + ".sqlite_master" }
+func (c *catalog) master(schema string) string {
+	return c.d.QuoteAlways(schemaOr(schema)) + ".sqlite_master"
+}
 
 func schemaOr(s string) string {
 	if s == "" {

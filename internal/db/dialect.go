@@ -76,8 +76,8 @@ type BaseDialect struct {
 	QualifyCatalog bool
 }
 
-func (d *BaseDialect) Name() string         { return d.ID }
-func (d *BaseDialect) Lex() *sqlx.Options   { return &d.LexOpts }
+func (d *BaseDialect) Name() string        { return d.ID }
+func (d *BaseDialect) Lex() *sqlx.Options  { return &d.LexOpts }
 func (d *BaseDialect) Functions() []string { return d.FuncList }
 func (d *BaseDialect) Types() []string     { return d.TypeList }
 

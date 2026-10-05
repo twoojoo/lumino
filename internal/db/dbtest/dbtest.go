@@ -32,8 +32,8 @@ type Target struct {
 	Sleep string
 	// Count returns rows of a table: SELECT COUNT(*) FROM <t>.
 	// Quirks:
-	EmptyIsNull   bool // '' is NULL (Oracle)
-	NoErrPosition bool // errors carry no statement position
+	EmptyIsNull    bool // '' is NULL (Oracle)
+	NoErrPosition  bool // errors carry no statement position
 	NoDDLRoundTrip bool
 	// TypeColumns of all_types to round-trip through the editor
 	// (column → literal text to write); empty = all non-key columns with

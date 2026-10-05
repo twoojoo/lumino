@@ -124,9 +124,9 @@ func (sp *splitter) run() []Statement {
 	toks := sp.toks
 	start := -1 // offset of the current statement, -1 = none
 	var words []string
-	block := false   // the statement has BEGIN … END bodies
-	depth := 0       // BEGIN/CASE nesting in depth mode
-	body := false    // a BEGIN body was opened
+	block := false // the statement has BEGIN … END bodies
+	depth := 0     // BEGIN/CASE nesting in depth mode
+	body := false  // a BEGIN body was opened
 	skipCase := false
 	lineStart := true
 	for i := 0; i < len(toks); {

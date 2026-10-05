@@ -97,6 +97,7 @@ const (
 	ObjTrigger   ObjectType = "trigger"
 	ObjIndex     ObjectType = "index"
 	ObjType      ObjectType = "type"
+	ObjPackage   ObjectType = "package"
 	ObjSchema    ObjectType = "schema"
 	ObjCatalog   ObjectType = "catalog"
 )
@@ -122,6 +123,8 @@ func (t ObjectType) Plural() string {
 		return "Indexes"
 	case ObjType:
 		return "Types"
+	case ObjPackage:
+		return "Packages"
 	}
 	return string(t)
 }

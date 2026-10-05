@@ -14,6 +14,7 @@ import (
 	"github.com/giovanni/lumino/internal/db"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
+	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
 	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
 	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
 	"github.com/giovanni/lumino/internal/db/dbtest"
@@ -132,4 +133,19 @@ func createDB(t *testing.T, cfg db.Config, stmt string) {
 		}
 		time.Sleep(3 * time.Second)
 	}
+}
+
+func TestOracle(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:        "oracle",
+		Config:      db.Config{Driver: "oracle", Host: "127.0.0.1", Port: 55521, Database: "FREEPDB1", User: "lumino", Password: "lumino"},
+		Fixture:     dbtest.Fixture("oracle"),
+		Schema:      "LUMINO",
+		Upper:       true,
+		BigRows:     100000,
+		Sleep:       "SELECT COUNT(*) FROM big a, big b WHERE a.v + b.v < 0",
+		Samples:     map[string]string{"c_bool": "1", "c_date": "2024-02-29", "c_nvarchar": "ñandú ✓"},
+		EmptyIsNull: true,
+		Expect:      []db.ObjectType{db.ObjFunction, db.ObjProcedure, db.ObjSequence, db.ObjMatView, db.ObjPackage},
+	})
 }

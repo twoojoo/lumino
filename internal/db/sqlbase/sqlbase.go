@@ -23,6 +23,8 @@ type Hooks struct {
 	// Kind maps a database type name (as reported by ColumnTypes, upper
 	// case) to a value kind. Unknown types fall back to the scan type.
 	Kind func(dbType string) db.Kind
+	// Column adjusts a result column (e.g. NUMBER(10,0) is an integer).
+	Column func(c *db.Column)
 	// Convert adjusts a scanned value before db.Normalize (e.g. decode
 	// MySQL []byte to the right type).
 	Convert func(col *db.Column, v any) any
@@ -35,7 +37,7 @@ type Hooks struct {
 	// Cancel aborts the statement running on a session out of band. When
 	// it returns true the statement's context is left alone (cancelling it
 	// would close the connection with some drivers).
-	Cancel func(ctx context.Context, db *sql.DB, sessionID string) bool
+	Cancel           func(ctx context.Context, db *sql.DB, sessionID string) bool
 	CurrentSchema    func(ctx context.Context, q Querier) (string, error)
 	SetCurrentSchema func(ctx context.Context, q Querier, schema string) error
 	SetReadOnly      func(ctx context.Context, q Querier, on bool) error
@@ -438,6 +440,9 @@ func (r *Result) loadColumns() error {
 	r.cols = make([]db.Column, len(cts))
 	for i, ct := range cts {
 		r.cols[i] = ColumnOf(ct, r.s.c.H.Kind)
+		if f := r.s.c.H.Column; f != nil {
+			f(&r.cols[i])
+		}
 	}
 	r.done = len(r.cols) == 0
 	return nil

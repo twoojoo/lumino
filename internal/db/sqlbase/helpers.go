@@ -155,3 +155,32 @@ func Wants(types []db.ObjectType, t db.ObjectType) bool {
 	}
 	return false
 }
+
+// Q is a query for RecsParallel.
+type Q struct {
+	SQL  string
+	Args []any
+}
+
+// RecsParallel runs independent metadata queries concurrently (catalogs
+// whose dictionary views are slow per query, e.g. Oracle).
+func RecsParallel(ctx context.Context, q Querier, qs ...Q) ([][]Rec, error) {
+	out := make([][]Rec, len(qs))
+	errs := make([]error, len(qs))
+	done := make(chan struct{}, len(qs))
+	for i, x := range qs {
+		go func() {
+			out[i], errs[i] = Recs(ctx, q, x.SQL, x.Args...)
+			done <- struct{}{}
+		}()
+	}
+	for range qs {
+		<-done
+	}
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
