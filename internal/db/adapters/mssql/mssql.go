@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -104,9 +105,70 @@ func (d *dialect) Literal(v any, k db.Kind) string {
 		}
 		return d.QuoteString(x)
 	case time.Time:
+		if k == db.KindTimestamp {
+			// ISO 8601 with T: language neutral for datetime too, which
+			// rejects 'YYYY-MM-DD hh:mm' under DATEFORMAT dmy. Not N'…': a
+			// string converts to the column type, so a datetime value read
+			// as .003 matches the stored 1/300 s tick.
+			return "'" + strings.Replace(db.FormatTime(x, k), " ", "T", 1) + "'"
+		}
 		return d.QuoteString(db.FormatTime(x, k))
 	}
 	return d.BaseDialect.Literal(v, k)
+}
+
+// datetimeKey reports a key value that may come from a datetime or
+// smalldatetime column: the driver reads datetime ticks (1/300 s) rounded to
+// milliseconds, which differ from the stored value once bound as
+// datetimeoffset.
+func datetimeKey(cv db.ColValue) bool {
+	t, ok := cv.Value.(time.Time)
+	return ok && cv.Kind == db.KindTimestamp && t.Nanosecond()%int(time.Millisecond) == 0
+}
+
+// BuildChange matches datetime keys both as bound and rounded to datetime.
+func (d *dialect) BuildChange(ref db.ObjectRef, ch db.Change, literal bool) (string, []any) {
+	if literal || ch.Op == db.OpInsert {
+		return db.StandardChange(d, ref, ch, literal)
+	}
+	var args []any
+	val := func(cv db.ColValue) string {
+		if r, ok := cv.Value.(db.Raw); ok {
+			return string(r)
+		}
+		if cv.Value == nil {
+			return "NULL"
+		}
+		args = append(args, cv.Value)
+		return d.Placeholder(len(args))
+	}
+	var b strings.Builder
+	table := d.Qualified(ref)
+	if ch.Op == db.OpUpdate {
+		sets := make([]string, len(ch.Values))
+		for i, cv := range ch.Values {
+			sets[i] = d.Quote(cv.Column) + " = " + val(cv)
+		}
+		fmt.Fprintf(&b, "UPDATE %s SET %s WHERE ", table, strings.Join(sets, ", "))
+	} else {
+		fmt.Fprintf(&b, "DELETE FROM %s WHERE ", table)
+	}
+	for i, cv := range ch.Key {
+		if i > 0 {
+			b.WriteString(" AND ")
+		}
+		c := d.Quote(cv.Column)
+		switch {
+		case cv.Value == nil:
+			b.WriteString(c + " IS NULL")
+		case datetimeKey(cv):
+			p := val(cv)
+			fmt.Fprintf(&b, "(%s = %s OR %s = TRY_CAST(%s AS datetime))", c, p, c, p)
+		default:
+			b.WriteString(c + " = " + val(cv))
+		}
+	}
+	return b.String(), args
 }
 
 // KindOf maps SQL Server type names.
@@ -188,7 +250,9 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	for k, v := range cfg.Params {
 		q.Set(k, v)
 	}
-	u := &url.URL{Scheme: "sqlserver", User: url.UserPassword(cfg.User, cfg.Password), Host: fmt.Sprintf("%s:%d", host, port), RawQuery: q.Encode()}
+	// IPv6 addresses need brackets in the URL
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	u := &url.URL{Scheme: "sqlserver", User: url.UserPassword(cfg.User, cfg.Password), Host: net.JoinHostPort(host, strconv.Itoa(port)), RawQuery: q.Encode()}
 	connector, err := mssql.NewConnector(u.String())
 	if err != nil {
 		return nil, err
@@ -217,7 +281,8 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 }
 
 // returnsRows: T-SQL batches often mix statements (DECLARE …; SELECT …);
-// everything but plain DML/DDL is run as a query.
+// everything but plain DML/DDL is run as a query, and so are DML/SET/PRINT…
+// batches followed by a statement returning rows (UPDATE …; SELECT @@ROWCOUNT).
 func returnsRows(stmt string) bool {
 	w := sqlx.Words(stmt, &lexOptions, 1)
 	if len(w) == 0 {
@@ -225,12 +290,77 @@ func returnsRows(stmt string) bool {
 	}
 	switch w[0] {
 	case "INSERT", "UPDATE", "DELETE", "MERGE":
-		return sqlx.ReturnsRows(stmt, &lexOptions)
-	case "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE", "DENY", "USE", "SET", "BEGIN", "COMMIT",
-		"ROLLBACK", "SAVE", "PRINT", "RAISERROR", "THROW", "DBCC", "BACKUP", "RESTORE", "KILL":
+		return sqlx.ReturnsRows(stmt, &lexOptions) || laterRows(stmt)
+	case "CREATE", "ALTER":
+		// procedure, function, trigger and view bodies contain SELECTs
 		return false
+	case "DROP", "TRUNCATE", "GRANT", "REVOKE", "DENY", "USE", "SET", "BEGIN", "COMMIT",
+		"ROLLBACK", "SAVE", "PRINT", "RAISERROR", "THROW", "DBCC", "BACKUP", "RESTORE", "KILL":
+		return laterRows(stmt)
 	}
 	return true
+}
+
+// laterRows reports a top-level SELECT, EXEC or WITH … statement after the
+// first one: not in parentheses, not the source of an INSERT, not a UNION
+// branch, a cursor query or a table hint.
+func laterRows(stmt string) bool {
+	depth, words := 0, 0
+	prev := ""
+	insertSource := false // an INSERT is waiting for VALUES/SELECT/EXEC/DEFAULT
+	toks := sqlx.Tokens(stmt, &lexOptions)
+	for i, t := range toks {
+		txt := stmt[t.Start:t.End]
+		switch t.Kind {
+		case sqlx.TSpace, sqlx.TComment:
+			continue
+		case sqlx.TPunct:
+			switch txt {
+			case "(":
+				depth++
+			case ")":
+				depth = max(0, depth-1)
+			}
+		case sqlx.TWord:
+			up := strings.ToUpper(txt)
+			words++
+			if depth == 0 && (words > 1 || up == "INSERT") && startsRows(up, prev, toks[i+1:], &insertSource) {
+				return true
+			}
+			prev = up
+			continue
+		}
+		prev = txt
+	}
+	return false
+}
+
+func startsRows(up, prev string, rest []sqlx.Token, insertSource *bool) bool {
+	switch up {
+	case "INSERT":
+		*insertSource = true
+	case "VALUES", "DEFAULT":
+		*insertSource = false
+	case "WITH":
+		// a CTE (WITH name AS …), not a table hint (WITH (ROWLOCK))
+		for _, n := range rest {
+			if n.Kind == sqlx.TSpace || n.Kind == sqlx.TComment {
+				continue
+			}
+			return n.Kind == sqlx.TWord || n.Kind == sqlx.TQuotedIdent
+		}
+	case "SELECT", "EXEC", "EXECUTE":
+		if *insertSource {
+			*insertSource = false
+			return false
+		}
+		switch prev {
+		case "UNION", "ALL", "EXCEPT", "INTERSECT", "FOR":
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // convert fixes the driver's raw values.

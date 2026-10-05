@@ -123,8 +123,11 @@ func KindOf(t string) db.Kind {
 		return db.KindBool
 	case "DATE":
 		return db.KindDate
-	case "TIME", "TIMETZ":
+	case "TIME":
 		return db.KindTime
+	case "TIMETZ":
+		// kept as text: time values can't carry a zone offset
+		return db.KindText
 	case "TIMESTAMP":
 		return db.KindTimestamp
 	case "TIMESTAMPTZ":
@@ -167,6 +170,8 @@ func KindOfFormatted(t string) db.Kind {
 		return db.KindTimestampTZ
 	case strings.HasPrefix(l, "timestamp"):
 		return db.KindTimestamp
+	case strings.HasPrefix(l, "time") && strings.Contains(l, "with time zone"):
+		return db.KindText
 	case strings.HasPrefix(l, "time"):
 		return db.KindTime
 	case strings.HasPrefix(l, "interval"):

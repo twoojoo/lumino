@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,9 +65,6 @@ func ConnConfig(cfg *db.Config, defPort int, defDB string) (*pgx.ConnConfig, err
 	cc.Fallbacks = nil
 	cc.RuntimeParams = map[string]string{"application_name": "lumino"}
 	cc.OnNotice = collectNotice
-	for k, v := range cfg.Params {
-		cc.RuntimeParams[k] = v
-	}
 	tc, err := cfg.TLS.TLS(host)
 	if err != nil {
 		return nil, err
@@ -84,7 +82,104 @@ func ConnConfig(cfg *db.Config, defPort int, defDB string) (*pgx.ConnConfig, err
 			}
 		}
 	}
+	if err := applyParams(cc, cfg, host, uint16(port)); err != nil {
+		return nil, err
+	}
 	return cc, nil
+}
+
+// libpqOnly are connection-string keywords that aren't server settings:
+// sending them as startup parameters fails with "unrecognized
+// configuration parameter".
+var libpqOnly = map[string]bool{
+	"host": true, "hostaddr": true, "port": true, "dbname": true, "database": true, "user": true, "password": true,
+	"passfile": true, "connect_timeout": true,
+	"fallback_application_name": true, "keepalives": true, "keepalives_idle": true, "keepalives_interval": true,
+	"keepalives_count": true, "tcp_user_timeout": true, "gssencmode": true, "gsslib": true,
+	"gssdelegation": true, "sslmode": true, "sslnegotiation": true, "sslcompression": true, "sslcert": true,
+	"sslkey": true, "sslpassword": true, "sslcertmode": true, "sslrootcert": true, "sslcrl": true, "sslcrldir": true,
+	"sslsni": true, "requirepeer": true, "requiressl": true, "ssl_min_protocol_version": true,
+	"ssl_max_protocol_version": true, "min_protocol_version": true, "max_protocol_version": true,
+	"krbsrvname": true, "krbspn": true, "service": true, "servicefile": true, "target_session_attrs": true,
+	"load_balance_hosts": true, "channel_binding": true, "require_auth": true, "statement_cache_capacity": true,
+	"description_cache_capacity": true, "default_query_exec_mode": true,
+}
+
+// applyParams routes the connection parameters: libpq keywords configure
+// the connection, everything else is sent as a server setting.
+func applyParams(cc *pgx.ConnConfig, cfg *db.Config, host string, port uint16) error {
+	ssl := map[string]string{}
+	for k, v := range cfg.Params {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if !libpqOnly[key] {
+			cc.RuntimeParams[k] = v
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch key {
+		case "connect_timeout":
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return fmt.Errorf("invalid connect_timeout %q", v)
+			}
+			// libpq: 0 means wait forever, values below 2 count as 2
+			if n == 0 {
+				cc.ConnectTimeout = 0
+			} else {
+				cc.ConnectTimeout = time.Duration(max(n, 2)) * time.Second
+			}
+		case "fallback_application_name":
+			if _, ok := cfg.Params["application_name"]; !ok {
+				cc.RuntimeParams["application_name"] = v
+			}
+		case "target_session_attrs":
+			switch v {
+			case "", "any", "prefer-standby":
+				cc.ValidateConnect = nil
+			case "read-write":
+				cc.ValidateConnect = pgconn.ValidateConnectTargetSessionAttrsReadWrite
+			case "read-only":
+				cc.ValidateConnect = pgconn.ValidateConnectTargetSessionAttrsReadOnly
+			case "primary":
+				cc.ValidateConnect = pgconn.ValidateConnectTargetSessionAttrsPrimary
+			case "standby":
+				cc.ValidateConnect = pgconn.ValidateConnectTargetSessionAttrsStandby
+			default:
+				return fmt.Errorf("invalid target_session_attrs %q", v)
+			}
+		case "sslmode", "sslrootcert", "sslcert", "sslkey", "sslpassword", "sslsni", "sslnegotiation":
+			ssl[key] = v
+		}
+		// other keywords (keepalives, gssencmode…) have no pgx equivalent
+		// here: ignored rather than sent to the server
+	}
+	// ssl* keywords apply only when the TLS settings are left to the default
+	if len(ssl) > 0 && cfg.TLS.Mode == "" {
+		if ssl["sslmode"] == "" {
+			ssl["sslmode"] = "prefer"
+		}
+		conn := "host=" + quoteConnValue(host)
+		for k, v := range ssl {
+			conn += " " + k + "=" + quoteConnValue(v)
+		}
+		pc, err := pgconn.ParseConfig(conn)
+		if err != nil {
+			return fmt.Errorf("TLS parameters: %w", err)
+		}
+		cc.TLSConfig = pc.TLSConfig
+		cc.Fallbacks = nil
+		for _, fb := range pc.Fallbacks {
+			f := *fb
+			f.Host, f.Port = host, port
+			cc.Fallbacks = append(cc.Fallbacks, &f)
+		}
+	}
+	return nil
+}
+
+// quoteConnValue quotes a key=value connection string value.
+func quoteConnValue(v string) string {
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
 // OpenDB opens the pool.

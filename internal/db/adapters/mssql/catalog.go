@@ -263,10 +263,62 @@ FROM sys.sequences WHERE object_id = OBJECT_ID(@p1)`, c.d.QuoteAlways(ref.Schema
 		return "", err
 	}
 	q := c.d.Quote
+	id, err := c.objectID(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	persisted := map[string]bool{}
+	pc, err := sqlbase.Strings(ctx, c.db, `SELECT name FROM sys.computed_columns WHERE object_id = @p1 AND is_persisted = 1`, id)
+	if err != nil {
+		return "", mapError(err)
+	}
+	for _, n := range pc {
+		persisted[n] = true
+	}
+	// index key columns with their direction, and included columns
+	ixKeys, ixIncl := map[string][]string{}, map[string][]string{}
+	ixc, err := sqlbase.Recs(ctx, c.db, `
+SELECT i.name, col.name AS col, ic.is_descending_key AS descending, ic.is_included_column AS included
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id
+WHERE i.object_id = @p1 AND i.type > 0
+ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`, id)
+	if err != nil {
+		return "", mapError(err)
+	}
+	for _, r := range ixc {
+		if r.Bool("included") {
+			ixIncl[r["name"]] = append(ixIncl[r["name"]], q(r["col"]))
+			continue
+		}
+		k := q(r["col"])
+		if r.Bool("descending") {
+			k += " DESC"
+		}
+		ixKeys[r["name"]] = append(ixKeys[r["name"]], k)
+	}
+	keys := func(ix db.Index) string {
+		if k, ok := ixKeys[ix.Name]; ok {
+			return strings.Join(k, ", ")
+		}
+		out := make([]string, len(ix.Columns))
+		for i, x := range ix.Columns {
+			out[i] = q(x)
+		}
+		return strings.Join(out, ", ")
+	}
 	var defs []string
 	for _, col := range t.Columns {
 		if col.Generated != "" {
-			defs = append(defs, "    "+q(col.Name)+" AS "+col.Generated)
+			s := "    " + q(col.Name) + " AS " + col.Generated
+			if persisted[col.Name] {
+				s += " PERSISTED"
+				if !col.Nullable {
+					s += " NOT NULL"
+				}
+			}
+			defs = append(defs, s)
 			continue
 		}
 		s := "    " + q(col.Name) + " " + col.Type
@@ -291,15 +343,18 @@ FROM sys.sequences WHERE object_id = OBJECT_ID(@p1)`, c.d.QuoteAlways(ref.Schema
 	for _, ix := range t.Indexes {
 		switch {
 		case ix.Primary:
-			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), list(ix.Columns)))
+			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), keys(ix)))
 		case isConstraint(t, ix.Name):
-			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s UNIQUE %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), list(ix.Columns)))
+			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s UNIQUE %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), keys(ix)))
 		default:
 			u := ""
 			if ix.Unique {
 				u = "UNIQUE "
 			}
-			s := fmt.Sprintf("CREATE %s%s INDEX %s ON %s (%s)", u, strings.ToUpper(ix.Method), q(ix.Name), c.d.Qualified(ref), list(ix.Columns))
+			s := fmt.Sprintf("CREATE %s%s INDEX %s ON %s (%s)", u, strings.ToUpper(ix.Method), q(ix.Name), c.d.Qualified(ref), keys(ix))
+			if inc := ixIncl[ix.Name]; len(inc) > 0 {
+				s += " INCLUDE (" + strings.Join(inc, ", ") + ")"
+			}
 			if ix.Where != "" {
 				s += " WHERE " + ix.Where
 			}

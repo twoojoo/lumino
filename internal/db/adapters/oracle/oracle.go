@@ -103,6 +103,24 @@ func newDialect() *dialect {
 	return d
 }
 
+// BuildChange inlines date/time values as literals: go-ora binds time.Time
+// converted through the client time zone, so DATE keys would match only
+// with a UTC client.
+func (d *dialect) BuildChange(ref db.ObjectRef, ch db.Change, literal bool) (string, []any) {
+	inline := func(vals []db.ColValue) []db.ColValue {
+		out := make([]db.ColValue, len(vals))
+		for i, cv := range vals {
+			if t, ok := cv.Value.(time.Time); ok {
+				cv.Value = db.Raw(d.Literal(t, cv.Kind))
+			}
+			out[i] = cv
+		}
+		return out
+	}
+	ch.Values, ch.Key = inline(ch.Values), inline(ch.Key)
+	return db.StandardChange(d, ref, ch, literal)
+}
+
 // KindOf maps go-ora type names.
 func KindOf(t string) db.Kind {
 	switch strings.ToUpper(t) {
