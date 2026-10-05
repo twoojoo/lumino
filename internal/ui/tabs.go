@@ -136,18 +136,24 @@ func (a *App) openObject(connID string, ref db.ObjectRef, view string) {
 
 // restoreTabs reopens the saved workspace (connections connect lazily).
 func (a *App) restoreTabs() {
-	for _, st := range a.prefs.Tabs {
+	active := 0
+	for i, st := range a.prefs.Tabs {
 		if _, ok := a.prefs.Conn(st.ConnID); !ok {
-			continue
+			continue // its connection was deleted
 		}
 		switch st.Kind {
 		case "console":
 			a.tabs = append(a.tabs, newConsoleTab(a, st))
 		case "table":
 			a.tabs = append(a.tabs, newTableTab(a, st))
+		default:
+			continue
+		}
+		if i <= a.prefs.ActiveTab {
+			active = len(a.tabs) - 1 // the saved active tab, or the closest before it
 		}
 	}
-	a.tabIdx = max(0, min(a.prefs.ActiveTab, len(a.tabs)-1))
+	a.tabIdx = max(0, min(active, len(a.tabs)-1))
 }
 
 // saveWorkspace persists open tabs and console text.
@@ -296,6 +302,33 @@ func (a *App) currentSchema() string {
 
 // requestClose asks before quitting with open transactions or unsaved
 // edits, then runs close.
+// requestDisconnect disconnects id, asking first when its tabs hold open
+// transactions or unsaved edits; then runs afterwards (may be nil).
+func (a *App) requestDisconnect(id string, then func()) {
+	var why []string
+	for _, t := range a.tabs {
+		if t.ConnID() != id {
+			continue
+		}
+		if d := t.Dirty(); d != "" {
+			why = append(why, "• "+t.Title()+": "+d)
+		}
+	}
+	do := func() {
+		a.disconnect(id)
+		if then != nil {
+			then()
+		}
+	}
+	if len(why) == 0 {
+		do()
+		return
+	}
+	c := newConfirm(a, "Disconnect "+a.connState(id).name()+"?", strings.Join(why, "\n")+"\n\nOpen transactions are rolled back and running statements cancelled.", true, func(bool) { do() })
+	c.okLabel = "Disconnect"
+	a.overlay = c
+}
+
 func (a *App) requestClose(close func()) {
 	var why []string
 	for _, t := range a.tabs {

@@ -775,7 +775,7 @@ func (s *Sidebar) contextMenu(r treeRow) {
 	case nConn:
 		if cs.status == stReady {
 			add(icConsole, "New console", shortcutLabel("T"), false, func() { a.newConsole(r.connID, cs.defaultSchema(""), "") })
-			add(icPlug, "Disconnect", "", false, func() { a.disconnect(r.connID) })
+			add(icPlug, "Disconnect", "", false, func() { a.requestDisconnect(r.connID, nil) })
 		} else {
 			add(icPlug, "Connect", "", false, func() {
 				cs.status = stIdle

@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
-	"fmt"
+	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -249,7 +251,7 @@ func (c *Config) Addr(defPort int) string {
 	if p == 0 {
 		p = defPort
 	}
-	return fmt.Sprintf("%s:%d", c.Host, p)
+	return net.JoinHostPort(strings.Trim(c.Host, "[]"), strconv.Itoa(p))
 }
 
 // Param returns a driver parameter.

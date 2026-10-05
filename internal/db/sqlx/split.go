@@ -94,14 +94,23 @@ func firstWord(s string) string {
 	return s
 }
 
-// atTerm reports whether the custom terminator starts at token i.
-func (sp *splitter) atTerm(i int) bool {
+// termAt returns the offset where the terminator starts in token i, or -1.
+// A custom terminator can be glued to a word ("END$$", "END//").
+func (sp *splitter) termAt(i int) int {
 	t := sp.toks[i]
 	switch t.Kind {
 	case TSpace, TComment, TString, TQuotedIdent:
-		return false
+		return -1
 	}
-	return strings.HasPrefix(sp.s[t.Start:], sp.term)
+	if strings.HasPrefix(sp.s[t.Start:], sp.term) {
+		return t.Start
+	}
+	if sp.term != ";" {
+		if k := strings.Index(sp.s[t.Start:t.End], sp.term); k > 0 {
+			return t.Start + k
+		}
+	}
+	return -1
 }
 
 func (sp *splitter) emit(a, b int, block bool) {
@@ -212,17 +221,17 @@ func (sp *splitter) run() []Statement {
 				}
 			}
 		}
-		if sp.atTerm(i) {
+		if at := sp.termAt(i); at >= 0 {
 			inBody := block && (sp.o.BatchBlocks || depth > 0 || sp.o.BodyRequired && !body)
 			if !inBody || sp.term != ";" {
-				end := t.Start
+				end := at
 				if block && sp.o.BlockSemicolon && sp.term == ";" {
 					end = t.Start + 1 // keep "END;"
 				}
 				sp.emit(start, end, block)
 				start, words, block, depth, body = -1, nil, false, 0, false
 				// skip the terminator (it may span several tokens)
-				te := t.Start + len(sp.term)
+				te := at + len(sp.term)
 				for i < len(toks) && toks[i].Start < te {
 					i++
 				}

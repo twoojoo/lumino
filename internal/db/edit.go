@@ -127,22 +127,41 @@ type ApplyResult struct {
 // (unless the session already has one open, in which case the caller owns
 // commit/rollback). Updates and deletes must touch exactly one row,
 // otherwise everything is rolled back. Databases without transactions
-// apply changes one by one and stop at the first failure.
+// apply changes one by one and stop at the first failure, returning the
+// ones applied with the error.
 func ApplyChanges(ctx context.Context, s Session, caps Capabilities, d Dialect, ref ObjectRef, changes []Change) ([]ApplyResult, error) {
-	own := false
+	var out []ApplyResult
+	own, sp := false, false
 	if caps.Transactions && !s.TxActive() {
 		if err := s.Begin(ctx); err != nil {
 			return nil, err
 		}
 		own = true
+	} else if caps.Transactions {
+		// the caller's transaction: a savepoint undoes this batch alone
+		if r, err := s.Execute(ctx, savepointSQL(d, "save")); err == nil {
+			r.Close()
+			sp = true
+		}
 	}
 	fail := func(err error) ([]ApplyResult, error) {
-		if own {
+		switch {
+		case own:
 			_ = s.Rollback(ctx)
+		case sp:
+			if r, e := s.Execute(ctx, savepointSQL(d, "rollback")); e == nil {
+				r.Close()
+			} else {
+				err = fmt.Errorf("%w (and rolling back to the savepoint failed: %v; earlier rows of this batch are still in your open transaction)", err, e)
+			}
+		case caps.Transactions:
+			err = fmt.Errorf("%w (earlier rows of this batch are still in your open transaction)", err)
+		default:
+			// no transactions: the changes before the failure stay applied
+			return out, err
 		}
 		return nil, err
 	}
-	var out []ApplyResult
 	for i, ch := range changes {
 		q, args := BuildChange(d, ref, ch, false)
 		res, err := s.Execute(ctx, q, args...)
@@ -164,5 +183,37 @@ func ApplyChanges(ctx context.Context, s Session, caps Capabilities, d Dialect, 
 			return nil, err
 		}
 	}
+	if sp {
+		if q := savepointSQL(d, "release"); q != "" {
+			if r, err := s.Execute(ctx, q); err == nil {
+				r.Close()
+			}
+		}
+	}
 	return out, nil
+}
+
+// savepointSQL returns the statement for a savepoint step (save, rollback,
+// release; "" when the dialect has no release).
+func savepointSQL(d Dialect, step string) string {
+	const name = "lumino_apply"
+	if d.Name() == "sqlserver" {
+		switch step {
+		case "save":
+			return "SAVE TRANSACTION " + name
+		case "rollback":
+			return "ROLLBACK TRANSACTION " + name
+		}
+		return ""
+	}
+	switch step {
+	case "save":
+		return "SAVEPOINT " + name
+	case "rollback":
+		return "ROLLBACK TO SAVEPOINT " + name
+	}
+	if d.Name() == "oracle" {
+		return ""
+	}
+	return "RELEASE SAVEPOINT " + name
 }

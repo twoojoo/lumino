@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -135,21 +135,19 @@ func adjustColumn(c *db.Column) {
 	}
 }
 
+// convert trims the padding of CHAR(n) values. Text columns come back as
+// []byte only for CHARACTER SET OCTETS (BINARY/VARBINARY): those stay bytes
+// (the connection charset is UTF8, so every other text value is a string).
 func convert(col *db.Column, v any) any {
-	switch x := v.(type) {
-	case []byte:
-		if col.Kind == db.KindText {
-			return string(x)
-		}
-	case string:
-		if col.Kind == db.KindText {
-			return strings.TrimRight(x, " ") // CHAR(n) padding
-		}
+	if x, ok := v.(string); ok && col.DBType == "TEXT" {
+		return strings.TrimRight(x, " ") // CHAR(n) padding; VARCHAR keeps its spaces
 	}
 	return v
 }
 
-func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
+// buildDSN renders user:pass@host:port/path?params (parsed by the driver
+// with net/url).
+func buildDSN(cfg *db.Config) (string, error) {
 	host := strings.TrimSpace(cfg.Host)
 	if host == "" {
 		host = "localhost"
@@ -159,18 +157,22 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		port = 3050
 	}
 	if cfg.Database == "" {
-		return nil, errors.New("set the database path or alias")
+		return "", errors.New("set the database path or alias")
 	}
 	q := url.Values{}
 	q.Set("charset", "UTF8")
 	for k, v := range cfg.Params {
 		q.Set(k, v)
 	}
-	path := cfg.Database
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	return url.UserPassword(cfg.User, cfg.Password).String() + "@" + net.JoinHostPort(host, strconv.Itoa(port)) +
+		dbPath(cfg.Database) + "?" + q.Encode(), nil
+}
+
+func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
+	dsn, err := buildDSN(cfg)
+	if err != nil {
+		return nil, err
 	}
-	dsn := fmt.Sprintf("%s:%s@%s:%d%s?%s", url.PathEscape(cfg.User), url.PathEscape(cfg.Password), host, port, path, q.Encode())
 	sdb, err := sql.Open("firebirdsql", dsn)
 	if err != nil {
 		return nil, err
@@ -204,8 +206,11 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 			if len(w) == 2 && w[0] == "EXECUTE" && w[1] == "PROCEDURE" {
 				return true // may return output parameters
 			}
+			if len(w) == 2 && w[0] == "EXECUTE" && w[1] == "BLOCK" {
+				return blockReturns(stmt)
+			}
 			if len(w) >= 1 && w[0] == "EXECUTE" {
-				return false // EXECUTE BLOCK without RETURNS
+				return false
 			}
 			return sqlx.ReturnsRows(stmt, &lexOptions)
 		},
@@ -213,6 +218,48 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	c := &sqlbase.Conn{DB: sdb, Inf: d.Info(), Cap: caps, D: dia, Version: "Firebird " + ver, H: h, InitSQL: cfg.InitSQL}
 	c.Cat = &catalog{db: sdb, d: dia}
 	return c, nil
+}
+
+// dbPath escapes a database path or alias for the DSN, segment by segment
+// ('#', '?', '%' and spaces would otherwise be parsed by the driver).
+func dbPath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	out := strings.Join(segs, "/")
+	if !strings.HasPrefix(out, "/") {
+		out = "/" + out
+	}
+	return out
+}
+
+// blockReturns reports whether an EXECUTE BLOCK declares output parameters
+// (RETURNS before the AS that starts its body).
+func blockReturns(stmt string) bool {
+	depth := 0
+	for _, t := range sqlx.Tokens(stmt, &lexOptions) {
+		switch t.Kind {
+		case sqlx.TPunct:
+			switch stmt[t.Start:t.End] {
+			case "(":
+				depth++
+			case ")":
+				depth--
+			}
+		case sqlx.TWord:
+			if depth != 0 {
+				continue
+			}
+			switch strings.ToUpper(stmt[t.Start:t.End]) {
+			case "RETURNS":
+				return true
+			case "AS":
+				return false
+			}
+		}
+	}
+	return false
 }
 
 var lineColRx = regexp.MustCompile(`(?i)line (\d+), column (\d+)`)

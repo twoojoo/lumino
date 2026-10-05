@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -56,19 +57,20 @@ func NewDialect() *db.BaseDialect {
 	}
 }
 
-// KindOf maps Trino type names.
+// KindOf maps Trino type names: "timestamp(3) with time zone", "time with
+// time zone", "decimal(10,2)", "array(integer)", "interval day to second"…
 func KindOf(t string) db.Kind {
-	u := strings.ToUpper(t)
+	u := strings.ToUpper(strings.TrimSpace(t))
 	base := u
-	if i := strings.IndexByte(base, '('); i > 0 {
+	if i := strings.IndexAny(base, "( "); i > 0 {
 		base = base[:i]
 	}
 	switch base {
-	case "TINYINT", "SMALLINT", "INTEGER", "BIGINT":
+	case "TINYINT", "SMALLINT", "INTEGER", "INT", "BIGINT":
 		return db.KindInt
 	case "REAL", "DOUBLE":
 		return db.KindFloat
-	case "DECIMAL":
+	case "DECIMAL", "NUMBER":
 		return db.KindDecimal
 	case "BOOLEAN":
 		return db.KindBool
@@ -91,13 +93,58 @@ func KindOf(t string) db.Kind {
 		return db.KindUUID
 	case "ARRAY", "MAP", "ROW":
 		return db.KindArray
-	case "INTERVAL DAY TO SECOND", "INTERVAL YEAR TO MONTH":
-		return db.KindInterval
-	}
-	if strings.HasPrefix(u, "INTERVAL") {
+	case "INTERVAL":
 		return db.KindInterval
 	}
 	return db.KindOther
+}
+
+// convert turns ROW values (also nested in arrays and maps) into maps of
+// their named fields, or lists when the fields are anonymous.
+func convert(_ *db.Column, v any) any {
+	switch x := v.(type) {
+	case trino.Row:
+		if !x.Valid {
+			return nil
+		}
+		named := false
+		for i := 0; i < x.Len(); i++ {
+			if x.Name(i) != "field"+strconv.Itoa(i) {
+				named = true
+				break
+			}
+		}
+		if named {
+			m := make(map[string]any, x.Len())
+			for i := 0; i < x.Len(); i++ {
+				m[x.Name(i)] = convert(nil, x.Value(i))
+			}
+			return m
+		}
+		out := make([]any, x.Len())
+		for i := range out {
+			out[i] = convert(nil, x.Value(i))
+		}
+		return out
+	case *trino.Row:
+		if x == nil {
+			return nil
+		}
+		return convert(nil, *x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = convert(nil, e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = convert(nil, e)
+		}
+		return out
+	}
+	return v
 }
 
 var clientSeq atomic.Int64
@@ -119,7 +166,7 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	if tc != nil {
 		scheme = "https"
 	}
-	u := &url.URL{Scheme: scheme, Host: fmt.Sprintf("%s:%d", host, port)}
+	u := &url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(port))}
 	if cfg.Password != "" {
 		u.User = url.UserPassword(cfg.User, cfg.Password)
 	} else {
@@ -161,6 +208,7 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	dia := NewDialect()
 	h := sqlbase.Hooks{
 		Kind:     KindOf,
+		Convert:  convert,
 		MapError: mapError,
 		NoTx:     true,
 		ReturnsRows: func(stmt string) bool {

@@ -211,10 +211,8 @@ func (d *BaseDialect) Literal(v any, k Kind) string {
 		}
 		return d.QuoteString(FormatTime(x, k))
 	case string:
-		if k == KindDecimal || k == KindInt || k == KindFloat {
-			if _, err := strconv.ParseFloat(x, 64); err == nil {
-				return x
-			}
+		if (k == KindDecimal || k == KindInt || k == KindFloat) && IsPlainNumber(x) {
+			return x
 		}
 		return d.QuoteString(x)
 	}

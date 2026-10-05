@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,8 +49,13 @@ func authMethods(c Config) ([]ssh.AuthMethod, func(), error) {
 	case "password", "":
 		return []ssh.AuthMethod{ssh.Password(c.Secret),
 			ssh.KeyboardInteractive(func(_, _ string, qs []string, _ []bool) ([]string, error) {
+				// answer only password prompts: never send the password to
+				// an OTP / verification code question
 				ans := make([]string, len(qs))
-				for i := range ans {
+				for i, q := range qs {
+					if !strings.Contains(strings.ToLower(q), "password") {
+						return nil, fmt.Errorf("SSH server asks %q: only password authentication is supported", strings.TrimSpace(q))
+					}
 					ans[i] = c.Secret
 				}
 				return ans, nil
@@ -108,16 +114,23 @@ func Open(ctx context.Context, c Config, target string) (*Tunnel, error) {
 	if hk == nil {
 		return nil, errors.New("no SSH host key verification configured")
 	}
-	cc := &ssh.ClientConfig{User: c.User, Auth: auth, HostKeyCallback: hk, Timeout: 15 * time.Second}
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(port))
 	d := net.Dialer{Timeout: 15 * time.Second}
 	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("SSH connect %s: %w", addr, err)
 	}
-	if dl, ok := ctx.Deadline(); ok {
-		_ = raw.SetDeadline(dl)
-	}
+	const handshake = 20 * time.Second
+	_ = raw.SetDeadline(time.Now().Add(handshake))
+	// the host key callback may wait for the user (trust on first use):
+	// the handshake deadline doesn't run meanwhile
+	cc := &ssh.ClientConfig{User: c.User, Auth: auth, Timeout: 15 * time.Second,
+		HostKeyCallback: func(h string, r net.Addr, k ssh.PublicKey) error {
+			_ = raw.SetDeadline(time.Time{})
+			err := hk(h, r, k)
+			_ = raw.SetDeadline(time.Now().Add(handshake))
+			return err
+		}}
 	sc, chans, reqs, err := ssh.NewClientConn(raw, addr, cc)
 	if err != nil {
 		raw.Close()
@@ -196,7 +209,12 @@ func (t *Tunnel) keepAlive() {
 			return
 		case <-tk.C:
 			if _, _, err := t.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				slog.Warn("ssh keepalive failed", "err", err)
+				// the SSH connection is gone: close the forward so the
+				// driver gets errors instead of hanging
+				slog.Warn("ssh keepalive failed: closing the tunnel", "err", err)
+				t.ln.Close()
+				t.client.Close()
+				return
 			}
 		}
 	}

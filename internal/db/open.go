@@ -67,8 +67,14 @@ func Open(ctx context.Context, cfg *Config, o OpenOptions) (Conn, error) {
 		host = "127.0.0.1"
 	}
 	if i := strings.IndexByte(host, ','); i >= 0 {
-		host = host[:i] // clusters: tunnel to the first node
+		host = strings.TrimSpace(host[:i]) // clusters: tunnel to the first node
 	}
+	if h, p, err := net.SplitHostPort(host); err == nil { // node with its own port
+		if n, err := strconv.Atoi(p); err == nil {
+			host, port = h, n
+		}
+	}
+	host = strings.Trim(host, "[]")
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	t, err := sshtunnel.Open(ctx, sshtunnel.Config{
 		Host: c.SSH.Host, Port: c.SSH.Port, User: c.SSH.User, Auth: c.SSH.Auth,
@@ -82,7 +88,11 @@ func Open(ctx context.Context, cfg *Config, o OpenOptions) (Conn, error) {
 		c.TLS.ServerName = host // verify the real name, not 127.0.0.1
 	}
 	c.Host, c.Port = lh, lp
-	conn, err := d.Open(ctx, &c)
+	// a fresh timeout: the tunnel may have waited for the user to trust the
+	// host key
+	octx, ocancel := context.WithTimeout(context.Background(), ConnectTimeout)
+	defer ocancel()
+	conn, err := d.Open(octx, &c)
 	if err != nil {
 		t.Close()
 		return nil, err

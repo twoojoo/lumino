@@ -8,6 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
+	"net"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -154,6 +157,10 @@ func KindOf(t string) db.Kind {
 		base = base[:i]
 	}
 	switch {
+	case base == "UINT128" || base == "UINT256" || base == "INT128" || base == "INT256":
+		return db.KindDecimal // beyond int64/uint64: kept as decimal strings
+	case strings.HasPrefix(base, "INTERVAL"):
+		return db.KindInterval
 	case strings.HasPrefix(base, "UINT") || strings.HasPrefix(base, "INT"):
 		return db.KindInt
 	case strings.HasPrefix(base, "FLOAT"):
@@ -191,7 +198,7 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		port = 9000
 	}
 	opts := &ch.Options{
-		Addr:        []string{fmt.Sprintf("%s:%d", host, port)},
+		Addr:        []string{net.JoinHostPort(host, strconv.Itoa(port))},
 		Auth:        ch.Auth{Database: cfg.Database, Username: cfg.User, Password: cfg.Password},
 		DialTimeout: 15 * time.Second,
 		ReadTimeout: 24 * time.Hour, // long analytical queries; cancellation is explicit
@@ -254,7 +261,80 @@ func convert(col *db.Column, v any) any {
 	if b, ok := v.([]byte); ok && col.Kind == db.KindText {
 		return string(b)
 	}
+	return bigInts(v)
+}
+
+var bigIntType = reflect.TypeOf(big.Int{})
+
+// bigInts renders (U)Int128/(U)Int256 values, which the driver returns as
+// big.Int values (not pointers, so not Stringers), as decimal strings, also
+// inside Nullable, arrays, tuples and maps.
+func bigInts(v any) any {
+	switch x := v.(type) {
+	case nil, string, []byte, int64, uint64, float64, bool, time.Time:
+		return v
+	case big.Int:
+		return x.String()
+	case *big.Int:
+		if x == nil {
+			return nil
+		}
+		return x.String()
+	}
+	rv := reflect.ValueOf(v)
+	if !hasBigInt(rv.Type(), 0) {
+		return v
+	}
+	switch rv.Kind() {
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return bigInts(rv.Elem().Interface())
+	case reflect.Slice, reflect.Array:
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return nil
+		}
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = bigInts(rv.Index(i).Interface())
+		}
+		return out
+	case reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+		out := make(map[string]any, rv.Len())
+		it := rv.MapRange()
+		for it.Next() {
+			out[db.FormatValue(db.Normalize(bigInts(it.Key().Interface())), db.KindOther)] = bigInts(it.Value().Interface())
+		}
+		return out
+	case reflect.Interface:
+		if rv.IsNil() {
+			return nil
+		}
+		return bigInts(rv.Elem().Interface())
+	}
 	return v
+}
+
+// hasBigInt reports whether values of t may contain a big.Int.
+func hasBigInt(t reflect.Type, depth int) bool {
+	if depth > 8 {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Interface:
+		return true
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return hasBigInt(t.Elem(), depth+1)
+	case reflect.Map:
+		return hasBigInt(t.Key(), depth+1) || hasBigInt(t.Elem(), depth+1)
+	case reflect.Struct:
+		return t == bigIntType
+	}
+	return false
 }
 
 var posRx = regexp.MustCompile(`failed at position (\d+)`)

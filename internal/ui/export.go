@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bufio"
+	"errors"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -39,6 +40,7 @@ type rowWriter struct {
 	d      db.Dialect
 	ref    db.ObjectRef
 	csv    *csv.Writer
+	names  []string // JSON keys (duplicate column names made unique)
 	n      int
 }
 
@@ -58,8 +60,22 @@ func newRowWriter(w io.Writer, format string, cols []db.Column, d db.Dialect, re
 			if err := rw.csv.Write(names); err != nil {
 				return nil, err
 			}
+			rw.csv.Flush() // rows are encoded directly on rw.w
+			if err := rw.csv.Error(); err != nil {
+				return nil, err
+			}
 		}
 	case "json":
+		seen := map[string]int{}
+		rw.names = make([]string, len(cols))
+		for i, c := range cols {
+			name := c.Name
+			if n := seen[name]; n > 0 {
+				name = fmt.Sprintf("%s_%d", name, n+1)
+			}
+			seen[c.Name]++
+			rw.names[i] = name
+		}
 		rw.w.WriteString("[\n")
 	case "markdown":
 		names := make([]string, len(cols))
@@ -121,19 +137,30 @@ func jsonValue(v any, k db.Kind) any {
 func (rw *rowWriter) write(row []any) error {
 	switch rw.format {
 	case "csv", "tsv", "tsv-noheader":
-		rec := make([]string, len(row))
+		// NULL is an empty field, an empty string is "" (csv.Writer can't
+		// tell them apart, so fields are encoded here)
+		sep := byte(',')
+		if rw.format != "csv" {
+			sep = '\t'
+		}
 		for i, v := range row {
-			if v != nil {
-				rec[i] = db.FormatValue(v, rw.cols[i].Kind)
+			if i > 0 {
+				rw.w.WriteByte(sep)
 			}
+			if v == nil {
+				continue
+			}
+			f := db.FormatValue(v, rw.cols[i].Kind)
+			if f == "" || strings.ContainsAny(f, "\"\r\n"+string(sep)) || f[0] == ' ' || f[len(f)-1] == ' ' {
+				f = `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
+			}
+			rw.w.WriteString(f)
 		}
-		if err := rw.csv.Write(rec); err != nil {
-			return err
-		}
+		rw.w.WriteString("\n")
 	case "json":
 		obj := make([]string, len(row))
 		for i, v := range row {
-			k, _ := json.Marshal(rw.cols[i].Name)
+			k, _ := json.Marshal(rw.names[i])
 			val, err := json.Marshal(jsonValue(v, rw.cols[i].Kind))
 			if err != nil {
 				val, _ = json.Marshal(db.FormatValue(v, rw.cols[i].Kind))
@@ -164,6 +191,9 @@ func (rw *rowWriter) write(row []any) error {
 			vals[i] = db.ColValue{Column: rw.cols[i].Name, Kind: rw.cols[i].Kind, Value: v}
 		}
 		q, _ := db.StandardChange(d, rw.ref, db.Change{Op: db.OpInsert, Values: vals}, true)
+		if strings.TrimSpace(q) == "" {
+			return fmt.Errorf("row %d: can't build an INSERT", rw.n+1)
+		}
 		rw.w.WriteString(q + ";\n")
 	}
 	rw.n++
@@ -204,6 +234,7 @@ type ExportDialog struct {
 	rs     *resultSet
 	query  string // statement re-run for "all rows" ("" = not possible)
 	ref    db.ObjectRef
+	schema string // session schema of the console ("all rows" re-runs there)
 	format int
 	all    bool
 	path   widget.Editor
@@ -231,7 +262,8 @@ func newExportDialog(a *App, connID string, rs *resultSet, table *db.ObjectRef) 
 	if lex := cs.dialectLex(); db.Classify(rs.sql, lex) == db.StmtRead {
 		d.query = rs.sql
 	}
-	d.all = !rs.more && d.query != ""
+	// re-running is needed only when the cursor has more rows
+	d.all = rs.more && d.query != ""
 	d.path.SingleLine = true
 	d.setPath()
 	return d
@@ -267,6 +299,11 @@ func (d *ExportDialog) start() {
 	if path == "" {
 		return
 	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	}
 	if _, err := os.Stat(path); err == nil {
 		d.result = "File exists: choose another name"
 		return
@@ -276,17 +313,24 @@ func (d *ExportDialog) start() {
 	d.cancel, d.running, d.result = cancel, true, ""
 	d.written.Store(0)
 	cols := d.rs.cols
-	rows := append([]db.Row(nil), d.rs.rows...)
-	all, query := d.all, d.query
+	// fetched rows in the order shown (client sort)
+	rows := make([]db.Row, d.rs.Rows())
+	for i := range rows {
+		rows[i] = d.rs.rows[d.rs.row(i)]
+	}
+	all, query, schema := d.all, d.query, d.schema
 	cs := a.connState(d.connID)
 	conn := cs.conn
 	ref := d.ref
+	ro := a.connReadOnly(d.connID)
 	go func() {
+		created := false
 		err := func() error {
 			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			if err != nil {
 				return err
 			}
+			created = true
 			defer f.Close()
 			var dia db.Dialect
 			if conn != nil {
@@ -313,6 +357,17 @@ func (d *ExportDialog) start() {
 				return err
 			}
 			defer s.Close()
+			// the same context as the statement shown: schema and policy
+			if ro {
+				if err := s.SetReadOnly(ctx, true); err != nil && !errors.Is(err, db.ErrNotSupported) {
+					return fmt.Errorf("read-only session: %w", err)
+				}
+			}
+			if schema != "" {
+				if err := s.SetCurrentSchema(ctx, schema); err != nil && !errors.Is(err, db.ErrNotSupported) {
+					return fmt.Errorf("schema %s: %w", schema, err)
+				}
+			}
 			res, err := s.Execute(ctx, query)
 			if err != nil {
 				return err
@@ -340,8 +395,8 @@ func (d *ExportDialog) start() {
 			}
 			return rw.close()
 		}()
-		if err != nil {
-			os.Remove(path)
+		if err != nil && created {
+			os.Remove(path) // only the partial file this export created
 		}
 		a.post(func() {
 			d.running = false

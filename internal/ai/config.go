@@ -70,6 +70,9 @@ type Config struct {
 	// AllowQueries lets the assistant run read-only queries itself.
 	AllowQueries *bool `json:"allowQueries,omitempty"`
 	path         string
+	// cleared: providers whose key the user removed (only these are
+	// deleted from the keyring: a key that failed to load is kept)
+	cleared map[string]bool
 }
 
 // QueriesAllowed reports whether the model may run read-only queries
@@ -114,8 +117,9 @@ func (c *Config) Save() error {
 			if err := secrets.Set("ai:"+id, secrets.APIKey, pc.APIKey, true); err != nil {
 				return err
 			}
-		} else {
+		} else if c.cleared[id] {
 			secrets.Delete("ai:"+id, secrets.APIKey)
+			delete(c.cleared, id)
 		}
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
@@ -138,6 +142,12 @@ func (c *Config) Current() (Preset, ProviderConfig) {
 // Set updates the active provider settings.
 func (c *Config) Set(id string, pc ProviderConfig) {
 	c.Provider = id
+	if pc.APIKey == "" && c.Providers[id].APIKey != "" {
+		if c.cleared == nil {
+			c.cleared = map[string]bool{}
+		}
+		c.cleared[id] = true
+	}
 	c.Providers[id] = pc
 }
 

@@ -643,15 +643,29 @@ func (t *ConsoleTab) commit(rollback bool) {
 	if rollback {
 		verb = "Rollback"
 	}
-	t.a.do(verb, func() error {
+	a := t.a
+	a.flash(verb+"…", false)
+	go func() {
+		var err error
 		if rollback {
-			return s.Rollback(context.Background())
+			err = s.Rollback(context.Background())
+		} else {
+			err = s.Commit(context.Background())
 		}
-		return s.Commit(context.Background())
-	}, func() {
-		t.txActive = s.TxActive()
-		t.log(false, "%s", strings.ToUpper(verb))
-	})
+		active := s.TxActive()
+		a.post(func() {
+			if t.sess == s {
+				t.txActive = active // also after a failed COMMIT (the server may have ended it)
+			}
+			if err != nil {
+				t.log(true, "%s: %v", strings.ToUpper(verb), err)
+				a.flash(fmt.Sprintf("%s failed: %v", verb, err), true)
+				return
+			}
+			t.log(false, "%s", strings.ToUpper(verb))
+			a.flash(verb+" — done", false)
+		})
+	}()
 }
 
 func (t *ConsoleTab) setManual(on bool) {
@@ -810,7 +824,9 @@ func (t *ConsoleTab) handleButtons(gtx C) {
 	}
 	if t.exportBtn.Clicked(gtx) {
 		if rs := t.current(); rs != nil && rs.isQuery {
-			a.overlay = newExportDialog(a, t.connID, rs, nil)
+			ed := newExportDialog(a, t.connID, rs, nil)
+			ed.schema = t.schema
+			a.overlay = ed
 		}
 	}
 	if t.valueBtn.Clicked(gtx) {
@@ -1153,7 +1169,11 @@ func (t *ConsoleTab) gridMenu(at image.Point) {
 	items := copyMenuItems(a, t.grid, rs.cols, func(r, c int) any { return rs.Value(r, c) }, t.dialect, db.ObjectRef{Name: "result"})
 	items = append(items, &menuItem{sep: true},
 		&menuItem{icon: icDescribe, label: "Show value", action: func() { t.value.open = true }},
-		&menuItem{icon: icExport, label: "Export…", action: func() { a.overlay = newExportDialog(a, t.connID, rs, nil) }},
+		&menuItem{icon: icExport, label: "Export…", action: func() {
+			ed := newExportDialog(a, t.connID, rs, nil)
+			ed.schema = t.schema
+			a.overlay = ed
+		}},
 	)
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}
 }

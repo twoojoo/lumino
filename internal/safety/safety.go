@@ -45,11 +45,19 @@ func CheckConnection(c *db.Config) error {
 		if c.File == ":memory:" {
 			return nil
 		}
+		if strings.ContainsAny(c.File, "?#%") {
+			return fmt.Errorf("dev build: database file %q refused (URI characters)", c.File)
+		}
 		abs, err := filepath.Abs(c.File)
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(abs, string(filepath.Separator)+".dev"+string(filepath.Separator)) {
+		// the real directory (symlinks resolved) must be inside a .dev one
+		dir := filepath.Dir(abs)
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = real
+		}
+		if !inDevDir(dir) {
 			return fmt.Errorf("dev build: database file %q refused (must live in a .dev/ directory)", c.File)
 		}
 		return nil
@@ -58,7 +66,17 @@ func CheckConnection(c *db.Config) error {
 		if err := devHost(c.SSH.Host, c.SSH.Port); err != nil {
 			return fmt.Errorf("SSH: %w", err)
 		}
-		return nil // the target is resolved by the bastion (compose network)
+		// the target is resolved by the bastion: only compose service names
+		for _, h := range strings.Split(c.Host, ",") {
+			h = strings.TrimSpace(h)
+			if i := strings.LastIndexByte(h, ':'); i > 0 {
+				h = h[:i]
+			}
+			if !composeName(h) {
+				return fmt.Errorf("dev build: SSH target %q refused (only development compose services)", h)
+			}
+		}
+		return nil
 	}
 	port := c.Port
 	if port == 0 {
@@ -72,12 +90,35 @@ func CheckConnection(c *db.Config) error {
 	return nil
 }
 
+// inDevDir reports whether a path has a ".dev" directory component.
+func inDevDir(p string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".dev" {
+			return true
+		}
+	}
+	return false
+}
+
+// composeName reports whether h looks like a compose service name.
+func composeName(h string) bool {
+	if h == "" || h == "localhost" || net.ParseIP(h) != nil {
+		return false
+	}
+	for _, r := range h {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // IsolateConfig points the settings directory inside .dev in dev builds.
 func IsolateConfig() {
 	if !Dev {
 		return
 	}
-	if d := os.Getenv("LUMINO_CONFIG_DIR"); d != "" && strings.Contains(d, ".dev") {
+	if d := os.Getenv("LUMINO_CONFIG_DIR"); d != "" && inDevDir(d) {
 		return
 	}
 	abs, _ := filepath.Abs(filepath.Join(".dev", "config"))

@@ -13,6 +13,7 @@ import (
 	"gioui.org/widget"
 
 	"github.com/giovanni/lumino/internal/db"
+	"github.com/giovanni/lumino/internal/db/sqlx"
 	"github.com/giovanni/lumino/internal/prefs"
 )
 
@@ -186,6 +187,41 @@ func (t *tableData) changes(info *db.TableInfo) ([]db.Change, error) {
 	return out, nil
 }
 
+// dropApplied removes the first n changes (in the order of changes())
+// from the pending ones.
+func (t *tableData) dropApplied(n int) {
+	// both lists first: changes() skips the edits of deleted rows
+	dels := make([]int, 0, len(t.deleted))
+	for i := range t.deleted {
+		dels = append(dels, i)
+	}
+	sort.Ints(dels)
+	var upd []int
+	for i, e := range t.edits {
+		if len(e) > 0 && !t.deleted[i] {
+			upd = append(upd, i)
+		}
+	}
+	sort.Ints(upd)
+	for _, i := range dels {
+		if n == 0 {
+			return
+		}
+		delete(t.deleted, i)
+		delete(t.edits, i)
+		n--
+	}
+	for _, i := range upd {
+		if n == 0 {
+			return
+		}
+		delete(t.edits, i)
+		n--
+	}
+	k := min(n, len(t.inserted))
+	t.inserted, t.insSet = t.inserted[k:], t.insSet[k:]
+}
+
 // sliceModel is a static grid model.
 type sliceModel struct {
 	cols []db.Column
@@ -219,6 +255,7 @@ type TableTab struct {
 
 	sess     db.Session
 	sessGen  int
+	saving   bool // a save runs: edits are blocked until it ends
 	opening  bool
 	sessWait []sessWaiter
 	disposed bool
@@ -351,7 +388,7 @@ func (t *TableTab) ensureInfo() {
 }
 
 func (t *TableTab) editable(r, c int) bool {
-	if t.data == nil || t.info == nil || t.ref.Type != db.ObjTable || r < 0 || r >= t.data.Rows() || c < 0 || c >= len(t.data.rs.cols) || t.a.connReadOnly(t.connID) {
+	if t.data == nil || t.info == nil || t.saving || t.ref.Type != db.ObjTable || r < 0 || r >= t.data.Rows() || c < 0 || c >= len(t.data.rs.cols) || t.a.connReadOnly(t.connID) {
 		return false
 	}
 	caps := t.cs().caps()
@@ -464,6 +501,10 @@ func (t *TableTab) reload() {
 	t.running, t.loadErr, t.count = true, nil, ""
 	t.gen++
 	gen := t.gen
+	if err := t.checkWhere(strings.TrimSpace(t.where.Text())); err != nil {
+		t.running, t.loadErr = false, err
+		return
+	}
 	t.withSession(func(s db.Session) {
 		dia := t.cs().dialect()
 		q := dia.SelectAll(t.ref, t.where.Text(), strings.Join(t.order, ", "))
@@ -558,7 +599,7 @@ func (t *TableTab) setText(r, c int, s string, null bool) {
 }
 
 func (t *TableTab) addRow() {
-	if t.data == nil || !t.cs().caps().Insert || t.readOnlyReason() == "views are read-only" || t.a.connReadOnly(t.connID) {
+	if t.data == nil || t.saving || !t.cs().caps().Insert || t.readOnlyReason() == "views are read-only" || t.a.connReadOnly(t.connID) {
 		t.a.flash("Rows can't be added here", true)
 		return
 	}
@@ -569,7 +610,7 @@ func (t *TableTab) addRow() {
 }
 
 func (t *TableTab) deleteRows(rows []int) {
-	if t.data == nil || t.readOnlyReason() != "" || !t.cs().caps().Delete {
+	if t.data == nil || t.saving || t.readOnlyReason() != "" || !t.cs().caps().Delete {
 		t.a.flash("Rows can't be deleted: "+t.readOnlyReason(), true)
 		return
 	}
@@ -619,42 +660,94 @@ func (t *TableTab) review() {
 
 func (t *TableTab) apply(changes []db.Change) {
 	a := t.a
+	if t.saving {
+		return
+	}
 	a.releaseCursors(t.connID)
+	t.saving = true
 	t.withSession(func(s db.Session) {
 		cs := t.cs()
 		caps, dia, ref := cs.caps(), cs.dialect(), t.ref
-		a.do(fmt.Sprintf("Saving %d change(s) to %s", len(changes), ref.Name), func() error {
-			_, err := db.ApplyChanges(context.Background(), s, caps, dia, ref, changes)
-			return err
-		}, func() {
-			t.data.revert()
-			delete(cs.tables, ref)
-			t.reload()
-		})
-	}, func(err error) { a.flash("Save: "+err.Error(), true) })
+		desc := fmt.Sprintf("Saving %d change(s) to %s", len(changes), ref.Name)
+		a.flash(desc+"…", false)
+		go func() {
+			applied, err := db.ApplyChanges(context.Background(), s, caps, dia, ref, changes)
+			a.post(func() {
+				t.saving = false
+				delete(cs.tables, ref)
+				if err != nil {
+					if len(applied) > 0 && t.data != nil {
+						// no transactions: what was applied must not be
+						// applied again
+						t.data.dropApplied(len(applied))
+						a.flash(fmt.Sprintf("%s: %d of %d change(s) were applied before the error (reload to see them): %v", desc, len(applied), len(changes), err), true)
+						return
+					}
+					a.flash(fmt.Sprintf("%s failed: %v", desc, err), true)
+					return
+				}
+				a.flash(desc+" — done", false)
+				if t.data != nil {
+					t.data.revert()
+				}
+				t.running = false
+				t.reload()
+			})
+		}()
+	}, func(err error) {
+		t.saving = false
+		a.flash("Save: "+err.Error(), true)
+	})
 }
 
 func (t *TableTab) countRows() {
 	a := t.a
+	w := strings.TrimSpace(t.where.Text())
+	if err := t.checkWhere(w); err != nil {
+		a.flash(err.Error(), true)
+		return
+	}
 	t.count = "counting…"
-	t.withSession(func(s db.Session) {
-		dia := t.cs().dialect()
-		q := "SELECT COUNT(*) FROM " + dia.Qualified(t.ref)
-		if w := strings.TrimSpace(t.where.Text()); w != "" {
+	gen := t.gen
+	// on its own short-lived session: running it on the tab session would
+	// close the open cursor of the browsed rows
+	a.connectOr(t.connID, func(cs *connState) {
+		conn := cs.conn
+		q := "SELECT COUNT(*) FROM " + cs.dialect().Qualified(t.ref)
+		if w != "" {
 			q += " WHERE " + w
 		}
+		ro := a.connReadOnly(t.connID)
 		go func() {
-			res, err := s.Execute(context.Background(), q)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
 			var n string
+			s, err := conn.Session(ctx)
 			if err == nil {
-				rows, _, ferr := res.Fetch(context.Background(), 1)
-				res.Close()
-				err = ferr
-				if len(rows) == 1 && len(rows[0]) == 1 {
-					n = db.FormatValue(rows[0][0], db.KindInt)
+				defer s.Close()
+				if ro {
+					if e := s.SetReadOnly(ctx, true); e != nil && !errors.Is(e, db.ErrNotSupported) {
+						err = e
+					}
+				}
+			}
+			if err == nil {
+				var res db.Result
+				res, err = s.Execute(ctx, q)
+				if err == nil {
+					rows, _, ferr := res.Fetch(ctx, 1)
+					res.Close()
+					err = ferr
+					if len(rows) == 1 && len(rows[0]) == 1 {
+						n = db.FormatValue(rows[0][0], db.KindInt)
+					}
 				}
 			}
 			a.post(func() {
+				if gen != t.gen {
+					t.count = ""
+					return
+				}
 				if err != nil {
 					t.count = ""
 					a.flash("Count: "+err.Error(), true)
@@ -664,6 +757,23 @@ func (t *TableTab) countRows() {
 			})
 		}()
 	}, func(error) { t.count = "" })
+}
+
+// checkWhere validates the filter: one condition, nothing that changes
+// data (it is pasted into a SELECT, so "1=1; DELETE …" must not pass).
+func (t *TableTab) checkWhere(w string) error {
+	if w == "" {
+		return nil
+	}
+	lex := t.cs().dialect().Lex()
+	q := "SELECT 1 FROM t WHERE " + w
+	if st := sqlx.Split(q, lex); len(st) != 1 || st[0].Text != strings.TrimRight(strings.TrimSpace(q), ";") {
+		return errors.New("the filter must be a single condition (no ';')")
+	}
+	if k := db.Classify(q, lex); k != db.StmtRead {
+		return fmt.Errorf("the filter can't contain %s statements", k)
+	}
+	return nil
 }
 
 // loadDDL fetches the object's DDL.

@@ -120,8 +120,13 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 	}
 	c := newConfirm(a, verb+" "+string(ref.Type), "This runs:\n\n"+stmt+"\n\nIt can't be undone.", true, func(bool) {
 		a.releaseCursors(connID)
+		conn := cs.conn
+		if conn == nil {
+			a.flash("Not connected", true)
+			return
+		}
 		a.do(verb+" "+ref.Name, func() error {
-			s, err := cs.conn.Session(context.Background())
+			s, err := conn.Session(context.Background())
 			if err != nil {
 				return err
 			}
@@ -433,6 +438,7 @@ func (a *App) openSavedQueries() {
 					return
 				}
 				a.insertInConsole(id, qs[i].SQL, "")
+				return
 			}
 		}
 	})

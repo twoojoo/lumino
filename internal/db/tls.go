@@ -36,7 +36,11 @@ func (t TLSConfig) TLS(host string) (*tls.Config, error) {
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	}
-	switch t.Mode {
+	mode := t.Mode
+	if mode == "require" && t.CAFile != "" {
+		mode = "verify-ca" // libpq semantics: a root CA turns require into verify-ca
+	}
+	switch mode {
 	case "require":
 		cfg.InsecureSkipVerify = true
 	case "verify-ca":

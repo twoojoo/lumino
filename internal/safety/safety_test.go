@@ -27,6 +27,11 @@ func TestDevGuard(t *testing.T) {
 		{Driver: "postgres", Host: "127.0.0.1"},
 		{Driver: "postgres", Host: "x", SSH: &db.SSHConfig{Host: "bastion.example.com", Port: 22}},
 		{Driver: "sqlite", File: "/home/u/real.db"},
+		{Driver: "sqlite", File: "/home/u/real.db?/.dev/x"},
+		{Driver: "sqlite", File: "/home/u/real.db#/.dev/x"},
+		{Driver: "sqlite", File: "/home/u/.devtools/x.db"},
+		{Driver: "postgres", Host: "prod.example.com", Port: 5432, SSH: &db.SSHConfig{Host: "127.0.0.1", Port: 55222}},
+		{Driver: "postgres", Host: "10.0.0.5", Port: 5432, SSH: &db.SSHConfig{Host: "127.0.0.1", Port: 55222}},
 	}
 	for _, c := range bad {
 		if err := CheckConnection(&c); err == nil {

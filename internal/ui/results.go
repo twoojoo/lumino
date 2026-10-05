@@ -137,6 +137,15 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 		a.post(func() {
 			r.fetching = false
 			r.rows = append(r.rows, got...)
+			if r.res != res {
+				// detached or closed meanwhile (re-run, later statement):
+				// keep the rows, the cursor state is no longer ours
+				r.resort()
+				if done != nil {
+					done()
+				}
+				return
+			}
 			r.more = more && err == nil
 			if err != nil {
 				r.err = err

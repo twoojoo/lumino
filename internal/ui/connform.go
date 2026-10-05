@@ -334,10 +334,10 @@ func (d *ConnDialog) save(connect bool) {
 	a.prefs.PutConn(c)
 	a.savePrefs()
 	d.done = true
-	if changed {
-		a.disconnect(c.ID) // reconnect with the new settings
-	}
-	if connect {
+	open := func() {
+		if !connect {
+			return
+		}
 		a.sidebar.expand(connKey(c.ID), true)
 		a.connect(c.ID, func(cs *connState) {
 			if a.findTab(func(t Tab) bool { return t.ConnID() == c.ID }) < 0 {
@@ -346,6 +346,12 @@ func (d *ConnDialog) save(connect bool) {
 		})
 	}
 	a.flash("Saved "+c.Name, false)
+	if changed {
+		// reconnect with the new settings (asking first when work is open)
+		a.requestDisconnect(c.ID, open)
+		return
+	}
+	open()
 }
 
 func connChanged(a, b *db.Config) bool {

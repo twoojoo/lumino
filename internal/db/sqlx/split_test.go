@@ -265,3 +265,21 @@ func TestReturnsRowsClause(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitReviewCases(t *testing.T) {
+	my := &Options{Backticks: true, HashComments: true, BackslashEscape: true, DoubleQuoteStrings: true, Delimiter: true, DashSpace: true}
+	script := "DELIMITER $$\nCREATE PROCEDURE p1() BEGIN SELECT 1; END$$\nCREATE PROCEDURE p2() BEGIN SELECT 2; END$$\nDELIMITER ;\nSELECT 3;"
+	if got := Split(script, my); len(got) != 3 || !strings.HasSuffix(got[1].Text, "END") || got[2].Text != "SELECT 3" {
+		t.Errorf("END$$: %+v", got)
+	}
+	if got := Split("SELECT 5--3; SELECT 4", my); len(got) != 2 {
+		t.Errorf("MySQL --3 is not a comment: %+v", got)
+	}
+	if got := Split("SELECT 1 -- c; x\n; SELECT 2", my); len(got) != 2 {
+		t.Errorf("MySQL '-- ' comment: %+v", got)
+	}
+	pg := &Options{DollarQuotes: true, NestedComments: true}
+	if got := Split("SELECT E'a\nb\\'c'; SELECT 2; SELECT 3", pg); len(got) != 3 {
+		t.Errorf("multi-line E string: %+v", got)
+	}
+}

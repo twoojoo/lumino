@@ -48,6 +48,10 @@ type Options struct {
 	AtParams           bool // @name variables/params (SQL Server, MySQL user vars)
 	ColonParams        bool // :name binds (Oracle)
 
+	// DashSpace: "--" starts a comment only when followed by a space or the
+	// end of the line (MySQL: 5--3 is 5 - -3).
+	DashSpace bool
+
 	// Splitter rules.
 	Delimiter bool // MySQL client "DELIMITER //" lines
 	GoBatches bool // SQL Server "GO" lines
@@ -85,6 +89,7 @@ type State struct {
 	m     mode
 	depth int    // nested comment depth
 	quote byte   // closing quote of a string/identifier
+	esc   bool   // the string accepts backslash escapes (MySQL, E'…')
 	tag   string // dollar-quote tag, including the $ signs
 }
 
@@ -127,7 +132,7 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 			st.m = mNormal
 		}
 	case mString, mQuotedIdent:
-		j, ok := scanQuoted(s, 0, st.quote, o.BackslashEscape && st.m == mString)
+		j, ok := scanQuoted(s, 0, st.quote, st.esc && st.m == mString)
 		k := TString
 		if st.m == mQuotedIdent {
 			k = TQuotedIdent
@@ -135,7 +140,7 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 		emit(k, 0, j)
 		i = j
 		if ok {
-			st.m = mNormal
+			st.m, st.esc = mNormal, false
 		}
 	case mDollar:
 		if j := strings.Index(s, st.tag); j >= 0 {
@@ -156,7 +161,7 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 				i++
 			}
 			emit(TSpace, start, i)
-		case c == '-' && i+1 < n && s[i+1] == '-',
+		case c == '-' && i+1 < n && s[i+1] == '-' && (!o.DashSpace || i+2 >= n || isSpace(s[i+2])),
 			o.HashComments && c == '#',
 			o.SlashComments && c == '/' && i+1 < n && s[i+1] == '/':
 			emit(TComment, start, n)
@@ -175,7 +180,7 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 			emit(TString, start, j)
 			i = j
 			if !ok {
-				st.m, st.quote = mString, c
+				st.m, st.quote, st.esc = mString, c, o.BackslashEscape
 			}
 		case c == '"' || c == '`' && o.Backticks:
 			j, ok := scanQuoted(s, i+1, c, false)
@@ -232,11 +237,12 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 			}
 			// prefixed strings: E'..', N'..', X'..', B'..', U&'..'
 			if i < n && s[i] == '\'' && i-start <= 2 {
-				j, ok := scanQuoted(s, i+1, '\'', o.BackslashEscape || strings.EqualFold(s[start:i], "e"))
+				esc := o.BackslashEscape || strings.EqualFold(s[start:i], "e")
+				j, ok := scanQuoted(s, i+1, '\'', esc)
 				emit(TString, start, j)
 				i = j
 				if !ok {
-					st.m, st.quote = mString, '\''
+					st.m, st.quote, st.esc = mString, '\'', esc
 				}
 				continue
 			}
@@ -247,7 +253,7 @@ func lex(s string, st State, o *Options, out []Token) ([]Token, State) {
 		case strings.IndexByte(operatorChars, c) >= 0:
 			for i < n && strings.IndexByte(operatorChars, s[i]) >= 0 {
 				// don't swallow the start of a comment
-				if i > start && (s[i] == '-' && i+1 < n && s[i+1] == '-' || s[i] == '/' && i+1 < n && s[i+1] == '*') {
+				if i > start && (s[i] == '-' && i+1 < n && s[i+1] == '-' && (!o.DashSpace || i+2 >= n || isSpace(s[i+2])) || s[i] == '/' && i+1 < n && s[i+1] == '*') {
 					break
 				}
 				i++

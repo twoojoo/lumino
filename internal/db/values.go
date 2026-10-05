@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +202,12 @@ func ParseTime(s string, k Kind) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date/time %q (expected YYYY-MM-DD[ HH:MM:SS[.ffffff][ ±HH:MM]])", s)
 }
 
+var plainNumber = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`)
+
+// IsPlainNumber reports whether s is a decimal number literal (no NaN,
+// Inf, hex floats or fractions): safe to send unquoted.
+func IsPlainNumber(s string) bool { return plainNumber.MatchString(s) }
+
 // ParseValue converts text typed in the grid to a bind value for a column
 // of kind k. It never returns nil: NULL is chosen explicitly in the UI.
 func ParseValue(s string, k Kind) (any, error) {
@@ -224,7 +231,7 @@ func ParseValue(s string, k Kind) (any, error) {
 		}
 		return f, nil
 	case KindDecimal:
-		if _, ok := new(big.Rat).SetString(t); !ok {
+		if !IsPlainNumber(t) {
 			return nil, fmt.Errorf("%q is not a number", s)
 		}
 		return t, nil
@@ -293,7 +300,12 @@ func Normalize(v any) any {
 	case uint32:
 		return int64(x)
 	case float32:
-		return float64(x)
+		// shortest decimal of the float32, not of its float64 widening
+		// (0.1 → 0.1, not 0.10000000149011612)
+		f, _ := strconv.ParseFloat(strconv.FormatFloat(float64(x), 'g', -1, 32), 64)
+		return f
+	case big.Int:
+		return x.String()
 	case *big.Int:
 		if x == nil {
 			return nil
@@ -320,6 +332,9 @@ func Normalize(v any) any {
 		}
 		return *x
 	case fmt.Stringer:
+		if rv := reflect.ValueOf(x); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return nil // typed nil (Nullable elements): String() may panic
+		}
 		return x.String()
 	}
 	// typed slices, arrays, maps and pointers (ClickHouse, Cassandra)

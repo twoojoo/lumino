@@ -190,6 +190,10 @@ func (w *progressWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// maxDownload bounds a release asset (a broken or hostile server can't
+// fill the disk).
+const maxDownload = 1 << 30
+
 // download streams url into f and checks its SHA-256.
 func download(ctx context.Context, url string, f *os.File, sum string, progress func(done, total int64)) error {
 	resp, err := get(ctx, url)
@@ -199,8 +203,12 @@ func download(ctx context.Context, url string, f *os.File, sum string, progress 
 	defer resp.Body.Close()
 	h := sha256.New()
 	pw := &progressWriter{total: resp.ContentLength, fn: progress}
-	if _, err := io.Copy(io.MultiWriter(f, h, pw), resp.Body); err != nil {
+	n, err := io.Copy(io.MultiWriter(f, h, pw), io.LimitReader(resp.Body, maxDownload+1))
+	if err != nil {
 		return err
+	}
+	if n > maxDownload {
+		return fmt.Errorf("%s is larger than %d MB", filepath.Base(url), maxDownload>>20)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != sum {
 		return fmt.Errorf("checksum mismatch for %s", filepath.Base(url))
@@ -360,10 +368,19 @@ func unzipAll(archive, dir string) error {
 			if err != nil {
 				return err
 			}
+			// links must stay inside the archive: a link to an outside
+			// directory followed by a file under it would write there
+			t := string(target)
+			if filepath.IsAbs(t) {
+				return fmt.Errorf("invalid link in archive: %s -> %s", f.Name, t)
+			}
+			if r := filepath.Join(filepath.Dir(p), t); r != root && !strings.HasPrefix(r, root+string(filepath.Separator)) {
+				return fmt.Errorf("invalid link in archive: %s -> %s", f.Name, t)
+			}
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				return err
 			}
-			if err := os.Symlink(string(target), p); err != nil {
+			if err := os.Symlink(t, p); err != nil {
 				return err
 			}
 			continue

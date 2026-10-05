@@ -244,8 +244,8 @@ func txVerb(stmt string, o *sqlx.Options) string {
 				return "" // ROLLBACK TO SAVEPOINT, two-phase commit, AND CHAIN
 			}
 		}
-		if len(w) > 2 && !txWord(w[1]) {
-			return ""
+		if len(w) > 2 || len(w) == 2 && !txWord(w[1]) {
+			return "" // named transactions (T-SQL ROLLBACK TRANSACTION sp) run as is
 		}
 		switch w[0] {
 		case "END":
@@ -639,10 +639,17 @@ func (r *Result) Messages() []string {
 	return append(r.msgs, r.s.notices()...)
 }
 
-// Fetch reads up to n rows.
-func (r *Result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
+// Fetch reads up to n rows. A panic inside the driver (seen with some
+// ClickHouse types) becomes an error instead of crashing the app.
+func (r *Result) Fetch(ctx context.Context, n int) (rows []db.Row, more bool, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() {
+		if p := recover(); p != nil {
+			r.done = true
+			rows, more, err = nil, false, fmt.Errorf("the driver failed reading this result: %v", p)
+		}
+	}()
 	if r.exec || r.done || r.closed {
 		return nil, false, nil
 	}

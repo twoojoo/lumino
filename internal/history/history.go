@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/giovanni/lumino/internal/prefs"
 )
@@ -42,9 +43,22 @@ func file(connID string) string {
 }
 
 // Add appends an entry (empty statements are ignored).
+// Size limits: huge statements (dump imports) are truncated in history.
+const (
+	maxSQL  = 256 << 10
+	maxLine = 1 << 20
+)
+
 func Add(connID string, e Entry) error {
 	if strings.TrimSpace(e.SQL) == "" || connID == "" {
 		return nil
+	}
+	if len(e.SQL) > maxSQL {
+		cut := maxSQL
+		for cut > 0 && !utf8.RuneStart(e.SQL[cut]) {
+			cut--
+		}
+		e.SQL = e.SQL[:cut] + "\n-- … (truncated in history)"
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -77,20 +91,27 @@ func Load(connID string) ([]Entry, error) {
 		return nil, err
 	}
 	var all []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		var e Entry
-		if json.Unmarshal(sc.Bytes(), &e) == nil {
-			all = append(all, e)
+	// a reader instead of a Scanner: an oversized line (older versions
+	// stored huge statements) is skipped instead of failing the whole load
+	br := bufio.NewReaderSize(f, 64*1024)
+	rewrite := false
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			var e Entry
+			if len(line) <= maxLine && json.Unmarshal(line, &e) == nil {
+				all = append(all, e)
+			} else {
+				rewrite = true
+			}
+		}
+		if err != nil {
+			break
 		}
 	}
 	f.Close()
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	if len(all) > MaxEntries {
-		all = all[len(all)-MaxEntries:]
+	if len(all) > MaxEntries || rewrite {
+		all = all[max(0, len(all)-MaxEntries):]
 		var b strings.Builder
 		for _, e := range all {
 			j, _ := json.Marshal(e)
