@@ -34,6 +34,9 @@ type Hooks struct {
 	SessionInit func(ctx context.Context, c *sql.Conn) error
 	// SessionID returns the server id of a session (for Cancel).
 	SessionID func(ctx context.Context, c *sql.Conn) (string, error)
+	// StatementContext decorates the context of every statement and returns
+	// an id passed to Cancel (ClickHouse query ids).
+	StatementContext func(ctx context.Context) (context.Context, string)
 	// Cancel aborts the statement running on a session out of band. When
 	// it returns true the statement's context is left alone (cancelling it
 	// would close the connection with some drivers).
@@ -122,6 +125,7 @@ type Session struct {
 	mu      sync.Mutex
 	cancel  context.CancelFunc // of the running statement / open cursor
 	running bool
+	runID   string // StatementContext id of the current statement
 	cur     *Result
 }
 
@@ -239,8 +243,12 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	}
 	rctx, cancel := context.WithCancel(context.Background())
 	stop := context.AfterFunc(ctx, cancel) // caller cancellation still applies
+	runID := ""
+	if f := s.c.H.StatementContext; f != nil {
+		rctx, runID = f(rctx)
+	}
 	s.mu.Lock()
-	s.cancel, s.running = cancel, true
+	s.cancel, s.running, s.runID = cancel, true, runID
 	s.mu.Unlock()
 	done := func() {
 		s.mu.Lock()
@@ -288,6 +296,9 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 func (s *Session) Cancel() {
 	s.mu.Lock()
 	cancel, running, id := s.cancel, s.running, s.id
+	if s.runID != "" {
+		id = s.runID
+	}
 	s.mu.Unlock()
 	if running && s.c.H.Cancel != nil && id != "" {
 		ctx, c := context.WithTimeout(context.Background(), 10*time.Second)

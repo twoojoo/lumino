@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -271,7 +272,7 @@ func ParseValue(s string, k Kind) (any, error) {
 // Normalize converts common driver values to the Row value set.
 func Normalize(v any) any {
 	switch x := v.(type) {
-	case nil, string, int64, uint64, float64, bool, time.Time, []any:
+	case nil, string, int64, uint64, float64, bool, time.Time, []any, map[string]any:
 		return v
 	case []byte:
 		return append([]byte(nil), x...) // drivers reuse buffers
@@ -320,6 +321,44 @@ func Normalize(v any) any {
 		return *x
 	case fmt.Stringer:
 		return x.String()
+	}
+	// typed slices, arrays, maps and pointers (ClickHouse, Cassandra)
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return Normalize(rv.Elem().Interface())
+	case reflect.Slice, reflect.Array:
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return nil
+		}
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = Normalize(rv.Index(i).Interface())
+		}
+		return out
+	case reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+		out := make(map[string]any, rv.Len())
+		it := rv.MapRange()
+		for it.Next() {
+			out[FormatValue(Normalize(it.Key().Interface()), KindOther)] = Normalize(it.Value().Interface())
+		}
+		return out
+	case reflect.String:
+		return rv.String()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return rv.Uint()
+	case reflect.Float32, reflect.Float64:
+		return rv.Float()
+	case reflect.Bool:
+		return rv.Bool()
 	}
 	return fmt.Sprint(v)
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/giovanni/lumino/internal/db"
+	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
@@ -147,5 +148,19 @@ func TestOracle(t *testing.T) {
 		Samples:     map[string]string{"c_bool": "1", "c_date": "2024-02-29", "c_nvarchar": "ñandú ✓"},
 		EmptyIsNull: true,
 		Expect:      []db.ObjectType{db.ObjFunction, db.ObjProcedure, db.ObjSequence, db.ObjMatView, db.ObjPackage},
+	})
+}
+
+func TestClickHouse(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:          "clickhouse",
+		Config:        db.Config{Driver: "clickhouse", Host: "127.0.0.1", Port: 55900, User: "lumino", Password: "lumino"},
+		Fixture:       dbtest.Fixture("clickhouse"),
+		Schema:        "lumino_test",
+		BigRows:       100000,
+		Sleep:         "SELECT count() FROM numbers(1000000000000) WHERE sipHash64(number) = 0",
+		Samples:       map[string]string{"c_arr": "[1,2,3]", "c_ubig": "18446744073709551615"},
+		NoErrPosition: true,
+		Expect:        []db.ObjectType{db.ObjMatView},
 	})
 }

@@ -274,6 +274,8 @@ func sameValue(k db.Kind, sample string, got any, readKind db.Kind) bool {
 			return false
 		}
 		return reflect.DeepEqual(a, b)
+	case db.KindArray:
+		return strings.ReplaceAll(txt, " ", "") == strings.ReplaceAll(sample, " ", "")
 	case db.KindUUID:
 		return strings.EqualFold(strings.ReplaceAll(txt, "-", ""), strings.ReplaceAll(sample, "-", ""))
 	case db.KindDate, db.KindTime, db.KindTimestamp, db.KindTimestampTZ:
