@@ -384,8 +384,13 @@ func Run(t *testing.T, tg Target) {
 			t.Fatal(err)
 		}
 		exec(t, s, insertCustomer(d, &tg, 9002, "tx-commit"))
-		if got := scalar(t, other, count); got != n0 {
-			t.Fatalf("uncommitted insert visible to another session (%s)", got)
+		// locking databases (SQL Server) block the reader instead: a
+		// timeout means the row isn't visible either
+		tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		cols, rows, err := Query(tctx, other, count)
+		cancel()
+		if err == nil && db.FormatValue(rows[0][0], cols[0].Kind) != n0 {
+			t.Fatalf("uncommitted insert visible to another session")
 		}
 		if err := s.Commit(ctx); err != nil {
 			t.Fatal(err)

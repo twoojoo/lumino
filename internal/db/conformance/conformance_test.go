@@ -5,11 +5,14 @@
 package conformance
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/giovanni/lumino/internal/db"
+	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
 	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
@@ -86,4 +89,47 @@ func TestSQLite(t *testing.T) {
 		Samples:       map[string]string{"c_dec": "12345678.1234"},
 		NoErrPosition: true,
 	})
+}
+
+func TestSQLServer(t *testing.T) {
+	cfg := db.Config{Driver: "sqlserver", Host: "127.0.0.1", Port: 55433, User: "sa", Password: "Lumino_pass1"}
+	dbtest.Run(t, dbtest.Target{
+		Name:   "sqlserver",
+		Config: withDB(cfg, "lumino_test"),
+		Setup: func(t *testing.T) {
+			// the test database must exist before connecting to it
+			createDB(t, cfg, "IF DB_ID('lumino_test') IS NULL CREATE DATABASE lumino_test")
+		},
+		Fixture:       dbtest.Fixture("sqlserver"),
+		Schema:        "lumino_test",
+		BigRows:       100000,
+		Sleep:         "WAITFOR DELAY '00:00:30'; SELECT 1",
+		Samples:       map[string]string{"c_money": "1234.5678"},
+		NoErrPosition: false,
+		Expect:        []db.ObjectType{db.ObjFunction, db.ObjProcedure, db.ObjSequence},
+	})
+}
+
+func withDB(c db.Config, name string) db.Config { c.Database = name; return c }
+
+// createDB runs an admin statement on the server's default database,
+// retrying while the server starts.
+func createDB(t *testing.T, cfg db.Config, stmt string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		conn, err := db.Open(ctx, &cfg, db.OpenOptions{})
+		if err == nil {
+			err = dbtest.Load(ctx, conn, stmt)
+			conn.Close()
+			if err == nil {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("setup: %v", err)
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
