@@ -20,6 +20,7 @@ import (
 	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
 	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
 	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
+	_ "github.com/giovanni/lumino/internal/db/adapters/trino"
 	"github.com/giovanni/lumino/internal/db/dbtest"
 )
 
@@ -191,5 +192,18 @@ func TestCockroach(t *testing.T) {
 		Samples:       map[string]string{"c_arr": "{1,2,3}", "c_interval": "1 day 02:03:04"},
 		Expect:        []db.ObjectType{db.ObjMatView, db.ObjSequence},
 		NoErrPosition: true,
+	})
+}
+
+func TestTrino(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:    "trino",
+		Config:  db.Config{Driver: "trino", Host: "127.0.0.1", Port: 55080, Database: "memory", User: "lumino"},
+		Fixture: dbtest.Fixture("trino"),
+		Catalog: "memory",
+		Schema:  "lumino_test",
+		BigRows: 100000,
+		Sleep:   "SELECT count(*) FROM tpch.sf100.lineitem WHERE comment LIKE '%xyz%'",
+		NoKeys:  true,
 	})
 }

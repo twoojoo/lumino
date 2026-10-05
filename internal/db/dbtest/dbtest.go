@@ -46,6 +46,8 @@ type Target struct {
 	Eventual bool
 	// ExtraObjects lists object types expected besides tables and views.
 	Expect []db.ObjectType
+	// NoKeys: no primary keys or NOT NULL constraints (Trino).
+	NoKeys bool
 	// Setup runs before the suite (e.g. waits for a slow server).
 	Setup func(t *testing.T)
 }
@@ -206,6 +208,9 @@ func Run(t *testing.T, tg Target) {
 		}
 		if got := colNames(cust); !slices.Equal(got, ids(&tg, "id", "name", "email", "created_at")) {
 			t.Errorf("customers columns %v", got)
+		}
+		if tg.NoKeys {
+			return
 		}
 		if !slices.Equal(cust.PrimaryKey, ids(&tg, "id")) {
 			t.Errorf("customers pk %v", cust.PrimaryKey)
