@@ -319,7 +319,8 @@ func (d *ConnDialog) save(connect bool) {
 		d.err = err.Error()
 		return
 	}
-	if c.Password != "" || !c.SavePassword {
+	if d.info().Has(db.FieldPassword) {
+		// saved even when empty: an empty password is a valid one
 		if err := secrets.Set(c.ID, secrets.Password, c.Password, c.SavePassword); err != nil {
 			d.err = "Keyring: " + err.Error()
 			return

@@ -24,9 +24,16 @@ import (
 	"gioui.org/unit"
 
 	"github.com/giovanni/lumino/internal/db"
+	_ "github.com/giovanni/lumino/internal/db/adapters/cassandra"
+	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
+	_ "github.com/giovanni/lumino/internal/db/adapters/cockroach"
+	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
+	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
+	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
 	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
 	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
+	_ "github.com/giovanni/lumino/internal/db/adapters/trino"
 	"github.com/giovanni/lumino/internal/db/dbtest"
 	"github.com/giovanni/lumino/internal/prefs"
 	"github.com/giovanni/lumino/internal/secrets"
@@ -58,7 +65,7 @@ func newHarness(t *testing.T, conns []db.Config, opts Options) *harness {
 	secrets.UseMock()
 	p := prefs.Load()
 	for _, c := range conns {
-		if c.Password != "" {
+		if c.SavePassword {
 			_ = secrets.Set(c.ID, secrets.Password, c.Password, true)
 		}
 		p.PutConn(c)

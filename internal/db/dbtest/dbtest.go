@@ -106,7 +106,7 @@ func Prepare(t *testing.T, tg Target) db.Conn {
 	for {
 		conn, err = db.Open(ctx, &tg.Config, db.OpenOptions{})
 		var dbe *db.Error
-		if err == nil || time.Now().After(deadline) || errors.As(err, &dbe) {
+		if err == nil || time.Now().After(deadline) || errors.As(err, &dbe) || strings.Contains(err.Error(), "unknown driver") {
 			break // connected, gave up, or the server answered with an error
 		}
 		t.Logf("open %s: %v (retrying)", tg.Name, err)
