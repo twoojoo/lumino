@@ -351,12 +351,12 @@ func (cs *connState) loadSchemas(cat string) {
 }
 
 func (cs *connState) loadObjects(k metaKey) {
-	cs.load("objects:"+k.catalog+"."+k.schema, func(ctx context.Context, c db.Conn) (any, error) {
+	cs.load("objects:"+k.catalog+"\x00"+k.schema, func(ctx context.Context, c db.Conn) (any, error) {
 		return c.Catalog().Objects(ctx, db.ObjectRef{Catalog: k.catalog, Schema: k.schema})
 	}, func(v any) { cs.objects[k] = v.([]db.Object) })
 }
 
-func tableKey(r db.ObjectRef) string { return "table:" + r.Catalog + "." + r.Schema + "." + r.Name }
+func tableKey(r db.ObjectRef) string { return "table:" + r.Catalog + "\x00" + r.Schema + "\x00" + r.Name }
 
 // loadTable describes a table; then runs with the result (also cached).
 func (cs *connState) loadTable(ref db.ObjectRef, then func(*db.TableInfo, error)) {

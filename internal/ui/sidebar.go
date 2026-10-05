@@ -255,7 +255,7 @@ func (s *Sidebar) folders(rr []treeRow, cs *connState, k metaKey, depth int, q s
 	objs, ok := cs.objects[k]
 	parent := schemaKey(cs.id, k)
 	if !ok {
-		return s.pending(rr, cs, "objects:"+k.catalog+"."+k.schema, parent, depth, func() { cs.loadObjects(k) })
+		return s.pending(rr, cs, "objects:"+k.catalog+"\x00"+k.schema, parent, depth, func() { cs.loadObjects(k) })
 	}
 	byType := map[db.ObjectType][]db.Object{}
 	for _, o := range objs {
