@@ -58,9 +58,10 @@ type ConsoleTab struct {
 	startH   int
 	curH     int
 
-	stmtVer int
-	stmts   []sqlx.Statement
-	dialect db.Dialect
+	stmtVer  int
+	stmts    []sqlx.Statement
+	stmtText string
+	dialect  db.Dialect
 
 	runBtn, scriptBtn, stopBtn, commitBtn, rollbackBtn, schemaBtn widget.Clickable
 	histBtn, saveBtn, aiBtn, fetchAllBtn, exportBtn, valueBtn     widget.Clickable
@@ -281,9 +282,42 @@ func (t *ConsoleTab) command(cmd string) bool {
 func (t *ConsoleTab) statements() []sqlx.Statement {
 	if t.stmtVer != t.ed.buf.version || t.stmts == nil {
 		t.stmtVer = t.ed.buf.version
-		t.stmts = sqlx.Split(t.ed.Text(), t.ed.lex)
+		t.stmtText = t.ed.Text()
+		t.stmts = sqlx.Split(t.stmtText, t.ed.lex)
 	}
 	return t.stmts
+}
+
+// statementsLazy is statements() for per-frame decorations: big scripts
+// are re-split only once typing pauses (nil = not available yet).
+func (t *ConsoleTab) statementsLazy(now time.Time) []sqlx.Statement {
+	if t.stmtVer == t.ed.buf.version && t.stmts != nil {
+		return t.stmts
+	}
+	if t.ed.buf.size() > 200_000 && now.Sub(t.ed.buf.lastEdit) < 400*time.Millisecond {
+		return nil
+	}
+	return t.statements()
+}
+
+// window returns the text around the caret (whole lines) and the caret
+// offset in it: completion of big scripts doesn't split everything.
+func (t *ConsoleTab) window(before, after int) (string, int) {
+	e := t.ed
+	from := max(0, e.caret.line-before)
+	to := min(e.buf.lineCount()-1, e.caret.line+after)
+	var b strings.Builder
+	caret := 0
+	for l := from; l <= to; l++ {
+		if l == e.caret.line {
+			caret = b.Len() + e.caret.col
+		}
+		b.WriteString(e.buf.lines[l])
+		if l < to {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), caret
 }
 
 // targets picks what to execute: the selection, the statement at the
@@ -305,7 +339,7 @@ func (t *ConsoleTab) targets(all bool) []sqlx.Statement {
 	if all {
 		return stmts
 	}
-	i := sqlx.StatementAt(stmts, t.ed.Text(), t.ed.CaretOffset())
+	i := sqlx.StatementAt(stmts, t.stmtText, t.ed.CaretOffset())
 	if i < 0 {
 		return nil
 	}
@@ -632,8 +666,8 @@ func (t *ConsoleTab) pickSchema() {
 func (t *ConsoleTab) Layout(gtx C) D {
 	t.handleButtons(gtx)
 	// current statement marker
-	if stmts := t.statements(); len(stmts) > 0 && t.ed.focused {
-		if i := sqlx.StatementAt(stmts, t.ed.Text(), t.ed.CaretOffset()); i >= 0 {
+	if stmts := t.statementsLazy(gtx.Now); len(stmts) > 0 && t.ed.focused {
+		if i := sqlx.StatementAt(stmts, t.stmtText, t.ed.CaretOffset()); i >= 0 {
 			t.ed.StmtFrom = t.ed.buf.posAt(stmts[i].Start).line
 			t.ed.StmtTo = t.ed.buf.posAt(stmts[i].End).line
 		}
@@ -1092,13 +1126,12 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 	if cs.status != stReady {
 		return t.keywordItems(nil)
 	}
-	stmts := t.statements()
-	caret := e.CaretOffset()
-	i := sqlx.StatementAt(stmts, e.Text(), caret)
-	text, rel := e.Text(), caret
-	if i >= 0 && caret >= stmts[i].Start && caret <= stmts[i].End+1 {
-		end := min(len(text), max(stmts[i].End, caret))
-		text, rel = text[stmts[i].Start:end], caret-stmts[i].Start
+	text, rel := t.window(300, 100)
+	stmts := sqlx.Split(text, e.lex)
+	i := sqlx.StatementAt(stmts, text, rel)
+	if i >= 0 && rel >= stmts[i].Start && rel <= stmts[i].End+1 {
+		end := min(len(text), max(stmts[i].End, rel))
+		text, rel = text[stmts[i].Start:end], rel-stmts[i].Start
 	} else {
 		// caret outside statements (new line): use the current line
 		l := e.buf.lines[e.caret.line]

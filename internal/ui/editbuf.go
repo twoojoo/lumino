@@ -33,6 +33,8 @@ type textBuf struct {
 
 	undo, redo []bufEdit
 	lastEdit   time.Time
+	size_      int
+	sizeVer    int
 	groupOpen  bool
 	// onSplice reports replaced line ranges: lines [from, from+removed)
 	// became [from, from+added). Used to keep per-line caches aligned.
@@ -70,6 +72,18 @@ func (b *textBuf) setText(s string) {
 func (b *textBuf) text() string { return strings.Join(b.lines, "\n") }
 
 func (b *textBuf) lineCount() int { return len(b.lines) }
+
+// size approximates the text length in bytes (cached per version).
+func (b *textBuf) size() int {
+	if b.sizeVer != b.version {
+		n := 0
+		for _, l := range b.lines {
+			n += len(l) + 1
+		}
+		b.size_, b.sizeVer = n, b.version
+	}
+	return b.size_
+}
 
 func (b *textBuf) clamp(p tpos) tpos {
 	if p.line < 0 {

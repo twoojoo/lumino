@@ -536,3 +536,42 @@ func TestUIAllDatabases(t *testing.T) {
 		})
 	}
 }
+
+// TestUIEditorPerformance: a 50k-line script stays fluid.
+func TestUIEditorPerformance(t *testing.T) {
+	path := sqliteFixture(t, 10)
+	h := newHarness(t, []db.Config{{ID: "lite", Name: "perf", Driver: "sqlite", File: path}}, Options{Connection: "perf"})
+	h.waitFor("console", func() bool { return h.console() != nil })
+	c := h.console()
+	var b strings.Builder
+	for i := 0; i < 50000; i++ {
+		fmt.Fprintf(&b, "SELECT id, name, 'str %d' AS s, %d * 2 FROM customers WHERE id = %d; -- comment\n", i, i, i%3)
+	}
+	c.ed.SetText(b.String())
+	c.ed.SetCaretOffset(0)
+	h.focusEditor(c)
+	h.frame()
+	start := time.Now()
+	frames := 0
+	for time.Since(start) < 2*time.Second {
+		c.ed.scrollY += 9000
+		h.frame()
+		frames++
+	}
+	scroll := 2000 / float64(frames)
+	// typing at the top re-highlights incrementally
+	start = time.Now()
+	for i := 0; i < 50; i++ {
+		h.events(key.EditEvent{Text: "x"})
+	}
+	typing := float64(time.Since(start).Milliseconds()) / 50
+	t.Logf("50k lines: scroll %.1f ms/frame, typing %.1f ms/keystroke (3 frames each)", scroll, typing)
+	if scroll > 50 || typing > 150 {
+		t.Fatalf("editor too slow: scroll %.1f ms/frame, typing %.1f ms", scroll, typing)
+	}
+	// run a statement in the middle of the big script
+	c.ed.SetCaretOffset(len(c.ed.Text()) / 2)
+	c.run(false)
+	h.waitFor("run in big script", func() bool { return !c.running && len(c.results) == 1 && c.results[0].err == nil })
+	h.shot("30-big-script")
+}
