@@ -1,9 +1,9 @@
-# Kubeon releases
+# Lumino releases
 
-Downloads of **Kubeon**, a native Kubernetes IDE. This repository only hosts
+Downloads of **Lumino**, a native Kubernetes IDE. This repository only hosts
 release packages; the source code is not public.
 
-Get the latest version from [Releases](https://github.com/twoojoo/kubeon-releases/releases/latest):
+Get the latest version from [Releases](https://github.com/twoojoo/lumino-releases/releases/latest):
 
 | OS | Package |
 |---|---|
@@ -11,13 +11,13 @@ Get the latest version from [Releases](https://github.com/twoojoo/kubeon-release
 | Windows 10+ (x64, ARM64) | portable `.zip` |
 | macOS 12+ (Apple silicon and Intel) | `.dmg` or `.zip` |
 
-Kubeon updates itself from here (Preferences → Updates). Installs from
+Lumino updates itself from here (Preferences → Updates). Installs from
 `.deb`/`.rpm` are updated through the package manager.
 
 ## Verifying a download
 
 `SHA256SUMS.txt` lists the checksum of every file and is signed with the
-Kubeon release key (ed25519, `SHA256SUMS.txt.sig`, base64). Public key:
+Lumino release key (ed25519, `SHA256SUMS.txt.sig`, base64). Public key:
 
 ```
 pX1Dosf+ulIw6K2Q6uyYvCbwz99oGrYDw3AmXOLltvg=

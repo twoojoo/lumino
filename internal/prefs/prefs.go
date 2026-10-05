@@ -1,5 +1,6 @@
-// Package prefs persists user preferences in ~/.config/kubeon/settings.json:
-// theme, per-context safety policies, saved port-forwards and bookmarks.
+// Package prefs persists user preferences in ~/.config/lumino/settings.json:
+// theme, saved connections (without secrets: those live in the OS keyring),
+// saved queries and the workspace (open tabs) restored at startup.
 package prefs
 
 import (
@@ -10,43 +11,43 @@ import (
 	"regexp"
 	"slices"
 	"sync"
+
+	"github.com/giovanni/lumino/internal/db"
 )
 
-// ContextPolicy is the safety policy of a kube context.
-type ContextPolicy struct {
-	// Protected marks a production-like context: red frame, type-to-confirm
-	// for destructive actions. nil = auto-detect from the context name.
-	Protected *bool `json:"protected,omitempty"`
-	// ReadOnly blocks every mutating action (UI and assistant proposals).
-	ReadOnly bool `json:"readOnly,omitempty"`
+// SavedQuery is a named query of a connection ("" = any connection).
+type SavedQuery struct {
+	Name   string `json:"name"`
+	ConnID string `json:"connID,omitempty"`
+	SQL    string `json:"sql"`
 }
 
-// PortForward is a saved tunnel re-opened when the context connects.
-type PortForward struct {
-	Context   string `json:"context"`
-	GVR       string `json:"gvr"`
-	Path      string `json:"path"`
-	Local     int    `json:"local"`
-	Remote    int    `json:"remote"`
-	AutoStart bool   `json:"autoStart"`
-}
-
-// Bookmark is a saved view.
-type Bookmark struct {
-	Name      string `json:"name"`
-	Context   string `json:"context"` // "" = any context
-	GVR       string `json:"gvr"`
-	Namespace string `json:"namespace"`
-	Filter    string `json:"filter,omitempty"`
+// TabState is an open tab restored at startup.
+type TabState struct {
+	Kind   string       `json:"kind"` // console | table
+	ConnID string       `json:"connID"`
+	Title  string       `json:"title,omitempty"`
+	Text   string       `json:"text,omitempty"` // console SQL
+	Schema string       `json:"schema,omitempty"`
+	Ref    db.ObjectRef `json:"ref,omitempty"` // table tab
+	Manual bool         `json:"manual,omitempty"`
 }
 
 // Prefs is the persisted state.
 type Prefs struct {
-	Theme        string                   `json:"theme,omitempty"` // "dark" | "light"
-	Contexts     map[string]ContextPolicy `json:"contexts,omitempty"`
-	PortForwards []PortForward            `json:"portForwards,omitempty"`
-	Bookmarks    []Bookmark               `json:"bookmarks,omitempty"`
-	CheckUpdates *bool                    `json:"checkUpdates,omitempty"` // nil = on
+	Theme        string         `json:"theme,omitempty"` // ayu-dark | ayu-light
+	Connections  []db.Config    `json:"connections,omitempty"`
+	SavedQueries []SavedQuery   `json:"savedQueries,omitempty"`
+	Tabs         []TabState     `json:"tabs,omitempty"`
+	ActiveTab    int            `json:"activeTab,omitempty"`
+	CheckUpdates *bool          `json:"checkUpdates,omitempty"` // nil = on
+	FetchSize    int            `json:"fetchSize,omitempty"`    // rows per page (default 500)
+	MaxRows      int            `json:"maxRows,omitempty"`      // rows kept in memory per result (default 1M)
+	NotifyAfter  int            `json:"notifyAfter,omitempty"`  // seconds before a finished query notifies (default 10)
+	Expanded     []string       `json:"expanded,omitempty"`     // tree nodes left open
+	SidebarWidth int            `json:"sidebarWidth,omitempty"`
+	FontSize     int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
+	Extra        map[string]any `json:"extra,omitempty"`
 
 	// LoadError reports a settings file that could not be parsed.
 	LoadError error `json:"-"`
@@ -55,16 +56,16 @@ type Prefs struct {
 	path string
 }
 
-// Dir returns the config directory ($KUBEON_CONFIG_DIR overrides).
+// Dir returns the config directory ($LUMINO_CONFIG_DIR overrides).
 func Dir() string {
-	if d := os.Getenv("KUBEON_CONFIG_DIR"); d != "" {
+	if d := os.Getenv("LUMINO_CONFIG_DIR"); d != "" {
 		return d
 	}
 	d, err := os.UserConfigDir()
 	if err != nil {
 		d = "."
 	}
-	return filepath.Join(d, "kubeon")
+	return filepath.Join(d, "lumino")
 }
 
 // Load reads the preferences (missing file → defaults).
@@ -72,16 +73,13 @@ func Load() *Prefs {
 	p := Prefs{path: filepath.Join(Dir(), "settings.json")}
 	if b, err := os.ReadFile(p.path); err == nil {
 		if err := json.Unmarshal(b, &p); err != nil {
-			// keep the broken file (context policies!) instead of
+			// keep the broken file (saved connections!) instead of
 			// overwriting it with defaults on the next save
 			p = Prefs{path: p.path, LoadError: fmt.Errorf("%s is invalid (%v); moved to %s", p.path, err, Quarantine(p.path, err))}
 		}
 	}
-	if p.Contexts == nil {
-		p.Contexts = map[string]ContextPolicy{}
-	}
-	if p.Theme != "light" {
-		p.Theme = "dark"
+	if p.Theme != "ayu-light" && p.Theme != "ayu-mirage" {
+		p.Theme = "ayu-dark"
 	}
 	return &p
 }
@@ -90,118 +88,120 @@ func Load() *Prefs {
 func (p *Prefs) Save() error {
 	p.mx.Lock()
 	defer p.mx.Unlock()
-	if err := os.MkdirAll(filepath.Dir(p.path), 0o700); err != nil {
+	b, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(p, "", "  ")
 	return WriteFileAtomic(p.path, b)
 }
 
 var prodRx = regexp.MustCompile(`(?i)(^|[^a-z])(prod|production|prd|live)([^a-z]|$)`)
 
-// LooksProduction guesses production contexts from their name.
-func LooksProduction(ctx string) bool { return prodRx.MatchString(ctx) }
+// LooksProduction guesses production connections from their name.
+func LooksProduction(name string) bool { return prodRx.MatchString(name) }
 
-// Protected reports whether ctx is protected (explicit or auto-detected).
-func (p *Prefs) Protected(ctx string) bool {
-	if c, ok := p.Contexts[ctx]; ok && c.Protected != nil {
+// Protected reports whether a connection is protected (explicit or guessed).
+func Protected(c *db.Config) bool {
+	if c.Protected != nil {
 		return *c.Protected
 	}
-	return LooksProduction(ctx)
+	return LooksProduction(c.Name)
 }
 
-// ReadOnly reports whether ctx is read-only.
-func (p *Prefs) ReadOnly(ctx string) bool { return p.Contexts[ctx].ReadOnly }
+// Conn returns the connection with id.
+func (p *Prefs) Conn(id string) (*db.Config, bool) {
+	for i := range p.Connections {
+		if p.Connections[i].ID == id {
+			return &p.Connections[i], true
+		}
+	}
+	return nil, false
+}
 
-// UpdatesEnabled reports whether kubeon looks for new releases (default on).
+// PutConn adds or replaces a connection (by id).
+func (p *Prefs) PutConn(c db.Config) {
+	c.Password = ""
+	if c.SSH != nil {
+		s := *c.SSH
+		s.Secret = ""
+		c.SSH = &s
+	}
+	for i := range p.Connections {
+		if p.Connections[i].ID == c.ID {
+			p.Connections[i] = c
+			return
+		}
+	}
+	p.Connections = append(p.Connections, c)
+}
+
+// RemoveConn deletes a connection and its saved queries.
+func (p *Prefs) RemoveConn(id string) {
+	p.Connections = slices.DeleteFunc(p.Connections, func(c db.Config) bool { return c.ID == id })
+	p.SavedQueries = slices.DeleteFunc(p.SavedQueries, func(q SavedQuery) bool { return q.ConnID == id })
+	p.Tabs = slices.DeleteFunc(p.Tabs, func(t TabState) bool { return t.ConnID == id })
+}
+
+// MoveConn moves a connection before index to (reordering in the tree).
+func (p *Prefs) MoveConn(id string, to int) {
+	i := slices.IndexFunc(p.Connections, func(c db.Config) bool { return c.ID == id })
+	if i < 0 {
+		return
+	}
+	c := p.Connections[i]
+	p.Connections = slices.Delete(p.Connections, i, i+1)
+	to = max(0, min(to, len(p.Connections)))
+	p.Connections = slices.Insert(p.Connections, to, c)
+}
+
+// UpdatesEnabled reports whether lumino looks for new releases (default on).
 func (p *Prefs) UpdatesEnabled() bool { return p.CheckUpdates == nil || *p.CheckUpdates }
 
 // SetUpdates turns release checks on or off.
 func (p *Prefs) SetUpdates(on bool) { p.CheckUpdates = &on }
 
-// SetPolicy stores the policy of ctx.
-func (p *Prefs) SetPolicy(ctx string, protected, readOnly bool) {
-	c := p.Contexts[ctx]
-	c.Protected, c.ReadOnly = &protected, readOnly
-	p.Contexts[ctx] = c
-}
-
-func samePF(a, b PortForward) bool {
-	return a.Context == b.Context && a.Path == b.Path && a.Remote == b.Remote && a.GVR == b.GVR
-}
-
-// SavePortForward adds or updates a saved forward.
-func (p *Prefs) SavePortForward(f PortForward) {
-	for i := range p.PortForwards {
-		if samePF(p.PortForwards[i], f) {
-			p.PortForwards[i] = f
-			return
-		}
+// Fetch returns the page size for result fetching.
+func (p *Prefs) Fetch() int {
+	if p.FetchSize <= 0 {
+		return 500
 	}
-	p.PortForwards = append(p.PortForwards, f)
+	return p.FetchSize
 }
 
-// RemovePortForward deletes a saved forward.
-func (p *Prefs) RemovePortForward(f PortForward) {
-	p.PortForwards = slices.DeleteFunc(p.PortForwards, func(x PortForward) bool { return samePF(x, f) })
-}
-
-// SavedForwards returns saved forwards of ctx.
-func (p *Prefs) SavedForwards(ctx string) []PortForward {
-	var out []PortForward
-	for _, f := range p.PortForwards {
-		if f.Context == ctx {
-			out = append(out, f)
-		}
+// RowLimit returns the maximum rows kept in memory per result.
+func (p *Prefs) RowLimit() int {
+	if p.MaxRows <= 0 {
+		return 1_000_000
 	}
-	return out
+	return p.MaxRows
 }
 
-// AddBookmark adds or replaces a bookmark (same name in the same context).
-func (p *Prefs) AddBookmark(b Bookmark) {
-	p.RemoveBookmark(b)
-	p.Bookmarks = append(p.Bookmarks, b)
+// NotifySeconds returns the duration after which finished queries notify.
+func (p *Prefs) NotifySeconds() int {
+	if p.NotifyAfter <= 0 {
+		return 10
+	}
+	return p.NotifyAfter
 }
 
-// RemoveBookmark deletes the bookmark with b's name and context.
-func (p *Prefs) RemoveBookmark(b Bookmark) {
-	p.Bookmarks = slices.DeleteFunc(p.Bookmarks, func(x Bookmark) bool { return x.Name == b.Name && x.Context == b.Context })
+// SaveQuery adds or replaces a saved query (same name and connection).
+func (p *Prefs) SaveQuery(q SavedQuery) {
+	p.RemoveQuery(q)
+	p.SavedQueries = append(p.SavedQueries, q)
 }
 
-// BookmarksFor returns bookmarks usable on ctx.
-func (p *Prefs) BookmarksFor(ctx string) []Bookmark {
-	var out []Bookmark
-	for _, b := range p.Bookmarks {
-		if b.Context == "" || b.Context == ctx {
-			out = append(out, b)
+// RemoveQuery deletes the saved query with q's name and connection.
+func (p *Prefs) RemoveQuery(q SavedQuery) {
+	p.SavedQueries = slices.DeleteFunc(p.SavedQueries, func(x SavedQuery) bool { return x.Name == q.Name && x.ConnID == q.ConnID })
+}
+
+// QueriesFor returns saved queries usable on a connection.
+func (p *Prefs) QueriesFor(connID string) []SavedQuery {
+	var out []SavedQuery
+	for _, q := range p.SavedQueries {
+		if q.ConnID == "" || q.ConnID == connID {
+			out = append(out, q)
 		}
 	}
 	return out
-}
-
-// MigrateLegacyDirs moves config and cache directories created under the
-// previous application name (k9desk) to the kubeon locations, once.
-func MigrateLegacyDirs() {
-	move := func(base string) {
-		if base == "" {
-			return
-		}
-		oldDir, newDir := filepath.Join(base, "k9desk"), filepath.Join(base, "kubeon")
-		if _, err := os.Stat(newDir); err == nil {
-			return
-		}
-		if st, err := os.Stat(oldDir); err == nil && st.IsDir() {
-			_ = os.Rename(oldDir, newDir)
-			// the log file keeps its old name inside; rename it too
-			_ = os.Rename(filepath.Join(newDir, "k9desk.log"), filepath.Join(newDir, "kubeon.log"))
-		}
-	}
-	if os.Getenv("KUBEON_CONFIG_DIR") == "" {
-		if d, err := os.UserConfigDir(); err == nil {
-			move(d)
-		}
-	}
-	if d, err := os.UserCacheDir(); err == nil {
-		move(d)
-	}
 }

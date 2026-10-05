@@ -1,51 +1,81 @@
 package ui
 
 import (
+	"strconv"
+
 	"gioui.org/layout"
 	"gioui.org/widget"
 
 	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/giovanni/lumino/internal/secrets"
 )
 
-// PrefsPanel edits appearance, context safety, bookmarks and forwards.
+// PrefsPanel edits appearance, data and update preferences.
 type PrefsPanel struct {
 	app  *App
 	done bool
+	d    dialog
 
-	darkBtn, lightBtn, protBtn, roBtn, pfBtn, closeBtn widget.Clickable
-	updAutoBtn, updNowBtn                              widget.Clickable
-	bmDel                                              map[string]*widget.Clickable
-	bmOpen                                             map[string]*widget.Clickable
-	list                                               widget.List
+	themeBtns             []widget.Clickable
+	fontBtns              [5]widget.Clickable
+	fetch, maxRows, notif widget.Editor
+	updAutoBtn, updNowBtn widget.Clickable
+	saveBtn, closeBtn     widget.Clickable
+	err                   string
 }
 
+var fontSizes = []int{12, 13, 14, 15, 16}
+
 func newPrefsPanel(a *App) *PrefsPanel {
-	p := &PrefsPanel{app: a, bmDel: map[string]*widget.Clickable{}, bmOpen: map[string]*widget.Clickable{}}
-	p.list.Axis = layout.Vertical
+	p := &PrefsPanel{app: a, themeBtns: make([]widget.Clickable, len(Themes))}
+	for _, e := range []*widget.Editor{&p.fetch, &p.maxRows, &p.notif} {
+		e.SingleLine = true
+	}
+	p.fetch.SetText(strconv.Itoa(a.prefs.Fetch()))
+	p.maxRows.SetText(strconv.Itoa(a.prefs.RowLimit()))
+	p.notif.SetText(strconv.Itoa(a.prefs.NotifySeconds()))
 	return p
 }
 
 func (p *PrefsPanel) Done() bool { return p.done }
 
-func clickOf(m map[string]*widget.Clickable, k string) *widget.Clickable {
-	c := m[k]
-	if c == nil {
-		c = new(widget.Clickable)
-		m[k] = c
+func (p *PrefsPanel) apply() {
+	a := p.app
+	num := func(e *widget.Editor, lo, hi int, name string) (int, bool) {
+		n, err := strconv.Atoi(e.Text())
+		if err != nil || n < lo || n > hi {
+			p.err = name + ": enter a number between " + strconv.Itoa(lo) + " and " + strconv.Itoa(hi)
+			return 0, false
+		}
+		return n, true
 	}
-	return c
+	f, ok1 := num(&p.fetch, 50, 100000, "Rows per page")
+	m, ok2 := num(&p.maxRows, 1000, 50_000_000, "Rows kept in memory")
+	n, ok3 := num(&p.notif, 1, 3600, "Notify after")
+	if !ok1 || !ok2 || !ok3 {
+		return
+	}
+	a.prefs.FetchSize, a.prefs.MaxRows, a.prefs.NotifyAfter = f, m, n
+	a.savePrefs()
+	p.done = true
 }
 
 func (p *PrefsPanel) Layout(gtx C) D {
 	a, th := p.app, p.app.th
-	save := func() {
-		if err := a.prefs.Save(); err != nil {
-			a.flash("save preferences: "+err.Error(), true)
+	for i := range p.themeBtns {
+		if p.themeBtns[i].Clicked(gtx) {
+			a.setThemeName(Themes[i].ID)
+		}
+	}
+	for i := range p.fontBtns {
+		if p.fontBtns[i].Clicked(gtx) {
+			a.prefs.FontSize = fontSizes[i]
+			a.savePrefs()
 		}
 	}
 	if p.updAutoBtn.Clicked(gtx) {
 		a.prefs.SetUpdates(!a.prefs.UpdatesEnabled())
-		save()
+		a.savePrefs()
 		if a.prefs.UpdatesEnabled() {
 			a.checkUpdates(false)
 		}
@@ -54,151 +84,75 @@ func (p *PrefsPanel) Layout(gtx C) D {
 		p.done = true
 		a.checkUpdates(true)
 	}
-	if p.darkBtn.Clicked(gtx) && a.prefs.Theme != "dark" {
-		a.toggleTheme()
+	if p.saveBtn.Clicked(gtx) {
+		p.apply()
 	}
-	if p.lightBtn.Clicked(gtx) && a.prefs.Theme != "light" {
-		a.toggleTheme()
-	}
-	ctx := ""
-	if a.cluster != nil {
-		ctx = a.cluster.Context
-	}
-	if ctx != "" && p.protBtn.Clicked(gtx) {
-		a.prefs.SetPolicy(ctx, !a.prefs.Protected(ctx), a.prefs.ReadOnly(ctx))
-		save()
-	}
-	if ctx != "" && p.roBtn.Clicked(gtx) {
-		a.prefs.SetPolicy(ctx, a.prefs.Protected(ctx), !a.prefs.ReadOnly(ctx))
-		save()
-	}
-	if p.pfBtn.Clicked(gtx) {
-		a.overlay = newPortForwardPanel(a)
-		return D{}
-	}
-	if p.closeBtn.Clicked(gtx) {
+	if p.closeBtn.Clicked(gtx) || p.d.close.Clicked(gtx) {
 		p.done = true
 	}
-	var bms []prefs.Bookmark
-	if ctx != "" {
-		bms = a.prefs.BookmarksFor(ctx)
-	}
-	for _, b := range bms {
-		b := b
-		if clickOf(p.bmDel, b.Name).Clicked(gtx) {
-			a.prefs.RemoveBookmark(b)
-			save()
-		}
-		if clickOf(p.bmOpen, b.Name).Clicked(gtx) {
-			p.done = true
-			a.openBookmark(b)
+	themeSel, names := 0, make([]string, len(Themes))
+	for i, t := range Themes {
+		names[i] = t.Name
+		if t.ID == a.prefs.Theme {
+			themeSel = i
 		}
 	}
-
-	section := func(title string) layout.FlexChild {
-		return layout.Rigid(func(gtx C) D {
-			return layout.Inset{Top: 14, Bottom: 6}.Layout(gtx, func(gtx C) D {
-				return lbl(gtx, th, fontSans, 11, pal.TextDim, title)
-			})
-		})
+	fontSel, fontNames := 1, make([]string, len(fontSizes))
+	for i, s := range fontSizes {
+		fontNames[i] = strconv.Itoa(s)
+		if s == a.prefs.FontSize {
+			fontSel = i
+		}
 	}
-	w := min(gtx.Dp(560), gtx.Constraints.Max.X-gtx.Dp(40))
-	gtx.Constraints.Min.X, gtx.Constraints.Max.X = w, w
-	return rborder(gtx, pal.Border, pal.Panel, 10, func(gtx C) D {
-		return inset(18).Layout(gtx, func(gtx C) D {
-			items := []layout.FlexChild{
-				layout.Rigid(func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Flexed(1, func(gtx C) D { return iconText(gtx, th, icSettings, 16, pal.TextBright, "Preferences") }),
-						layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 11, pal.TextDim, AppName+" "+Version) }),
-						layout.Rigid(layout.Spacer{Width: 10}.Layout),
-						layout.Rigid(func(gtx C) D { return iconOnly(gtx, &p.closeBtn, icClose, 16) }),
-					)
-				}),
-				section("APPEARANCE"),
-				layout.Rigid(func(gtx C) D {
-					seg := func(cl *widget.Clickable, ic *widget.Icon, txt string, on bool) layout.FlexChild {
-						return layout.Rigid(func(gtx C) D {
-							b, c := colorNRGBA{}, pal.TextDim
-							if on {
-								b, c = pal.Selected, pal.TextBright
-							}
-							return pillButton(gtx, th, cl, ic, txt, c, b)
-						})
-					}
-					return rborder(gtx, pal.Border, pal.Bg, 7, func(gtx C) D {
-						return inset(2).Layout(gtx, func(gtx C) D {
-							return layout.Flex{}.Layout(gtx,
-								seg(&p.darkBtn, icMoon, "Dark", !pal.Light),
-								seg(&p.lightBtn, icSun, "Light", pal.Light),
-							)
-						})
-					})
-				}),
-			}
-			if ctx != "" {
-				items = append(items,
-					section("SAFETY FOR CONTEXT "+upper(ctx)),
-					layout.Rigid(func(gtx C) D {
-						return toggle(gtx, th, &p.protBtn, "Protected (production): red frame, type the name to confirm changes, confirm tunnels", a.prefs.Protected(ctx))
-					}),
-					layout.Rigid(func(gtx C) D {
-						note := "set explicitly"
-						if _, ok := a.prefs.Contexts[ctx]; !ok || a.prefs.Contexts[ctx].Protected == nil {
-							note = "auto-detected from the context name"
-						}
-						return layout.Inset{Left: 40, Bottom: 6}.Layout(gtx, func(gtx C) D {
-							return lbl(gtx, th, fontSans, 11, pal.TextDim, note)
-						})
-					}),
-					layout.Rigid(func(gtx C) D {
-						return toggle(gtx, th, &p.roBtn, "Read-only: block edits, deletes, scaling, shells and assistant actions (port-forwards stay allowed)", a.prefs.ReadOnly(ctx))
-					}),
-					section("UPDATES"),
-					layout.Rigid(func(gtx C) D {
-						return toggle(gtx, th, &p.updAutoBtn, "Check for new releases (daily, GitHub); updates are verified before installing", a.prefs.UpdatesEnabled())
-					}),
-					layout.Rigid(func(gtx C) D {
-						return layout.Inset{Top: 6}.Layout(gtx, func(gtx C) D {
-							return pillButton(gtx, th, &p.updNowBtn, icDownload, "Check now", pal.Text, pal.Hover)
-						})
-					}),
-					section("PORT-FORWARDS"),
-					layout.Rigid(func(gtx C) D {
-						n := len(a.prefs.SavedForwards(ctx))
-						return pillButton(gtx, th, &p.pfBtn, icForward, "Manage port-forwards ("+itoa(n)+" pinned)", pal.Text, pal.Hover)
-					}),
-					section("BOOKMARKS"),
-					layout.Rigid(func(gtx C) D {
-						if len(bms) == 0 {
-							return lbl(gtx, th, fontSans, 12, pal.TextDim, "None yet — press m on a resource view (or right-click → Bookmark).")
-						}
-						var ch []layout.FlexChild
-						for _, b := range bms {
-							b := b
-							ch = append(ch, layout.Rigid(func(gtx C) D {
-								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-									layout.Flexed(1, func(gtx C) D {
-										return clickOf(p.bmOpen, b.Name).Layout(gtx, func(gtx C) D {
-											return insetHV(4, 4).Layout(gtx, func(gtx C) D {
-												return iconText(gtx, th, iconFor(b.GVR), 12, pal.Text, b.Name)
-											})
-										})
-									}),
-									layout.Rigid(func(gtx C) D { return iconOnly(gtx, clickOf(p.bmDel, b.Name), icDelete, 14) }),
-								)
-							}))
-						}
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
-					}),
-				)
-			}
-			items = append(items, layout.Rigid(func(gtx C) D {
-				return layout.Inset{Top: 14}.Layout(gtx, func(gtx C) D {
-					return lbl(gtx, th, fontSans, 11, pal.TextDim, "Saved in "+shortPath(prefs.Dir())+"/settings.json")
+	lw := unitDp(170)
+	keyring := "System keyring available: saved passwords persist securely."
+	if !secrets.Available() {
+		keyring = "No system keyring: passwords are kept for the session only."
+	}
+	return p.d.layout(gtx, th, 600, icSettings, "Preferences", func(gtx C) D {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Appearance") }),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Theme", lw, func(gtx C) D { return segmented(gtx, th, p.themeBtns, names, themeSel) })
+			}),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Editor font size", lw, func(gtx C) D { return segmented(gtx, th, p.fontBtns[:], fontNames, fontSel) })
+			}),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Results") }),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Rows per page", lw, func(gtx C) D { return textField(gtx, th, &p.fetch, "500", true) })
+			}),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Rows kept in memory", lw, func(gtx C) D { return textField(gtx, th, &p.maxRows, "1000000", true) })
+			}),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Notify after (s)", lw, func(gtx C) D { return textField(gtx, th, &p.notif, "10", true) })
+			}),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Security") }),
+			layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 12, pal.Text, keyring) }),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Updates") }),
+			layout.Rigid(func(gtx C) D {
+				return toggle(gtx, th, &p.updAutoBtn, "Check for new releases (daily, GitHub); updates are verified before installing", a.prefs.UpdatesEnabled())
+			}),
+			layout.Rigid(func(gtx C) D {
+				return layout.Inset{Top: 6}.Layout(gtx, func(gtx C) D {
+					return pillButton(gtx, th, &p.updNowBtn, icDownload, "Check now", pal.Text, pal.Hover)
 				})
-			}))
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
-		})
-	})
+			}),
+			layout.Rigid(func(gtx C) D {
+				return layout.Inset{Top: 14}.Layout(gtx, func(gtx C) D {
+					return lbl(gtx, th, fontSans, 11, pal.TextDim, AppName+" "+Version+" · settings in "+shortPath(prefs.Dir()))
+				})
+			}),
+			layout.Rigid(func(gtx C) D {
+				if p.err == "" {
+					return D{}
+				}
+				return layout.Inset{Top: 8}.Layout(gtx, func(gtx C) D { return lbl(gtx, th, fontSans, 12, pal.Err, p.err) })
+			}),
+		)
+	}, footerButtons(nil,
+		func(gtx C) D { return pillButton(gtx, th, &p.closeBtn, nil, "Close", pal.Text, pal.Hover) },
+		func(gtx C) D { return button(gtx, th, &p.saveBtn, "Save", pal.Accent) },
+	))
 }

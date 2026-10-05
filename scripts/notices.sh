@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Writes THIRD_PARTY_NOTICES.txt (default dist/THIRD_PARTY_NOTICES.txt): the
-# licenses of everything linked into kubeon, the vendored k9s and Gio with a
-# list of kubeon's modifications, and where MPL-2.0 sources are available.
+# licenses of everything linked into lumino, the vendored k9s and Gio with a
+# list of lumino's modifications, and where MPL-2.0 sources are available.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,11 +17,11 @@ patches() { for p in "$1"/*.patch; do echo "  - $(basename "$p")"; done; }
 
 {
   cat <<HDR
-Kubeon — third-party notices
+Lumino — third-party notices
 ============================
 
-Kubeon includes software developed by third parties under the licenses
-reproduced below. None of them is copyleft for Kubeon's own code; files
+Lumino includes software developed by third parties under the licenses
+reproduced below. None of them is copyleft for Lumino's own code; files
 under the MPL-2.0 are used unmodified.
 
 Modified components
@@ -34,7 +34,7 @@ $(patches third_party/_k9s-patches)
   vendored in third_party/gio with these changes:
 $(patches third_party/_gio-patches)
 
-"k9s" is a project of its authors; Kubeon is not affiliated with or
+"k9s" is a project of its authors; Lumino is not affiliated with or
 endorsed by it.
 
 MPL-2.0 components
@@ -49,7 +49,7 @@ https://github.com/derailed/k9s/blob/$(cut -d' ' -f1 third_party/k9s/UPSTREAM)/L
 --------------------------------------------------------------------------------
 HDR
   cat third_party/k9s/LICENSE
-  GOFLAGS=-mod=mod go run "$GO_LICENSES" report --ignore github.com/giovanni/kubeon \
-    --template packaging/notices.tpl ./cmd/kubeon 2>/dev/null
+  GOFLAGS=-mod=mod go run "$GO_LICENSES" report --ignore github.com/giovanni/lumino \
+    --template packaging/notices.tpl ./cmd/lumino 2>/dev/null
 } > "$OUT"
 echo "wrote $OUT ($(grep -c '^License:' "$OUT") components)"

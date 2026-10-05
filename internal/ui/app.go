@@ -1,8 +1,7 @@
-// Package ui is the native Gio front-end of kubeon.
+// Package ui is the native Gio front-end of lumino.
 package ui
 
 import (
-	"context"
 	"fmt"
 	"image"
 	"log/slog"
@@ -20,18 +19,14 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"github.com/giovanni/lumino/internal/backend"
 	"github.com/giovanni/lumino/internal/notify"
 	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/safety"
 )
 
 // Options configure the UI.
 type Options struct {
-	Kubeconfig string
-	Context    string
-	Namespace  string
-	Resource   string
+	// Connection opens (and connects) a saved connection by name or id.
+	Connection string
 }
 
 // App is the root UI state. All fields are owned by the UI goroutine;
@@ -44,12 +39,8 @@ type App struct {
 	inboxMx sync.Mutex
 	inbox   []func()
 
-	contexts   []string
-	cluster    *backend.Cluster
-	connecting string
-	connErr    error
-	namespaces []string
-	ns         string // "" = all namespaces
+	prefs *prefs.Prefs
+	conns map[string]*connState
 
 	status    string
 	statusErr bool
@@ -58,30 +49,23 @@ type App struct {
 	sidebar *Sidebar
 	title   *TitleBar
 	ai      *AIPanel
-	prefs   *prefs.Prefs
 
 	maximized, winFocused  bool
 	rootTag                int
 	pointer                image.Point
 	pendingCopy            *string
-	tabs                   []*tabState
+	pendingPaste           *CodeEditor
+	tabs                   []Tab
 	tabIdx                 int
+	tabBtns                []widget.Clickable
+	tabClose               []widget.Clickable
+	tabTags                []int
 	newTabBtn              widget.Clickable
+	newConnBtn             widget.Clickable
 	backdropTag, dialogTag int
-	view                   *ResourceView
-	ovw                    *OverviewView
-	xray                   *XRayView
-	san                    *SanitizerView
-	rbac                   *RBACView
-	page                   string // current gvr, overviewGVR or xrayPage
-	navStack               []navState
-	drawer                 *Drawer
-	dock                   *Dock
 	overlay                overlay
+	welcome                welcome
 
-	ctxBtn        widget.Clickable
-	pfBtn         widget.Clickable
-	bellBtn       widget.Clickable
 	updBtn        widget.Clickable
 	upd           updState
 	tip           tooltip
@@ -93,29 +77,30 @@ type App struct {
 	lineSel       *lineSelect // line selection with the focus (this frame)
 	lineSelPrev   *lineSelect
 
-	events       []backend.HealthEvent
-	unread       int
-	notifyOn     bool
-	notifier     *notify.Notifier
-	healthCancel context.CancelFunc
+	notifier *notify.Notifier
+	saveAt   time.Time // debounced workspace save
 
 	onInvalidate func() // headless harness hook
 }
 
-// overlay is a modal layer (picker, confirm dialog).
+// overlay is a modal layer (picker, dialog, menu).
 type overlay interface {
 	Layout(gtx C) D
-	// Close reports whether the overlay asked to be dismissed.
+	// Done reports whether the overlay asked to be dismissed.
 	Done() bool
 }
 
-// Run opens the main window and blocks until it is closed.
-// Version is the kubeon release, shown in the preferences.
+// canceler is implemented by overlays that must know when they are
+// dismissed from outside (Esc, click on the backdrop).
+type canceler interface{ cancelled() }
+
+// Version is the lumino release, shown in the preferences.
 var Version = "dev"
 
+// Run opens the main window and blocks until it is closed.
 func Run(opts Options) error {
 	a := newApp(opts, new(app.Window))
-	a.w.Option(app.Title(AppName), app.Size(unit.Dp(1440), unit.Dp(900)), app.MinSize(unit.Dp(800), unit.Dp(500)),
+	a.w.Option(app.Title(AppName), app.Size(unit.Dp(1440), unit.Dp(900)), app.MinSize(unit.Dp(860), unit.Dp(520)),
 		app.Decorated(false))
 	a.start()
 
@@ -126,7 +111,8 @@ func Run(opts Options) error {
 }
 
 func newApp(opts Options, w *app.Window) *App {
-	a := App{opts: opts, th: newTheme(), ns: opts.Namespace, w: w, notifyOn: true, prefs: prefs.Load(), tipTags: map[string]*tipTag{}, sels: map[string]*selState{}}
+	a := App{opts: opts, th: newTheme(), w: w, prefs: prefs.Load(), conns: map[string]*connState{},
+		tipTags: map[string]*tipTag{}, sels: map[string]*selState{}}
 	setTheme(a.th, a.prefs.Theme)
 	if w != nil {
 		a.notifier = notify.New(AppName)
@@ -134,55 +120,29 @@ func newApp(opts Options, w *app.Window) *App {
 	a.sidebar = newSidebar(&a)
 	a.title = newTitleBar(&a)
 	a.ai = newAIPanel(&a)
-	a.view = newResourceView(&a)
-	a.ovw = newOverview(&a)
-	a.xray = newXRay(&a)
-	a.san = newSanitizer(&a)
-	a.rbac = newRBACView(&a)
-	a.drawer = newDrawer(&a)
-	a.dock = newDock(&a)
 	return &a
 }
 
-// ensureResources reloads the process-wide resource registry when an
-// abandoned, slower connect to another context overwrote it.
-func (a *App) ensureResources() {
-	c := a.cluster
-	if c == nil || c.ResourcesLoaded() {
-		return
-	}
-	go func() {
-		if err := c.RefreshResources(); err != nil {
-			return
-		}
-		a.post(func() {
-			if a.cluster == c {
-				a.sidebar.reload(c)
-			}
-		})
-	}()
-}
-
-// start lists contexts and connects to the initial one.
+// start restores the workspace and opens the requested connection.
 func (a *App) start() {
 	if err := a.prefs.LoadError; err != nil {
 		a.flash("Settings reset: "+err.Error(), true)
 	}
 	a.startUpdateChecks()
-	opts := a.opts
-	names, current, err := backend.Contexts(opts.Kubeconfig)
-	if err != nil {
-		a.connErr = err
-	}
-	a.contexts = safety.FilterContexts(names)
-	target := opts.Context
-	if target == "" {
-		target = current
-	}
-	if target != "" {
-		a.connect(target)
-	} else if err == nil {
-		a.connErr = fmt.Errorf("no usable context in %s", opts.Kubeconfig)
+	a.restoreTabs()
+	if n := a.opts.Connection; n != "" {
+		for _, c := range a.prefs.Connections {
+			if c.Name == n || c.ID == n {
+				id := c.ID
+				a.connect(id, func(cs *connState) {
+					if a.findTab(func(t Tab) bool { return t.ConnID() == id }) < 0 {
+						a.newConsole(id, "", "")
+					}
+				})
+				return
+			}
+		}
+		a.flash("No saved connection named "+n, true)
 	}
 }
 
@@ -225,15 +185,14 @@ func (a *App) drain() {
 }
 
 func (a *App) shutdown() {
-	if a.healthCancel != nil {
-		a.healthCancel()
+	a.saveWorkspace()
+	for _, t := range a.tabs {
+		t.Dispose()
 	}
-	a.view.close()
-	a.ovw.close()
-	a.xray.close()
-	a.dock.closeAll()
-	if a.cluster != nil {
-		a.cluster.Close()
+	for _, cs := range a.conns {
+		if cs.conn != nil {
+			cs.conn.Close()
+		}
 	}
 }
 
@@ -247,7 +206,7 @@ func (a *App) flash(msg string, isErr bool) {
 }
 
 // do runs fn in background and flashes its outcome.
-func (a *App) do(desc string, fn func() error) {
+func (a *App) do(desc string, fn func() error, then func()) {
 	a.flash(desc+"…", false)
 	go func() {
 		err := fn()
@@ -257,90 +216,17 @@ func (a *App) do(desc string, fn func() error) {
 				return
 			}
 			a.flash(desc+" — done", false)
+			if then != nil {
+				then()
+			}
 		})
 	}()
 }
 
-func (a *App) connect(kctx string) {
-	if err := safety.CheckContext(kctx); err != nil {
-		a.connErr = err
-		return
-	}
-	a.view.close()
-	a.ovw.close()
-	a.xray.close()
-	a.dock.closeAll()
-	a.drawer.close()
-	if a.cluster != nil {
-		a.cluster.Close()
-		a.cluster = nil
-	}
-	if a.healthCancel != nil {
-		a.healthCancel()
-		a.healthCancel = nil
-	}
-	a.connecting, a.connErr = kctx, nil
-	go func() {
-		c, err := backend.Connect(a.opts.Kubeconfig, kctx)
-		var nss []string
-		if err == nil {
-			nss, _ = c.Namespaces()
-		}
-		a.post(func() {
-			if a.connecting != kctx {
-				if c != nil {
-					c.Close()
-				}
-				a.ensureResources()
-				return
-			}
-			a.connecting = ""
-			if err != nil {
-				a.connErr = err
-				return
-			}
-			a.cluster, a.namespaces = c, nss
-			a.ensureResources()
-			a.ai.reset()
-			a.tabs, a.tabIdx = nil, 0
-			a.startSavedForwards(c)
-			a.events, a.unread = nil, 0
-			a.startHealth(c)
-			a.sidebar.reload(c)
-			res := a.opts.Resource
-			if res == "" {
-				res = overviewGVR
-			} else if g, ok := backend.LookupAlias(res); ok {
-				res = g
-			}
-			a.openResource(res)
-			a.flash(fmt.Sprintf("Connected to %s (%s)", c.Context, c.Version()), false)
-		})
-	}()
-}
-
-func (a *App) refreshNamespaces() {
-	c := a.cluster
-	if c == nil {
-		return
-	}
-	go func() {
-		nss, err := c.Namespaces()
-		if err == nil {
-			a.post(func() { a.namespaces = nss })
-		}
-	}()
-}
-
-// openResource navigates from the sidebar/palette: resets history.
-func (a *App) openResource(gvr string) {
-	a.navStack = nil
-	a.show(navState{page: gvr, gvr: gvr})
-}
-
-func (a *App) setNamespace(ns string) {
-	a.ns = ns
-	a.show(a.current())
+// copyLater copies text on the next frame (needs a gtx).
+func (a *App) copyLater(s string) {
+	a.pendingCopy = &s
+	a.invalidate()
 }
 
 // textFocused reports whether a text input currently owns the keyboard.
@@ -348,8 +234,19 @@ func (a *App) textFocused(gtx C) bool {
 	if a.overlay != nil {
 		return true
 	}
-	return gtx.Focused(&a.view.filter) || a.drawer.focused(gtx) || a.dock.focused(gtx) || a.ai.focused(gtx) ||
-		a.rbac.focused(gtx)
+	if t := a.activeTab(); t != nil && t.Focused(gtx) {
+		return true
+	}
+	return a.sidebar.focused(gtx) || a.ai.focused(gtx)
+}
+
+// dismissOverlay closes the overlay from outside (Esc, backdrop).
+func (a *App) dismissOverlay(gtx C) {
+	if c, ok := a.overlay.(canceler); ok {
+		c.cancelled()
+	}
+	a.overlay = nil
+	gtx.Execute(key.FocusCmd{})
 }
 
 func (a *App) layout(gtx C) {
@@ -409,6 +306,12 @@ func (a *App) layout(gtx C) {
 	}
 	a.layoutTooltip(gtx)
 	a.pruneSels()
+	if !a.saveAt.IsZero() && gtx.Now.After(a.saveAt) {
+		a.saveAt = time.Time{}
+		a.saveWorkspace()
+	} else if !a.saveAt.IsZero() {
+		gtx.Execute(op.InvalidateCmd{At: a.saveAt})
+	}
 }
 
 // layoutModal draws the active overlay over a dimmed backdrop. A click on
@@ -420,10 +323,10 @@ func (a *App) layoutModal(gtx C) {
 
 	// lay out the dialog first (recorded) to know its bounds
 	m := op.Record(gtx.Ops)
-	top := gtx.Dp(90)
+	top := gtx.Dp(70)
 	dg := gtx
 	dg.Constraints.Min = image.Point{}
-	dg.Constraints.Max.Y = max(0, size.Y-top)
+	dg.Constraints.Max.Y = max(0, size.Y-top-gtx.Dp(20))
 	anchored, isMenu := ov.(interface{ anchor() image.Point })
 	if isMenu {
 		dg.Constraints.Max.Y = size.Y
@@ -451,8 +354,7 @@ func (a *App) layoutModal(gtx C) {
 			break
 		}
 		if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press && !pe.Position.Round().In(box) && a.overlay == ov {
-			a.overlay = nil
-			gtx.Execute(key.FocusCmd{})
+			a.dismissOverlay(gtx)
 		}
 	}
 	if !isMenu {
@@ -476,150 +378,77 @@ func (a *App) layoutModal(gtx C) {
 }
 
 func (a *App) layoutMain(gtx C) D {
-	if a.cluster == nil {
-		return a.layoutWelcome(gtx)
+	if len(a.tabs) == 0 {
+		return a.welcome.layout(gtx, a)
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(a.layoutTabs),
 		layout.Flexed(1, func(gtx C) D {
-			switch a.page {
-			case overviewGVR:
-				return a.ovw.Layout(gtx)
-			case rbacPage:
-				if a.drawer.open {
-					return layout.Flex{}.Layout(gtx,
-						layout.Flexed(0.55, a.rbac.Layout),
-						layout.Rigid(func(gtx C) D { return vline(gtx, pal.Border) }),
-						layout.Flexed(0.45, a.drawer.Layout),
-					)
-				}
-				return a.rbac.Layout(gtx)
-			case sanitizerPage:
-				if a.drawer.open {
-					return layout.Flex{}.Layout(gtx,
-						layout.Flexed(0.55, a.san.Layout),
-						layout.Rigid(func(gtx C) D { return vline(gtx, pal.Border) }),
-						layout.Flexed(0.45, a.drawer.Layout),
-					)
-				}
-				return a.san.Layout(gtx)
-			case xrayPage:
-				if a.drawer.open {
-					return layout.Flex{}.Layout(gtx,
-						layout.Flexed(0.55, a.xray.Layout),
-						layout.Rigid(func(gtx C) D { return vline(gtx, pal.Border) }),
-						layout.Flexed(0.45, a.drawer.Layout),
-					)
-				}
-				return a.xray.Layout(gtx)
-			}
-			if !a.drawer.open {
-				return a.view.Layout(gtx)
-			}
-			return layout.Flex{}.Layout(gtx,
-				layout.Flexed(0.55, a.view.Layout),
-				layout.Rigid(func(gtx C) D { return vline(gtx, pal.Border) }),
-				layout.Flexed(0.45, a.drawer.Layout),
-			)
+			gtx.Constraints.Min = gtx.Constraints.Max
+			return a.tabs[a.tabIdx].Layout(gtx)
 		}),
-		layout.Rigid(a.dock.Layout),
 	)
 }
 
-func (a *App) layoutWelcome(gtx C) D {
-	return layout.Center.Layout(gtx, func(gtx C) D {
-		return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx C) D {
-				if a.connErr != nil {
-					return rbg(gtx, withAlpha(pal.Err, 0x30), 36, func(gtx C) D {
-						return inset(18).Layout(gtx, func(gtx C) D { return mdi(gtx, icCloudOff, pal.Err, 40) })
-					})
-				}
-				return drawLogo(gtx, 76)
-			}),
-			layout.Rigid(layout.Spacer{Height: 14}.Layout),
-			layout.Rigid(func(gtx C) D {
-				return lbl(gtx, a.th, fontSans, 28, pal.TextBright, AppName)
-			}),
-			layout.Rigid(func(gtx C) D {
-				return lbl(gtx, a.th, fontSans, 13, pal.TextDim, "native Kubernetes IDE · powered by k9s")
-			}),
-			layout.Rigid(layout.Spacer{Height: 12}.Layout),
-			layout.Rigid(func(gtx C) D {
-				switch {
-				case a.connecting != "":
-					return lbl(gtx, a.th, fontSans, 15, pal.Text, "Connecting to "+a.connecting+"…")
-				case a.connErr != nil:
-					gtx.Constraints.Max.X = gtx.Dp(700)
-					return a.selText(gtx, "connErr", fontSans, 16, pal.Err, a.connErr.Error(), 0)
-				default:
-					return lbl(gtx, a.th, fontSans, 15, pal.Text, "Select a context")
-				}
-			}),
-			layout.Rigid(layout.Spacer{Height: 16}.Layout),
-			layout.Rigid(func(gtx C) D {
-				if a.ctxBtn.Clicked(gtx) {
-					a.pickContext()
-				}
-				if a.connecting != "" {
-					return D{}
-				}
-				return pillButton(gtx, a.th, &a.ctxBtn, icCluster, "Choose context", pal.TextBright, pal.Accent)
-			}),
-		)
-	})
-}
-
 func (a *App) layoutStatus(gtx C) D {
-	h := gtx.Dp(26)
+	h := gtx.Dp(24)
 	gtx.Constraints.Min.Y, gtx.Constraints.Max.Y = h, h
-	fill(gtx, pal.Accent)
+	fill(gtx, pal.Header)
+	fillRect(gtx, pal.Border, image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Dp(1)))
 	th := a.th
-	fg := pal.OnAccent
+	fg := pal.TextDim
 	center := func(w layout.Widget) layout.Widget {
 		return func(gtx C) D {
 			gtx.Constraints.Min.Y = h
 			return layout.W.Layout(gtx, w)
 		}
 	}
-	if a.pfBtn.Clicked(gtx) {
-		a.overlay = newPortForwardPanel(a)
-	}
-	if a.bellBtn.Clicked(gtx) {
-		a.overlay = newNotifPanel(a)
-	}
 	if a.updBtn.Clicked(gtx) && a.upd.rel != nil {
 		a.overlay = newUpdateDialog(a)
+	}
+	t := a.activeTab()
+	var cs *connState
+	if t != nil {
+		cs = a.conns[t.ConnID()]
 	}
 	return insetHV(10, 0).Layout(gtx, func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 			layout.Rigid(center(func(gtx C) D {
-				if a.cluster == nil {
-					return iconText(gtx, th, icCloudOff, 12, fg, "no cluster")
+				if cs == nil {
+					return iconText(gtx, th, icCloudOff, 11, fg, "no connection")
 				}
-				return iconText(gtx, th, icCluster, 12, fg, a.cluster.Context)
+				c := pal.TextDim
+				switch cs.status {
+				case stReady:
+					c = pal.Ok
+				case stConnecting:
+					c = pal.Warn
+				case stFailed:
+					c = pal.Err
+				}
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return dot(gtx, c, 7) }),
+					layout.Rigid(layout.Spacer{Width: 6}.Layout),
+					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 11, pal.Text, cs.name()) }),
+				)
 			})),
 			layout.Rigid(center(func(gtx C) D {
-				if a.cluster == nil {
+				if cs == nil || cs.conn == nil {
 					return D{}
 				}
-				return layout.Inset{Left: 16}.Layout(gtx, func(gtx C) D {
-					return iconText(gtx, th, icInfo, 12, fg, "Kubernetes "+a.cluster.Version())
+				return layout.Inset{Left: 14}.Layout(gtx, func(gtx C) D {
+					return lbl(gtx, th, fontSans, 11, fg, cs.conn.ServerVersion())
 				})
 			})),
 			layout.Rigid(center(func(gtx C) D {
-				if a.cluster == nil {
+				if t == nil {
 					return D{}
 				}
-				n := len(a.cluster.PortForwards())
-				if n == 0 {
+				s := t.StatusInfo()
+				if s == "" {
 					return D{}
 				}
-				return layout.Inset{Left: 16}.Layout(gtx, func(gtx C) D {
-					return a.pfBtn.Layout(gtx, func(gtx C) D {
-						return iconText(gtx, th, icForward, 12, fg, itoa(n)+" port-forward(s)")
-					})
-				})
+				return layout.Inset{Left: 14}.Layout(gtx, func(gtx C) D { return lbl(gtx, th, fontSans, 11, fg, s) })
 			})),
 			layout.Rigid(layout.Spacer{Width: 20}.Layout),
 			layout.Flexed(1, center(func(gtx C) D {
@@ -627,13 +456,9 @@ func (a *App) layoutStatus(gtx C) D {
 					return D{}
 				}
 				if a.statusErr {
-					return rbg(gtx, pal.Err, 4, func(gtx C) D {
-						return insetHV(6, 2).Layout(gtx, func(gtx C) D {
-							return iconText(gtx, th, icError, 12, fg, a.status)
-						})
-					})
+					return iconText(gtx, th, icError, 11, pal.Err, a.status)
 				}
-				return iconText(gtx, th, icStatusDone, 12, fg, a.status)
+				return iconText(gtx, th, icStatusDone, 11, pal.Text, a.status)
 			})),
 			layout.Rigid(center(func(gtx C) D {
 				if a.upd.rel == nil {
@@ -645,43 +470,16 @@ func (a *App) layoutStatus(gtx C) D {
 				}
 				return layout.Inset{Right: 12}.Layout(gtx, func(gtx C) D {
 					return a.updBtn.Layout(gtx, func(gtx C) D {
-						return rbg(gtx, withAlpha(rgb(0x000000), 0x30), 4, func(gtx C) D {
+						return rbg(gtx, pal.Accent, 4, func(gtx C) D {
 							return insetHV(6, 2).Layout(gtx, func(gtx C) D {
-								return iconText(gtx, th, icDownload, 12, fg, txt)
+								return iconText(gtx, th, icDownload, 11, pal.OnAccent, txt)
 							})
 						})
 					})
 				})
 			})),
 			layout.Rigid(center(func(gtx C) D {
-				if a.cluster == nil {
-					return D{}
-				}
-				return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D {
-					return a.bellBtn.Layout(gtx, func(gtx C) D {
-						ic := icBell
-						switch {
-						case !a.notifyOn:
-							ic = icBellOff
-						case a.unread > 0:
-							ic = icBellActive
-						}
-						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-							layout.Rigid(func(gtx C) D { return mdi(gtx, ic, fg, 16) }),
-							layout.Rigid(func(gtx C) D {
-								if a.unread == 0 {
-									return D{}
-								}
-								return layout.Inset{Left: 3}.Layout(gtx, func(gtx C) D {
-									return badge(gtx, th, itoa(a.unread), pal.OnAccent, pal.Err)
-								})
-							}),
-						)
-					})
-				})
-			})),
-			layout.Rigid(center(func(gtx C) D {
-				hints := [][2]string{{":", "command"}, {"/", "filter"}, {"l", "logs"}, {"s", "shell"}, {"d", "describe"}, {"y", "yaml"}, {"^d", "delete"}}
+				hints := [][2]string{{shortcutLabel("K"), "commands"}, {shortcutLabel("⏎"), "run"}, {shortcutLabel("T"), "console"}}
 				var ch []layout.FlexChild
 				for _, k := range hints {
 					k := k
@@ -698,15 +496,9 @@ func (a *App) layoutStatus(gtx C) D {
 // keyHint draws a keyboard chip followed by its meaning.
 func keyHint(gtx C, th *material.Theme, k, what string) D {
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(func(gtx C) D {
-			return rbg(gtx, withAlpha(rgb(0x000000), 0x40), 3, func(gtx C) D {
-				return insetHV(5, 1).Layout(gtx, func(gtx C) D {
-					return lbl(gtx, th, fontMono, 11, pal.OnAccent, k)
-				})
-			})
-		}),
+		layout.Rigid(func(gtx C) D { return keyChip(gtx, th, k) }),
 		layout.Rigid(layout.Spacer{Width: 4}.Layout),
-		layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 11, withAlpha(pal.OnAccent, 0xd0), what) }),
+		layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 11, pal.TextDim, what) }),
 	)
 }
 
@@ -718,33 +510,35 @@ func (a *App) invalidate() {
 	}
 }
 
-// pageTitleSafe names the current main page (for assistant context).
-func (a *App) pageTitleSafe() string {
-	switch a.page {
-	case overviewGVR:
-		return "Cluster overview"
-	case sanitizerPage:
-		return "Sanitizer"
-	case rbacPage:
-		return "RBAC Explorer"
-	case xrayPage:
-		return "XRay of " + titleFor(a.xray.gvr)
-	case "":
-		return ""
-	}
-	return a.view.title
+// setThemeName switches and persists the theme.
+func (a *App) setThemeName(name string) {
+	a.prefs.Theme = name
+	setTheme(a.th, name)
+	a.savePrefs()
+	a.invalidate()
 }
 
-// toggleTheme switches dark/light and persists the choice.
+// toggleTheme cycles dark → mirage → light.
 func (a *App) toggleTheme() {
-	if a.prefs.Theme == "light" {
-		a.prefs.Theme = "dark"
-	} else {
-		a.prefs.Theme = "light"
+	for i, t := range Themes {
+		if t.ID == a.prefs.Theme {
+			a.setThemeName(Themes[(i+1)%len(Themes)].ID)
+			return
+		}
 	}
-	setTheme(a.th, a.prefs.Theme)
+	a.setThemeName(Themes[0].ID)
+}
+
+func (a *App) savePrefs() {
 	if err := a.prefs.Save(); err != nil {
 		a.flash("save preferences: "+err.Error(), true)
 	}
-	a.invalidate()
+}
+
+// scheduleSave saves the workspace shortly (debounced).
+func (a *App) scheduleSave() {
+	if a.saveAt.IsZero() {
+		a.saveAt = time.Now().Add(2 * time.Second)
+		a.invalidate()
+	}
 }

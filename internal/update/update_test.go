@@ -79,7 +79,7 @@ func fakeRelease(t *testing.T, version string, files map[string][]byte, priv ed2
 		_, _ = w.Write(b)
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("KUBEON_UPDATE_URL", srv.URL+"/latest")
+	t.Setenv("LUMINO_UPDATE_URL", srv.URL+"/latest")
 	return srv
 }
 
@@ -95,7 +95,7 @@ func tarball(t *testing.T, version, bin string) []byte {
 	var b bytes.Buffer
 	gz := gzip.NewWriter(&b)
 	tw := tar.NewWriter(gz)
-	_ = tw.WriteHeader(&tar.Header{Name: "kubeon-" + version + "/kubeon", Mode: 0o755, Size: int64(len(bin)), Typeflag: tar.TypeReg})
+	_ = tw.WriteHeader(&tar.Header{Name: "lumino-" + version + "/lumino", Mode: 0o755, Size: int64(len(bin)), Typeflag: tar.TypeReg})
 	_, _ = tw.Write([]byte(bin))
 	tw.Close()
 	gz.Close()
@@ -110,7 +110,7 @@ func TestInstallTarball(t *testing.T) {
 	if err != nil || r == nil || r.Version != "9.9.9" {
 		t.Fatalf("check: %v %+v", err, r)
 	}
-	target := filepath.Join(t.TempDir(), "kubeon")
+	target := filepath.Join(t.TempDir(), "lumino")
 	_ = os.WriteFile(target, []byte("OLD"), 0o755)
 	var seen int64
 	if err := Install(context.Background(), r, Plan{Kind: KindTarball, Target: target}, func(d, _ int64) { seen = d }); err != nil {
@@ -127,14 +127,14 @@ func TestInstallTarball(t *testing.T) {
 func TestInstallRejectsBadSignatures(t *testing.T) {
 	asset := assetName(KindAppImage, "9.9.9")
 	files := map[string][]byte{asset: []byte("APPIMAGE")}
-	target := filepath.Join(t.TempDir(), "kubeon.AppImage")
+	target := filepath.Join(t.TempDir(), "lumino.AppImage")
 
 	testKey(t) // trusted key…
 	_, other, _ := ed25519.GenerateKey(nil)
 	fakeRelease(t, "9.9.9", files, other) // …but signed by another one
 	r, _ := Latest(context.Background())
 	if err := Install(context.Background(), r, Plan{Kind: KindAppImage, Target: target}, nil); err == nil ||
-		!strings.Contains(err.Error(), "not signed by the Kubeon release key") {
+		!strings.Contains(err.Error(), "not signed by the Lumino release key") {
 		t.Fatalf("foreign signature accepted: %v", err)
 	}
 	fakeRelease(t, "9.9.9", files, nil) // unsigned
@@ -153,7 +153,7 @@ func TestInstallChecksumMismatch(t *testing.T) {
 	srv := fakeRelease(t, "9.9.9", map[string][]byte{asset: []byte("GOOD")}, priv)
 	r, _ := Latest(context.Background())
 	r.Assets[asset] = srv.URL + "/dl/" + sumsName // serve different bytes
-	target := filepath.Join(t.TempDir(), "kubeon.AppImage")
+	target := filepath.Join(t.TempDir(), "lumino.AppImage")
 	_ = os.WriteFile(target, []byte("OLD"), 0o755)
 	if err := Install(context.Background(), r, Plan{Kind: KindAppImage, Target: target}, nil); err == nil ||
 		!strings.Contains(err.Error(), "checksum mismatch") {
@@ -182,23 +182,23 @@ func TestInstallMacAppAndWindows(t *testing.T) {
 	mac := assetName(KindMacApp, "9.9.9")
 	win := assetName(KindWindows, "9.9.9")
 	fakeRelease(t, "9.9.9", map[string][]byte{
-		mac: zipOf(t, map[string]string{"Kubeon.app/Contents/MacOS/kubeon": "NEW MAC", "Kubeon.app/Contents/Info.plist": "plist"}),
-		win: zipOf(t, map[string]string{"kubeon.exe": "NEW EXE", "LICENSE.k9s.txt": "x"}),
+		mac: zipOf(t, map[string]string{"Lumino.app/Contents/MacOS/lumino": "NEW MAC", "Lumino.app/Contents/Info.plist": "plist"}),
+		win: zipOf(t, map[string]string{"lumino.exe": "NEW EXE", "LICENSE.k9s.txt": "x"}),
 	}, priv)
 	r, _ := Latest(context.Background())
 
 	dir := t.TempDir()
-	app := filepath.Join(dir, "kubeon.app")
+	app := filepath.Join(dir, "lumino.app")
 	_ = os.MkdirAll(filepath.Join(app, "Contents", "MacOS"), 0o755)
-	_ = os.WriteFile(filepath.Join(app, "Contents", "MacOS", "kubeon"), []byte("OLD"), 0o755)
+	_ = os.WriteFile(filepath.Join(app, "Contents", "MacOS", "lumino"), []byte("OLD"), 0o755)
 	if err := Install(context.Background(), r, Plan{Kind: KindMacApp, Target: app}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(app, "Contents", "MacOS", "kubeon")); string(b) != "NEW MAC" {
+	if b, _ := os.ReadFile(filepath.Join(app, "Contents", "MacOS", "lumino")); string(b) != "NEW MAC" {
 		t.Fatalf("app %q", b)
 	}
 
-	exe := filepath.Join(dir, "kubeon.exe")
+	exe := filepath.Join(dir, "lumino.exe")
 	_ = os.WriteFile(exe, []byte("OLD"), 0o755)
 	if err := Install(context.Background(), r, Plan{Kind: KindWindows, Target: exe}, nil); err != nil {
 		t.Fatal(err)
@@ -220,7 +220,7 @@ func TestUnzipRejectsTraversal(t *testing.T) {
 }
 
 func TestDevBuildsNeverCheck(t *testing.T) {
-	t.Setenv("KUBEON_UPDATE_URL", "http://127.0.0.1:1/never")
+	t.Setenv("LUMINO_UPDATE_URL", "http://127.0.0.1:1/never")
 	if r, err := Check(context.Background(), "0.1.0-3-gabc1234"); r != nil || err != nil {
 		t.Fatalf("dev build checked: %v %v", r, err)
 	}

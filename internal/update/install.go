@@ -19,15 +19,15 @@ import (
 	"syscall"
 )
 
-// Kind is how this copy of kubeon was installed.
+// Kind is how this copy of lumino was installed.
 type Kind int
 
 const (
 	KindManual   Kind = iota // package manager / read-only location: link only
 	KindAppImage             // $APPIMAGE
 	KindTarball              // linux binary from the tar.gz
-	KindWindows              // portable kubeon.exe
-	KindMacApp               // kubeon.app bundle
+	KindWindows              // portable lumino.exe
+	KindMacApp               // lumino.app bundle
 )
 
 // Plan says what an update would replace.
@@ -58,7 +58,7 @@ func Detect() Plan {
 	case "windows":
 		return writable(Plan{Kind: KindWindows, Target: exe})
 	case "darwin":
-		// …/kubeon.app/Contents/MacOS/kubeon
+		// …/lumino.app/Contents/MacOS/lumino
 		app := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
 		if strings.HasSuffix(app, ".app") {
 			return writable(Plan{Kind: KindMacApp, Target: app})
@@ -71,7 +71,7 @@ func Detect() Plan {
 // writable downgrades the plan to manual when the target can't be replaced.
 func writable(p Plan) Plan {
 	dir := filepath.Dir(p.Target)
-	f, err := os.CreateTemp(dir, ".kubeon-update-check-*")
+	f, err := os.CreateTemp(dir, ".lumino-update-check-*")
 	if err != nil {
 		return Plan{Reason: dir + " is not writable: download the new version manually"}
 	}
@@ -115,7 +115,7 @@ func Install(ctx context.Context, r *Release, p Plan, progress func(done, total 
 	}
 
 	dir := filepath.Dir(p.Target)
-	tmp, err := os.CreateTemp(dir, ".kubeon-update-*")
+	tmp, err := os.CreateTemp(dir, ".lumino-update-*")
 	if err != nil {
 		return err
 	}
@@ -134,14 +134,14 @@ func Install(ctx context.Context, r *Release, p Plan, progress func(done, total 
 	case KindTarball:
 		bin := tmp.Name() + ".bin"
 		defer os.Remove(bin)
-		if err := extractTarBinary(tmp.Name(), "kubeon", bin); err != nil {
+		if err := extractTarBinary(tmp.Name(), "lumino", bin); err != nil {
 			return err
 		}
 		return replaceFile(bin, p.Target)
 	case KindWindows:
 		bin := tmp.Name() + ".exe"
 		defer os.Remove(bin)
-		if err := extractZipFile(tmp.Name(), "kubeon.exe", bin); err != nil {
+		if err := extractZipFile(tmp.Name(), "lumino.exe", bin); err != nil {
 			return err
 		}
 		return replaceRunningExe(bin, p.Target)
@@ -165,7 +165,7 @@ func get(ctx context.Context, url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "kubeon-updater")
+	req.Header.Set("User-Agent", "lumino-updater")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -294,10 +294,10 @@ func writeFrom(dst string, r io.Reader, mode os.FileMode) error {
 	return out.Close()
 }
 
-// replaceApp unpacks kubeon.app from the zip next to the installed bundle
+// replaceApp unpacks lumino.app from the zip next to the installed bundle
 // and swaps the two directories.
 func replaceApp(archive, app string) error {
-	stage, err := os.MkdirTemp(filepath.Dir(app), ".kubeon-update-")
+	stage, err := os.MkdirTemp(filepath.Dir(app), ".lumino-update-")
 	if err != nil {
 		return err
 	}
@@ -305,16 +305,16 @@ func replaceApp(archive, app string) error {
 	if err := unzipAll(archive, stage); err != nil {
 		return err
 	}
-	// Kubeon.app (kubeon.app in the first releases)
+	// Lumino.app (lumino.app in the first releases)
 	var fresh string
-	for _, n := range []string{"Kubeon.app", "kubeon.app"} {
-		if _, err := os.Stat(filepath.Join(stage, n, "Contents", "MacOS", "kubeon")); err == nil {
+	for _, n := range []string{"Lumino.app", "lumino.app"} {
+		if _, err := os.Stat(filepath.Join(stage, n, "Contents", "MacOS", "lumino")); err == nil {
 			fresh = filepath.Join(stage, n)
 			break
 		}
 	}
 	if fresh == "" {
-		return errors.New("Kubeon.app not found in the archive")
+		return errors.New("Lumino.app not found in the archive")
 	}
 	old := filepath.Join(stage, "previous.app")
 	if err := os.Rename(app, old); err != nil {
@@ -384,7 +384,7 @@ func unzipAll(archive, dir string) error {
 	return nil
 }
 
-// Restart replaces the process with the updated kubeon (same arguments).
+// Restart replaces the process with the updated lumino (same arguments).
 func Restart(p Plan) error {
 	args := os.Args[1:]
 	switch p.Kind {
@@ -402,5 +402,5 @@ func Restart(p Plan) error {
 	case KindAppImage, KindTarball:
 		return syscall.Exec(p.Target, append([]string{p.Target}, args...), os.Environ())
 	}
-	return errors.New("restart Kubeon to use the new version")
+	return errors.New("restart Lumino to use the new version")
 }

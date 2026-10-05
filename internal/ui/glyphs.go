@@ -1,9 +1,10 @@
 package ui
 
 import (
-	"gioui.org/io/pointer"
 	"image"
 	"strings"
+
+	"gioui.org/io/pointer"
 
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -13,6 +14,8 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 	"golang.org/x/exp/shiny/materialdesign/icons"
+
+	"github.com/giovanni/lumino/internal/db"
 )
 
 // Material Design icons (IconVG, already a Gio dependency).
@@ -25,84 +28,68 @@ func mustIcon(data []byte) *widget.Icon {
 }
 
 var (
-	icDashboard  = mustIcon(icons.ActionDashboard)
-	icNode       = mustIcon(icons.HardwareComputer)
-	icNamespace  = mustIcon(icons.FileFolder)
-	icEvent      = mustIcon(icons.ActionEvent)
-	icPod        = mustIcon(icons.DeviceWidgets)
-	icDeploy     = mustIcon(icons.MapsLayers)
-	icDaemon     = mustIcon(icons.HardwareDeveloperBoard)
-	icStateful   = mustIcon(icons.DeviceStorage)
-	icReplica    = mustIcon(icons.ActionViewModule)
-	icJob        = mustIcon(icons.AVPlayArrow)
-	icCron       = mustIcon(icons.ActionSchedule)
-	icConfig     = mustIcon(icons.ActionSettings)
-	icConfigMap  = mustIcon(icons.EditorInsertDriveFile)
-	icSecret     = mustIcon(icons.CommunicationVPNKey)
-	icQuota      = mustIcon(icons.ImageTune)
-	icHPA        = mustIcon(icons.ActionTrendingUp)
-	icPDB        = mustIcon(icons.ActionVerifiedUser)
-	icPriority   = mustIcon(icons.EditorFormatListBulleted)
-	icNetwork    = mustIcon(icons.HardwareRouter)
-	icService    = mustIcon(icons.ActionSettingsEthernet)
-	icEndpoint   = mustIcon(icons.CommunicationCallSplit)
-	icIngress    = mustIcon(icons.SocialPublic)
-	icNetPol     = mustIcon(icons.ActionLock)
-	icStorage    = mustIcon(icons.DeviceStorage)
-	icPVC        = mustIcon(icons.FileCloudQueue)
-	icPV         = mustIcon(icons.FileCloud)
-	icSC         = mustIcon(icons.ActionViewList)
-	icAccess     = mustIcon(icons.ActionSupervisorAccount)
-	icSA         = mustIcon(icons.SocialPerson)
-	icRole       = mustIcon(icons.ActionAssignment)
-	icBinding    = mustIcon(icons.ContentLink)
-	icCRD        = mustIcon(icons.ActionExtension)
-	icCluster    = mustIcon(icons.FileCloudDone)
+	icDatabase   = mustIcon(icons.DeviceStorage)
+	icSchema     = mustIcon(icons.FileFolder)
+	icSchemaOpen = mustIcon(icons.FileFolderOpen)
+	icTable      = mustIcon(icons.ImageGridOn)
+	icView       = mustIcon(icons.ActionVisibility)
+	icMatView    = mustIcon(icons.ActionViewModule)
+	icFunction   = mustIcon(icons.EditorFunctions)
+	icProcedure  = mustIcon(icons.ActionBuild)
+	icSequence   = mustIcon(icons.EditorFormatListNumbered)
+	icTrigger    = mustIcon(icons.ImageFlashOn)
+	icIndex      = mustIcon(icons.ActionViewList)
+	icColumn     = mustIcon(icons.ActionViewColumn)
+	icKey        = mustIcon(icons.CommunicationVPNKey)
+	icPackage    = mustIcon(icons.ContentArchive)
+	icConsole    = mustIcon(icons.ActionCode)
+	icRun        = mustIcon(icons.AVPlayArrow)
+	icRunAll     = mustIcon(icons.AVPlaylistAdd)
+	icSave       = mustIcon(icons.ContentSave)
+	icRefresh    = mustIcon(icons.NavigationRefresh)
+	icUndo       = mustIcon(icons.ContentUndo)
+	icCommit     = mustIcon(icons.ActionDone)
+	icExport     = mustIcon(icons.FileFileUpload)
+	icPlug       = mustIcon(icons.ActionPowerSettingsNew)
+	icLink       = mustIcon(icons.ContentLink)
+	icMore       = mustIcon(icons.NavigationMoreVert)
+	icDot        = mustIcon(icons.AVFiberManualRecord)
+	icChecked    = mustIcon(icons.ToggleCheckBox)
+	icUnchecked  = mustIcon(icons.ToggleCheckBoxOutlineBlank)
+	icRadioOn    = mustIcon(icons.ToggleRadioButtonChecked)
+	icRadioOff   = mustIcon(icons.ToggleRadioButtonUnchecked)
+	icFirst      = mustIcon(icons.NavigationFirstPage)
+	icLast       = mustIcon(icons.NavigationLastPage)
+	icHelp       = mustIcon(icons.ActionHelp)
+	icWrap       = mustIcon(icons.EditorWrapText)
+	icPaste      = mustIcon(icons.ContentContentPaste)
+	icRowAdd     = mustIcon(icons.ContentAddBox)
+	icRowDel     = mustIcon(icons.ContentRemoveCircle)
+	icSecurity   = mustIcon(icons.HardwareSecurity)
+	icCluster    = mustIcon(icons.DeviceStorage)
 	icSearch     = mustIcon(icons.ActionSearch)
 	icClose      = mustIcon(icons.NavigationClose)
 	icExpand     = mustIcon(icons.NavigationExpandMore)
 	icCollapse   = mustIcon(icons.NavigationChevronRight)
 	icUp         = mustIcon(icons.NavigationArrowUpward)
 	icDown       = mustIcon(icons.NavigationArrowDownward)
-	icLogs       = mustIcon(icons.EditorShortText)
-	icTerminal   = mustIcon(icons.ActionCode)
 	icDescribe   = mustIcon(icons.ActionDescription)
-	icYAML       = mustIcon(icons.ActionCode)
 	icEdit       = mustIcon(icons.ImageEdit)
 	icDelete     = mustIcon(icons.ActionDelete)
-	icScale      = mustIcon(icons.ActionSwapHoriz)
-	icRestart    = mustIcon(icons.NavigationRefresh)
-	icForward    = mustIcon(icons.CommunicationImportExport)
 	icWarning    = mustIcon(icons.AlertWarning)
 	icError      = mustIcon(icons.AlertError)
 	icInfo       = mustIcon(icons.ActionInfo)
-	icCopy       = mustIcon(icons.ContentArchive)
 	icClear      = mustIcon(icons.ContentClear)
-	icFollow     = mustIcon(icons.NavigationArrowDownward)
-	icCPU        = mustIcon(icons.HardwareMemory)
-	icMem        = mustIcon(icons.HardwareDeveloperBoard)
 	icCommand    = mustIcon(icons.NavigationApps)
 	icCloudOff   = mustIcon(icons.FileCloudOff)
-	icStatusDone = mustIcon(icons.FileCloudDone)
+	icStatusDone = mustIcon(icons.ActionCheckCircle)
 	icEye        = mustIcon(icons.ActionVisibility)
 	icEyeOff     = mustIcon(icons.ActionVisibilityOff)
 	icCopyText   = mustIcon(icons.ContentContentCopy)
 	icDownload   = mustIcon(icons.FileFileDownload)
 	icBell       = mustIcon(icons.SocialNotifications)
-	icBellOff    = mustIcon(icons.SocialNotificationsOff)
-	icBellActive = mustIcon(icons.SocialNotificationsActive)
-	icCordon     = mustIcon(icons.ContentBlock)
-	icUncordon   = mustIcon(icons.AVPlayCircleOutline)
-	icDrain      = mustIcon(icons.ActionEject)
-	icHelm       = mustIcon(icons.ContentUnarchive)
 	icHistory    = mustIcon(icons.ActionHistory)
-	icRollback   = mustIcon(icons.ContentUndo)
-	icXRay       = mustIcon(icons.HardwareDeviceHub)
-	icTree       = mustIcon(icons.ActionTOC)
 	icBack       = mustIcon(icons.NavigationArrowBack)
-	icValues     = mustIcon(icons.ImageTune)
-	icContainer  = mustIcon(icons.DeviceWidgets)
-	icBug        = mustIcon(icons.ActionBugReport)
 	icOK         = mustIcon(icons.ActionCheckCircle)
 	icFilter     = mustIcon(icons.ContentFilterList)
 	icLock       = mustIcon(icons.ActionLock)
@@ -120,84 +107,41 @@ var (
 	icTool       = mustIcon(icons.ActionBuild)
 	icIdea       = mustIcon(icons.ActionLightbulbOutline)
 	icPerson     = mustIcon(icons.SocialPerson)
+	icTree       = mustIcon(icons.ActionTOC)
+	icRestart    = mustIcon(icons.NavigationRefresh)
+	icForward    = mustIcon(icons.CommunicationImportExport)
+	icLogs       = mustIcon(icons.EditorShortText)
 )
 
 var icExpandLess = mustIcon(icons.NavigationExpandLess)
 
-var gvrIcons = map[string]*widget.Icon{
-	overviewGVR:               icDashboard,
-	"v1/nodes":                icNode,
-	"v1/namespaces":           icNamespace,
-	"events.k8s.io/v1/events": icEvent,
-	"v1/pods":                 icPod,
-	"apps/v1/deployments":     icDeploy,
-	"apps/v1/daemonsets":      icDaemon,
-	"apps/v1/statefulsets":    icStateful,
-	"apps/v1/replicasets":     icReplica,
-	"batch/v1/jobs":           icJob,
-	"batch/v1/cronjobs":       icCron,
-	"v1/configmaps":           icConfigMap,
-	"v1/secrets":              icSecret,
-	"v1/resourcequotas":       icQuota,
-	"v1/limitranges":          icQuota,
-	"autoscaling/v2/horizontalpodautoscalers":           icHPA,
-	"policy/v1/poddisruptionbudgets":                    icPDB,
-	"scheduling.k8s.io/v1/priorityclasses":              icPriority,
-	"v1/services":                                       icService,
-	"discovery.k8s.io/v1/endpointslices":                icEndpoint,
-	"networking.k8s.io/v1/ingresses":                    icIngress,
-	"networking.k8s.io/v1/ingressclasses":               icIngress,
-	"networking.k8s.io/v1/networkpolicies":              icNetPol,
-	"v1/persistentvolumeclaims":                         icPVC,
-	"v1/persistentvolumes":                              icPV,
-	"storage.k8s.io/v1/storageclasses":                  icSC,
-	"v1/serviceaccounts":                                icSA,
-	"rbac.authorization.k8s.io/v1/roles":                icRole,
-	"rbac.authorization.k8s.io/v1/rolebindings":         icBinding,
-	"rbac.authorization.k8s.io/v1/clusterroles":         icRole,
-	"rbac.authorization.k8s.io/v1/clusterrolebindings":  icBinding,
-	"apiextensions.k8s.io/v1/customresourcedefinitions": icCRD,
-	"helm":          icHelm,
-	"sanitizer":     icBug,
-	"rbac-explorer": icAccess,
-	"helm-history":  icHistory,
-	"containers":    icTerminal,
-}
-
-// kindIcons maps xray node kinds (resource plurals) to icons.
-var kindIcons = map[string]*widget.Icon{
-	"deployments":            icDeploy,
-	"replicasets":            icReplica,
-	"statefulsets":           icStateful,
-	"daemonsets":             icDaemon,
-	"pods":                   icPod,
-	"containers":             icTerminal,
-	"services":               icService,
-	"configmaps":             icConfigMap,
-	"secrets":                icSecret,
-	"serviceaccounts":        icSA,
-	"persistentvolumeclaims": icPVC,
-	"namespaces":             icNamespace,
-	"nodes":                  icNode,
-}
-
-var sectionIcons = map[string]*widget.Icon{
-	"Cluster":          icCluster,
-	"Workloads":        icPod,
-	"Config":           icConfig,
-	"Network":          icNetwork,
-	"Storage":          icStorage,
-	"Access Control":   icAccess,
-	"Helm":             icHelm,
-	"Bookmarks":        icBookmark,
-	"Custom Resources": icCRD,
-}
-
-func iconFor(gvr string) *widget.Icon {
-	if ic, ok := gvrIcons[gvr]; ok {
-		return ic
+// objIcon is the tree/tab icon of an object type.
+func objIcon(t db.ObjectType) *widget.Icon {
+	switch t {
+	case db.ObjTable:
+		return icTable
+	case db.ObjView:
+		return icView
+	case db.ObjMatView:
+		return icMatView
+	case db.ObjFunction:
+		return icFunction
+	case db.ObjProcedure:
+		return icProcedure
+	case db.ObjSequence:
+		return icSequence
+	case db.ObjTrigger:
+		return icTrigger
+	case db.ObjIndex:
+		return icIndex
+	case db.ObjPackage:
+		return icPackage
+	case db.ObjSchema:
+		return icSchema
+	case db.ObjCatalog:
+		return icDatabase
 	}
-	return icCRD
+	return icTable
 }
 
 // mdi draws a material icon of the given size.
@@ -305,47 +249,7 @@ func badge(gtx C, th *material.Theme, txt string, fg, bgc colorNRGBA) D {
 	})
 }
 
-// statusTone classifies a k8s status string for coloring.
-func statusTone(s string) (colorNRGBA, bool) {
-	switch strings.ToLower(s) {
-	case "running", "active", "bound", "ready", "available", "true", "healthy", "ok", "normal":
-		return pal.Ok, true
-	case "completed", "succeeded", "complete", "released":
-		return pal.TextDim, true
-	case "pending", "containercreating", "podinitializing", "terminating", "unknown",
-		"suspended", "notready", "schedulingdisabled", "warning":
-		return pal.Warn, true
-	}
-	l := strings.ToLower(s)
-	switch {
-	case strings.HasPrefix(l, "init:"):
-		if strings.Contains(l, "error") || strings.Contains(l, "crash") {
-			return pal.Err, true
-		}
-		return pal.Warn, true
-	case strings.Contains(l, "error"), strings.Contains(l, "crash"), strings.Contains(l, "backoff"),
-		strings.Contains(l, "failed"), strings.Contains(l, "oomkilled"), strings.Contains(l, "evicted"),
-		strings.Contains(l, "invalid"), l == "lost":
-		return pal.Err, true
-	}
-	return colorNRGBA{}, false
-}
-
-// pill draws a status pill with a dot.
-func pill(gtx C, th *material.Theme, txt string, c colorNRGBA) D {
-	gtx.Constraints.Min = image.Point{}
-	return rbg(gtx, withAlpha(c, 0x2a), 10, func(gtx C) D {
-		return insetHV(8, 2).Layout(gtx, func(gtx C) D {
-			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return dot(gtx, c, 6) }),
-				layout.Rigid(layout.Spacer{Width: 5}.Layout),
-				layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 12, c, txt) }),
-			)
-		})
-	})
-}
-
-// avatar draws a Lens-style colored square with the cluster initials.
+// avatar draws a colored square with the connection initials.
 func avatar(gtx C, th *material.Theme, name string, size unit.Dp) D {
 	s := gtx.Dp(size)
 	h := 0

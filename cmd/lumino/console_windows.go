@@ -6,9 +6,9 @@ import (
 )
 
 // attachConsole lets the GUI-subsystem binary print to the terminal it was
-// started from (kubeon --version, flag errors).
+// started from (lumino --version, flag errors).
 func attachConsole() {
-	// output already redirected (kubeon --version > v.txt, pipes): keep it
+	// output already redirected (lumino --version > v.txt, pipes): keep it
 	if h, err := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE); err == nil && h != 0 && h != syscall.InvalidHandle {
 		return
 	}

@@ -1,17 +1,17 @@
 {
   "RT_GROUP_ICON": {
     "#1": {
-      "0000": "../icons/kubeon.ico"
+      "0000": "../icons/lumino.ico"
     }
   },
   "RT_MANIFEST": {
     "#1": {
       "0409": {
         "identity": {
-          "name": "kubeon",
+          "name": "lumino",
           "version": ""
         },
-        "description": "Kubeon — native Kubernetes IDE",
+        "description": "Lumino — native Kubernetes IDE",
         "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,
@@ -38,13 +38,13 @@
         },
         "info": {
           "0409": {
-            "CompanyName": "Kubeon",
-            "FileDescription": "Kubeon",
+            "CompanyName": "Lumino",
+            "FileDescription": "Lumino",
             "FileVersion": "",
-            "InternalName": "kubeon",
+            "InternalName": "lumino",
             "LegalCopyright": "",
-            "OriginalFilename": "kubeon.exe",
-            "ProductName": "Kubeon",
+            "OriginalFilename": "lumino.exe",
+            "ProductName": "Lumino",
             "ProductVersion": ""
           }
         }

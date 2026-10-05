@@ -22,7 +22,7 @@ const powershellAUMID = `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShel
 // text) arrives through the environment, never as script source.
 const toastScript = `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;` +
 	`[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;` +
-	`$x = New-Object Windows.Data.Xml.Dom.XmlDocument; $x.LoadXml($env:KUBEON_TOAST_XML);` +
+	`$x = New-Object Windows.Data.Xml.Dom.XmlDocument; $x.LoadXml($env:LUMINO_TOAST_XML);` +
 	`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('` + powershellAUMID +
 	`').Show([Windows.UI.Notifications.ToastNotification]::new($x))`
 
@@ -46,7 +46,7 @@ func (n *Notifier) Send(summary, body string, urgency byte) error {
 	xml := `<toast` + scenario + `><visual><binding template="ToastGeneric"><text>` + xmlText(summary) +
 		`</text><text>` + xmlText(body) + `</text></binding></visual></toast>`
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", toastScript)
-	cmd.Env = append(os.Environ(), "KUBEON_TOAST_XML="+xml)
+	cmd.Env = append(os.Environ(), "LUMINO_TOAST_XML="+xml)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	return cmd.Run()
 }

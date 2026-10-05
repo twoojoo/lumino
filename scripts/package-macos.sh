@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds the macOS release on a Mac (Gio needs cgo + the Apple SDK): arm64 and
-# amd64 binaries merged into a universal Kubeon.app, packed as .dmg and .zip
+# amd64 binaries merged into a universal Lumino.app, packed as .dmg and .zip
 # in dist/.
 #
 # Signing: ad-hoc by default (runs after "Open" in System Settings or
-# `xattr -dr com.apple.quarantine Kubeon.app`). With a Developer ID:
+# `xattr -dr com.apple.quarantine Lumino.app`). With a Developer ID:
 #   MACOS_SIGN_IDENTITY="Developer ID Application: …"   sign with hardened runtime
 #   MACOS_NOTARY_PROFILE=<keychain profile>              also notarize + staple
 #     (xcrun notarytool store-credentials <profile> …)
@@ -15,10 +15,10 @@ cd "$ROOT"
 [[ "$(uname -s)" == Darwin ]] || { echo "package-macos.sh must run on macOS" >&2; exit 1; }
 # shellcheck source=scripts/version.sh
 source "$ROOT/scripts/version.sh"
-VERSION="$(kubeon_version)"
+VERSION="$(lumino_version)"
 DIST="${DIST:-dist}"
 OUT="$DIST/macos"
-APP="$OUT/Kubeon.app"
+APP="$OUT/Lumino.app"
 export MACOSX_DEPLOYMENT_TARGET=12.0 # Go 1.25 needs macOS 12+
 
 rm -rf "$OUT"
@@ -30,19 +30,19 @@ for arch in arm64 amd64; do
   GOOS=darwin GOARCH=$arch CGO_ENABLED=1 CC="clang -arch $carch" \
     CGO_CFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
     CGO_LDFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
-    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$OUT/kubeon-$arch" ./cmd/kubeon
+    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$OUT/lumino-$arch" ./cmd/lumino
 done
 
-echo "==> Kubeon.app (universal)"
+echo "==> Lumino.app (universal)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-lipo -create -output "$APP/Contents/MacOS/kubeon" "$OUT/kubeon-arm64" "$OUT/kubeon-amd64"
-rm "$OUT/kubeon-arm64" "$OUT/kubeon-amd64"
-lipo -info "$APP/Contents/MacOS/kubeon"
+lipo -create -output "$APP/Contents/MacOS/lumino" "$OUT/lumino-arm64" "$OUT/lumino-amd64"
+rm "$OUT/lumino-arm64" "$OUT/lumino-amd64"
+lipo -info "$APP/Contents/MacOS/lumino"
 sed -e "s/@VERSION@/$(num_version "$VERSION")/g" -e "s/@DISPLAY_VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
-cp packaging/icons/kubeon.icns "$APP/Contents/Resources/kubeon.icns"
+cp packaging/icons/lumino.icns "$APP/Contents/Resources/lumino.icns"
 cp "$DIST/THIRD_PARTY_NOTICES.txt" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.txt"
-"$APP/Contents/MacOS/kubeon" --version
+"$APP/Contents/MacOS/lumino" --version
 
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
   echo "==> codesign ($MACOS_SIGN_IDENTITY)"
@@ -58,9 +58,9 @@ STAGE="$OUT/dmg"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-DMG="$DIST/kubeon-$VERSION-macos-universal.dmg"
+DMG="$DIST/lumino-$VERSION-macos-universal.dmg"
 rm -f "$DMG"
-hdiutil create -volname "Kubeon $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
+hdiutil create -volname "Lumino $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
 rm -rf "$STAGE"
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
   codesign --force --timestamp -s "$MACOS_SIGN_IDENTITY" "$DMG"
@@ -71,5 +71,5 @@ if [[ -n "${MACOS_SIGN_IDENTITY:-}" && -n "${MACOS_NOTARY_PROFILE:-}" ]]; then
   xcrun stapler staple "$DMG"
   xcrun stapler staple "$APP"
 fi
-(cd "$OUT" && ditto -c -k --keepParent Kubeon.app "../kubeon-$VERSION-macos-universal.zip")
+(cd "$OUT" && ditto -c -k --keepParent Lumino.app "../lumino-$VERSION-macos-universal.zip")
 ls -la "$DIST"

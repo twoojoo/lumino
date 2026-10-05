@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/giovanni/lumino/internal/secrets"
 )
 
 // Kind of provider implementation.
@@ -57,29 +58,26 @@ func PresetByID(id string) (Preset, bool) {
 type ProviderConfig struct {
 	Model   string `json:"model,omitempty"`
 	BaseURL string `json:"baseURL,omitempty"`
-	APIKey  string `json:"apiKey,omitempty"` // prefer the env var; stored 0600
+	// APIKey lives in the OS keyring (never in ai.json).
+	APIKey string `json:"-"`
 }
 
-// Config is persisted in ~/.config/kubeon/ai.json.
+// Config is persisted in ~/.config/lumino/ai.json.
 type Config struct {
-	Provider         string                    `json:"provider"`
-	Providers        map[string]ProviderConfig `json:"providers,omitempty"`
-	DisabledContexts []string                  `json:"disabledContexts,omitempty"`
-	path             string
+	Provider            string                    `json:"provider"`
+	Providers           map[string]ProviderConfig `json:"providers,omitempty"`
+	DisabledConnections []string                  `json:"disabledConnections,omitempty"`
+	// AllowQueries lets the assistant run read-only queries itself.
+	AllowQueries *bool `json:"allowQueries,omitempty"`
+	path         string
 }
 
-// ConfigPath returns the config file location ($KUBEON_CONFIG_DIR overrides).
-func ConfigPath() string {
-	dir := os.Getenv("KUBEON_CONFIG_DIR")
-	if dir == "" {
-		d, err := os.UserConfigDir()
-		if err != nil {
-			d = "."
-		}
-		dir = filepath.Join(d, "kubeon")
-	}
-	return filepath.Join(dir, "ai.json")
-}
+// QueriesAllowed reports whether the model may run read-only queries
+// (default on).
+func (c *Config) QueriesAllowed() bool { return c.AllowQueries == nil || *c.AllowQueries }
+
+// ConfigPath returns the config file location.
+func ConfigPath() string { return filepath.Join(prefs.Dir(), "ai.json") }
 
 // LoadConfig reads the config (missing file → defaults).
 func LoadConfig() *Config {
@@ -97,13 +95,28 @@ func LoadConfig() *Config {
 	if _, ok := PresetByID(c.Provider); !ok {
 		c.Provider = "anthropic"
 	}
+	for id, pc := range c.Providers {
+		if k, ok := secrets.Get("ai:"+id, secrets.APIKey); ok {
+			pc.APIKey = k
+			c.Providers[id] = pc
+		}
+	}
 	return &c
 }
 
-// Save writes the config with 0600 permissions.
+// Save writes the config with 0600 permissions (API keys go to the keyring).
 func (c *Config) Save() error {
 	if c.path == "" {
 		c.path = ConfigPath()
+	}
+	for id, pc := range c.Providers {
+		if pc.APIKey != "" {
+			if err := secrets.Set("ai:"+id, secrets.APIKey, pc.APIKey, true); err != nil {
+				return err
+			}
+		} else {
+			secrets.Delete("ai:"+id, secrets.APIKey)
+		}
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
 	return prefs.WriteFileAtomic(c.path, b)
@@ -128,16 +141,16 @@ func (c *Config) Set(id string, pc ProviderConfig) {
 	c.Providers[id] = pc
 }
 
-// ContextEnabled reports whether the assistant may be used on a kube context.
-func (c *Config) ContextEnabled(kctx string) bool {
-	return !slices.Contains(c.DisabledContexts, kctx)
+// ConnectionEnabled reports whether the assistant may see a connection.
+func (c *Config) ConnectionEnabled(id string) bool {
+	return !slices.Contains(c.DisabledConnections, id)
 }
 
-// SetContextEnabled toggles the assistant for a kube context.
-func (c *Config) SetContextEnabled(kctx string, on bool) {
-	c.DisabledContexts = slices.DeleteFunc(c.DisabledContexts, func(s string) bool { return s == kctx })
+// SetConnectionEnabled toggles the assistant for a connection.
+func (c *Config) SetConnectionEnabled(id string, on bool) {
+	c.DisabledConnections = slices.DeleteFunc(c.DisabledConnections, func(s string) bool { return s == id })
 	if !on {
-		c.DisabledContexts = append(c.DisabledContexts, kctx)
+		c.DisabledConnections = append(c.DisabledConnections, id)
 	}
 }
 
@@ -145,7 +158,7 @@ func (c *Config) SetContextEnabled(kctx string, on bool) {
 func KeySource(p Preset, pc ProviderConfig) string {
 	switch {
 	case pc.APIKey != "":
-		return "stored key"
+		return "key in the system keyring"
 	case p.KeyEnv != "" && os.Getenv(p.KeyEnv) != "":
 		return "$" + p.KeyEnv
 	case p.KeyEnv == "":

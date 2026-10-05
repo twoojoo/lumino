@@ -145,3 +145,31 @@ func (a *App) tipLbl(gtx C, key string, f font.Font, size unit.Sp, c colorNRGBA,
 	}
 	return d
 }
+
+// hintRect offers text as the tooltip of an arbitrary area (pass-through:
+// the area doesn't take pointer events from the widgets under it).
+func (a *App) hintRect(gtx C, key string, r image.Rectangle, text string) {
+	tag := a.tipTags[key]
+	if tag == nil {
+		tag = new(tipTag)
+		a.tipTags[key] = tag
+	}
+	tag.frame = a.frame
+	pass := pointer.PassOp{}.Push(gtx.Ops)
+	area := clip.Rect(r).Push(gtx.Ops)
+	event.Op(gtx.Ops, tag)
+	area.Pop()
+	pass.Pop()
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: tag, Kinds: pointer.Enter | pointer.Leave | pointer.Cancel})
+		if !ok {
+			break
+		}
+		if pe, ok := ev.(pointer.Event); ok {
+			tag.hovered = pe.Kind == pointer.Enter
+		}
+	}
+	if tag.hovered {
+		a.hint(key, text)
+	}
+}

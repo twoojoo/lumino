@@ -23,7 +23,7 @@ const titleBarHeight = unit.Dp(40)
 type TitleBar struct {
 	app                      *App
 	minBtn, maxBtn, closeBtn widget.Clickable
-	nsBtn, searchBtn, aiBtn  widget.Clickable
+	searchBtn, aiBtn         widget.Clickable
 	themeBtn, prefsBtn       widget.Clickable
 }
 
@@ -58,13 +58,10 @@ func (t *TitleBar) Layout(gtx C) D {
 		a.toggleTheme()
 	}
 	if t.aiBtn.Clicked(gtx) {
-		a.ai.toggle(gtx)
-	}
-	if t.nsBtn.Clicked(gtx) {
-		a.pickNamespace()
+		a.ai.open = !a.ai.open
 	}
 	if t.searchBtn.Clicked(gtx) {
-		a.openPalette("")
+		a.openPalette()
 	}
 
 	h := gtx.Dp(titleBarHeight)
@@ -78,7 +75,7 @@ func (t *TitleBar) Layout(gtx C) D {
 	// same surface as the sidebar/panels; the brand block lines up with
 	// the sidebar via a divider
 	fillRect(gtx, pal.Sidebar, image.Rect(0, 0, w, h))
-	sideW := gtx.Dp(240)
+	sideW := a.sidebarWidth(gtx)
 	fillRect(gtx, pal.Border, image.Rect(sideW, gtx.Dp(8), sideW+gtx.Dp(1), h-gtx.Dp(8)))
 	fillRect(gtx, pal.Border, image.Rect(0, h-gtx.Dp(1), w, h))
 
@@ -91,36 +88,9 @@ func (t *TitleBar) Layout(gtx C) D {
 	bh := gtx.Dp(28)
 	sx := (w - bw) / 2
 
-	// namespace selector right after the sidebar divider (recorded first so
-	// its box can be excluded from the drag handles)
 	nsX := sideW + gtx.Dp(10)
-	var nsCall op.CallOp
 	var nsDims D
-	if a.cluster != nil {
-		m := op.Record(gtx.Ops)
-		ng := gtx
-		ng.Constraints = layout.Constraints{Max: image.Pt(max(0, sx-nsX-gtx.Dp(10)), h)}
-		nsDims = t.nsBtn.Layout(ng, func(gtx C) D {
-			b := colorNRGBA{}
-			if t.nsBtn.Hovered() {
-				b = pal.Hover
-			}
-			return rbg(gtx, b, 6, func(gtx C) D {
-				return insetHV(8, 5).Layout(gtx, func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return mdi(gtx, icNamespace, pal.TextDim, 15) }),
-						layout.Rigid(layout.Spacer{Width: 7}.Layout),
-						layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 13, fg, nsLabel(a.ns)) }),
-						layout.Rigid(layout.Spacer{Width: 2}.Layout),
-						layout.Rigid(func(gtx C) D { return mdi(gtx, icExpand, pal.TextDim, 16) }),
-					)
-				})
-			})
-		})
-		nsCall = m.Stop()
-	}
-	nsY := (h - nsDims.Size.Y) / 2
-
+	_ = nsX
 	// drag handles on the empty regions
 	moveRect := func(r image.Rectangle) {
 		if r.Dx() <= 0 {
@@ -130,12 +100,7 @@ func (t *TitleBar) Layout(gtx C) D {
 		system.ActionInputOp(system.ActionMove).Add(gtx.Ops)
 		st.Pop()
 	}
-	if nsDims.Size.X > 0 {
-		moveRect(image.Rect(0, 0, nsX, h))
-		moveRect(image.Rect(nsX+nsDims.Size.X, 0, sx, h))
-	} else {
-		moveRect(image.Rect(0, 0, sx, h))
-	}
+	moveRect(image.Rect(0, 0, sx, h))
 	// theme toggle + assistant, left of the window controls
 	var aiCall op.CallOp
 	var aiDims D
@@ -152,14 +117,10 @@ func (t *TitleBar) Layout(gtx C) D {
 				if pal.Light {
 					ic = icSun
 				}
+				_ = nsDims
 				return layout.Inset{Right: 4}.Layout(gtx, func(gtx C) D { return iconOnly(gtx, &t.themeBtn, ic, 16) })
 			}),
-			layout.Rigid(func(gtx C) D {
-				if a.cluster == nil {
-					return D{}
-				}
-				return t.aiButton(gtx)
-			}),
+			layout.Rigid(func(gtx C) D { return t.aiButton(gtx) }),
 		)
 		aiCall = m.Stop()
 	}
@@ -174,7 +135,10 @@ func (t *TitleBar) Layout(gtx C) D {
 		m := op.Record(gtx.Ops)
 		bg := gtx
 		bg.Constraints = layout.Constraints{Max: image.Pt(gtx.Dp(260), h)}
-		bd := a.policyBadges(bg)
+		bd := D{}
+		if tab := a.activeTab(); tab != nil {
+			bd = a.connBadges(bg, tab.ConnID())
+		}
 		call := m.Stop()
 		if bd.Size.X > 0 {
 			x := max(sx+bw+gtx.Dp(8), aiX-bd.Size.X-gtx.Dp(12))
@@ -188,11 +152,6 @@ func (t *TitleBar) Layout(gtx C) D {
 		moveRect(image.Rect(aiX+aiDims.Size.X, 0, w-ctrlW, h))
 		st := op.Offset(image.Pt(aiX, (h-aiDims.Size.Y)/2)).Push(gtx.Ops)
 		aiCall.Add(gtx.Ops)
-		st.Pop()
-	}
-	if nsDims.Size.X > 0 {
-		st := op.Offset(image.Pt(nsX, nsY)).Push(gtx.Ops)
-		nsCall.Add(gtx.Ops)
 		st.Pop()
 	}
 
@@ -210,7 +169,7 @@ func (t *TitleBar) Layout(gtx C) D {
 	st.Pop()
 
 	// command/search box, centered on the window
-	if a.cluster != nil {
+	{
 		st := op.Offset(image.Pt(sx, (h-bh)/2)).Push(gtx.Ops)
 		sg := gtx
 		sg.Constraints = layout.Exact(image.Pt(bw, bh))
@@ -228,7 +187,7 @@ func (t *TitleBar) Layout(gtx C) D {
 						layout.Flexed(1, func(gtx C) D {
 							gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
 							return layout.W.Layout(gtx, func(gtx C) D {
-								return lbl(gtx, th, fontSans, 12, pal.TextDim, "Search resources, run commands…")
+								return lbl(gtx, th, fontSans, 12, pal.TextDim, "Search objects, connections, commands…")
 							})
 						}),
 						layout.Rigid(func(gtx C) D { return keyChip(gtx, th, shortcutLabel("K")) }),
@@ -269,7 +228,7 @@ func keyChip(gtx C, th *material.Theme, k string) D {
 	})
 }
 
-// logo draws the Kubeon mark (the app icon tile).
+// logo draws the app mark.
 func (t *TitleBar) logo(gtx C) D { return drawLogo(gtx, 24) }
 
 type winGlyph int

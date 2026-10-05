@@ -1,8 +1,9 @@
-# kubeon — native Kubernetes IDE (Gio UI + k9s engine)
+# lumino — native database IDE (Gio UI)
 #
-# `make run` / `make test-int` build with the `dev` tag: the binary is locked
-# to the disposable kind cluster in .dev/kubeconfig and refuses any other
-# kubeconfig or context. Release builds (`make build`) behave like kubectl.
+# `make run` / `make test-int` build with the `dev` tag: the binary only
+# connects to the disposable databases of scripts/dbs (127.0.0.1:55xxx) and
+# keeps its settings in .dev/config. Release builds (`make build`) connect
+# anywhere.
 
 # Set GIO_TAGS= (empty) once X11/Vulkan dev headers are installed:
 #   sudo apt install libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libxcursor-dev libxfixes-dev libvulkan-dev
@@ -11,35 +12,35 @@ comma := ,
 DEV_TAGS := $(if $(GIO_TAGS),$(GIO_TAGS)$(comma))dev
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 
-.PHONY: build build-dev run test test-int dev-up dev-down vendor-k9s \
+.PHONY: build build-dev run test test-int test-ui db-up db-down \
 	icons notices package-linux package-windows package-macos
 
 build:
-	go build -tags '$(GIO_TAGS)' -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o kubeon ./cmd/kubeon
+	go build -tags '$(GIO_TAGS)' -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o lumino ./cmd/lumino
 
 build-dev:
-	go build -tags '$(DEV_TAGS)' -o .dev/kubeon-dev ./cmd/kubeon
+	go build -tags '$(DEV_TAGS)' -o .dev/lumino-dev ./cmd/lumino
 
 run: build-dev
-	env -u KUBECONFIG .dev/kubeon-dev --kubeconfig .dev/kubeconfig $(ARGS)
+	LUMINO_CONFIG_DIR=$(CURDIR)/.dev/config .dev/lumino-dev $(ARGS)
 
 test:
 	go vet -tags '$(DEV_TAGS)' ./internal/... ./cmd/...
 	go test -tags '$(DEV_TAGS)' ./internal/...
 
-# integration + headless UI screenshots (in .dev/shots) against kind only;
-# packages run one at a time: they share (and mutate) the cluster
+# conformance suite of every adapter + headless UI tests (screenshots in
+# .dev/shots) against the development databases (make db-up)
 test-int:
-	env -u KUBECONFIG go test -p 1 -tags '$(DEV_TAGS),integration' -count=1 -timeout 600s ./internal/...
+	go test -p 1 -tags '$(DEV_TAGS),integration' -count=1 -timeout 1200s ./internal/...
 
-dev-up:
-	./scripts/dev-cluster.sh up
+test-ui:
+	go test -tags '$(DEV_TAGS),integration' -count=1 -timeout 600s ./internal/ui/...
 
-dev-down:
-	./scripts/dev-cluster.sh down
+db-up:
+	./scripts/dbs/dbs.sh up $(DBS)
 
-vendor-k9s:
-	./scripts/vendor-k9s.sh && go mod tidy
+db-down:
+	./scripts/dbs/dbs.sh down
 
 # ---- release packages (dist/) ----
 
@@ -59,6 +60,6 @@ package-linux:
 package-windows:
 	VERSION=$(VERSION) ./scripts/package-windows.sh
 
-# universal kubeon.app, .dmg and .zip (macOS host only)
+# universal Lumino.app, .dmg and .zip (macOS host only)
 package-macos:
 	VERSION=$(VERSION) ./scripts/package-macos.sh

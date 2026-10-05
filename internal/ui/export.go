@@ -1,0 +1,449 @@
+package ui
+
+import (
+	"bufio"
+	"context"
+	"encoding/csv"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"gioui.org/layout"
+	"gioui.org/widget"
+	"gioui.org/widget/material"
+
+	"github.com/giovanni/lumino/internal/db"
+	"github.com/giovanni/lumino/internal/db/sqlx"
+)
+
+// exportFormats lists the file formats (id, label, extension).
+var exportFormats = [][3]string{
+	{"csv", "CSV", ".csv"},
+	{"tsv", "TSV", ".tsv"},
+	{"json", "JSON", ".json"},
+	{"sql", "SQL INSERT", ".sql"},
+	{"markdown", "Markdown", ".md"},
+}
+
+// rowWriter streams rows in a format.
+type rowWriter struct {
+	w      *bufio.Writer
+	format string
+	cols   []db.Column
+	d      db.Dialect
+	ref    db.ObjectRef
+	csv    *csv.Writer
+	n      int
+}
+
+func newRowWriter(w io.Writer, format string, cols []db.Column, d db.Dialect, ref db.ObjectRef, header bool) (*rowWriter, error) {
+	rw := &rowWriter{w: bufio.NewWriterSize(w, 256*1024), format: format, cols: cols, d: d, ref: ref}
+	switch format {
+	case "csv", "tsv", "tsv-noheader":
+		rw.csv = csv.NewWriter(rw.w)
+		if format != "csv" {
+			rw.csv.Comma = '\t'
+		}
+		if header && format != "tsv-noheader" {
+			names := make([]string, len(cols))
+			for i, c := range cols {
+				names[i] = c.Name
+			}
+			if err := rw.csv.Write(names); err != nil {
+				return nil, err
+			}
+		}
+	case "json":
+		rw.w.WriteString("[\n")
+	case "markdown":
+		names := make([]string, len(cols))
+		seps := make([]string, len(cols))
+		for i, c := range cols {
+			names[i] = mdEscape(c.Name)
+			seps[i] = "---"
+			if c.Kind.Numeric() {
+				seps[i] = "---:"
+			}
+		}
+		fmt.Fprintf(rw.w, "| %s |\n| %s |\n", strings.Join(names, " | "), strings.Join(seps, " | "))
+	case "sql":
+	default:
+		return nil, fmt.Errorf("unknown format %q", format)
+	}
+	return rw, nil
+}
+
+func mdEscape(s string) string {
+	return strings.NewReplacer("|", `\|`, "\n", " ", "\r", "").Replace(s)
+}
+
+// jsonValue converts a row value for encoding/json.
+func jsonValue(v any, k db.Kind) any {
+	switch x := v.(type) {
+	case nil, bool, int64, uint64:
+		return x
+	case float64:
+		return x
+	case string:
+		if k == db.KindDecimal || k == db.KindInt {
+			if _, ok := new(big.Rat).SetString(x); ok {
+				return json.Number(x)
+			}
+		}
+		if k == db.KindJSON && json.Valid([]byte(x)) {
+			return json.RawMessage(x)
+		}
+		return x
+	case time.Time:
+		return db.FormatTime(x, k)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = jsonValue(e, db.KindOther)
+		}
+		return out
+	case map[string]any:
+		out := map[string]any{}
+		for kk, e := range x {
+			out[kk] = jsonValue(e, db.KindOther)
+		}
+		return out
+	}
+	return db.FormatValue(v, k)
+}
+
+func (rw *rowWriter) write(row []any) error {
+	switch rw.format {
+	case "csv", "tsv", "tsv-noheader":
+		rec := make([]string, len(row))
+		for i, v := range row {
+			if v != nil {
+				rec[i] = db.FormatValue(v, rw.cols[i].Kind)
+			}
+		}
+		if err := rw.csv.Write(rec); err != nil {
+			return err
+		}
+	case "json":
+		obj := make([]string, len(row))
+		for i, v := range row {
+			k, _ := json.Marshal(rw.cols[i].Name)
+			val, err := json.Marshal(jsonValue(v, rw.cols[i].Kind))
+			if err != nil {
+				val, _ = json.Marshal(db.FormatValue(v, rw.cols[i].Kind))
+			}
+			obj[i] = string(k) + ": " + string(val)
+		}
+		if rw.n > 0 {
+			rw.w.WriteString(",\n")
+		}
+		rw.w.WriteString("  {" + strings.Join(obj, ", ") + "}")
+	case "markdown":
+		cells := make([]string, len(row))
+		for i, v := range row {
+			if v == nil {
+				cells[i] = "NULL"
+			} else {
+				cells[i] = mdEscape(db.FormatValue(v, rw.cols[i].Kind))
+			}
+		}
+		fmt.Fprintf(rw.w, "| %s |\n", strings.Join(cells, " | "))
+	case "sql":
+		d := rw.d
+		if d == nil {
+			d = &db.BaseDialect{QuoteL: `"`, QuoteR: `"`}
+		}
+		vals := make([]db.ColValue, len(row))
+		for i, v := range row {
+			vals[i] = db.ColValue{Column: rw.cols[i].Name, Kind: rw.cols[i].Kind, Value: v}
+		}
+		q, _ := db.StandardChange(d, rw.ref, db.Change{Op: db.OpInsert, Values: vals}, true)
+		rw.w.WriteString(q + ";\n")
+	}
+	rw.n++
+	return nil
+}
+
+func (rw *rowWriter) close() error {
+	if rw.csv != nil {
+		rw.csv.Flush()
+		if err := rw.csv.Error(); err != nil {
+			return err
+		}
+	}
+	if rw.format == "json" {
+		rw.w.WriteString("\n]\n")
+	}
+	return rw.w.Flush()
+}
+
+// writeRows writes a block of rows (clipboard copies).
+func writeRows(w io.Writer, format string, cols []db.Column, rows [][]any, d db.Dialect, ref db.ObjectRef, header bool) error {
+	rw, err := newRowWriter(w, format, cols, d, ref, header)
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if err := rw.write(r); err != nil {
+			return err
+		}
+	}
+	return rw.close()
+}
+
+// ExportDialog exports a result to a file.
+type ExportDialog struct {
+	app    *App
+	connID string
+	rs     *resultSet
+	query  string // statement re-run for "all rows" ("" = not possible)
+	ref    db.ObjectRef
+	format int
+	all    bool
+	path   widget.Editor
+	done   bool
+	d      dialog
+
+	running  bool
+	written  atomic.Int64
+	cancel   context.CancelFunc
+	result   string
+	fmtBtns  []widget.Clickable
+	scopeBtn [2]widget.Clickable
+	ok, stop widget.Clickable
+}
+
+// newExportDialog exports rs; table (optional) names the INSERT target and
+// enables re-running the browse query.
+func newExportDialog(a *App, connID string, rs *resultSet, table *db.ObjectRef) *ExportDialog {
+	d := &ExportDialog{app: a, connID: connID, rs: rs, fmtBtns: make([]widget.Clickable, len(exportFormats))}
+	d.ref = db.ObjectRef{Name: "exported"}
+	if table != nil {
+		d.ref = *table
+	}
+	cs := a.connState(connID)
+	if lex := cs.dialectLex(); db.Classify(rs.sql, lex) == db.StmtRead {
+		d.query = rs.sql
+	}
+	d.all = !rs.more && d.query != ""
+	d.path.SingleLine = true
+	d.setPath()
+	return d
+}
+
+func (cs *connState) dialectLex() *sqlx.Options {
+	if d := cs.dialect(); d != nil {
+		return d.Lex()
+	}
+	return &sqlx.Options{}
+}
+
+func (d *ExportDialog) setPath() {
+	name := d.ref.Name
+	if name == "" || name == "exported" {
+		name = "result"
+	}
+	name += "-" + time.Now().Format("20060102-150405") + exportFormats[d.format][2]
+	d.path.SetText(filepath.Join(downloadsDir(), name))
+}
+
+func (d *ExportDialog) Done() bool { return d.done }
+
+func (d *ExportDialog) cancelled() {
+	if d.cancel != nil {
+		d.cancel()
+	}
+}
+
+func (d *ExportDialog) start() {
+	a := d.app
+	path := strings.TrimSpace(d.path.Text())
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err == nil {
+		d.result = "File exists: choose another name"
+		return
+	}
+	format := exportFormats[d.format][0]
+	ctx, cancel := context.WithCancel(context.Background())
+	d.cancel, d.running, d.result = cancel, true, ""
+	d.written.Store(0)
+	cols := d.rs.cols
+	rows := append([]db.Row(nil), d.rs.rows...)
+	all, query := d.all, d.query
+	cs := a.connState(d.connID)
+	conn := cs.conn
+	ref := d.ref
+	go func() {
+		err := func() error {
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			var dia db.Dialect
+			if conn != nil {
+				dia = conn.Dialect()
+			}
+			if !all {
+				rw, err := newRowWriter(f, format, cols, dia, ref, true)
+				if err != nil {
+					return err
+				}
+				for _, r := range rows {
+					if err := rw.write(r); err != nil {
+						return err
+					}
+					d.written.Add(1)
+				}
+				return rw.close()
+			}
+			if conn == nil {
+				return fmt.Errorf("not connected")
+			}
+			s, err := conn.Session(ctx)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			res, err := s.Execute(ctx, query)
+			if err != nil {
+				return err
+			}
+			defer res.Close()
+			rw, err := newRowWriter(f, format, res.Columns(), dia, ref, true)
+			if err != nil {
+				return err
+			}
+			for {
+				batch, more, err := res.Fetch(ctx, 5000)
+				if err != nil {
+					return err
+				}
+				for _, r := range batch {
+					if err := rw.write(r); err != nil {
+						return err
+					}
+				}
+				d.written.Add(int64(len(batch)))
+				a.invalidate()
+				if !more {
+					break
+				}
+			}
+			return rw.close()
+		}()
+		if err != nil {
+			os.Remove(path)
+		}
+		a.post(func() {
+			d.running = false
+			if err != nil {
+				d.result = "Export failed: " + err.Error()
+				return
+			}
+			a.flash(fmt.Sprintf("Exported %d rows to %s", d.written.Load(), path), false)
+			d.done = true
+		})
+	}()
+}
+
+func (d *ExportDialog) Layout(gtx C) D {
+	th := d.app.th
+	for i := range d.fmtBtns {
+		if d.fmtBtns[i].Clicked(gtx) && !d.running {
+			d.format = i
+			d.setPath()
+		}
+	}
+	if d.scopeBtn[0].Clicked(gtx) {
+		d.all = false
+	}
+	if d.scopeBtn[1].Clicked(gtx) && d.query != "" {
+		d.all = true
+	}
+	if d.ok.Clicked(gtx) && !d.running {
+		d.start()
+	}
+	if d.stop.Clicked(gtx) || d.d.close.Clicked(gtx) {
+		if d.running && d.cancel != nil {
+			d.cancel()
+		} else {
+			d.done = true
+		}
+	}
+	labels := make([]string, len(exportFormats))
+	for i, f := range exportFormats {
+		labels[i] = f[1]
+	}
+	return d.d.layout(gtx, th, 560, icExport, "Export", func(gtx C) D {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Format") }),
+			layout.Rigid(func(gtx C) D { return segmented(gtx, th, d.fmtBtns, labels, d.format) }),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Rows") }),
+			layout.Rigid(func(gtx C) D {
+				allLabel := "All rows (runs the query again)"
+				if d.query == "" {
+					allLabel = "All rows (not available: the statement isn't a query)"
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx C) D {
+						return radio(gtx, th, &d.scopeBtn[0], fmt.Sprintf("Fetched rows (%d)", len(d.rs.rows)), !d.all)
+					}),
+					layout.Rigid(func(gtx C) D { return radio(gtx, th, &d.scopeBtn[1], allLabel, d.all) }),
+				)
+			}),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "File") }),
+			layout.Rigid(func(gtx C) D { return textField(gtx, th, &d.path, "path", true) }),
+			layout.Rigid(func(gtx C) D {
+				msg, c := d.result, pal.Err
+				if d.running {
+					msg, c = fmt.Sprintf("Exporting… %d rows written", d.written.Load()), pal.Text
+				}
+				if msg == "" {
+					return D{}
+				}
+				return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D { return lbl(gtx, th, fontSans, 12, c, msg) })
+			}),
+		)
+	}, footerButtons(nil,
+		func(gtx C) D {
+			txt := "Cancel"
+			if d.running {
+				txt = "Stop"
+			}
+			return pillButton(gtx, th, &d.stop, nil, txt, pal.Text, pal.Hover)
+		},
+		func(gtx C) D {
+			c := pal.Accent
+			if d.running {
+				c = pal.Border
+			}
+			return button(gtx, th, &d.ok, "Export", c)
+		},
+	))
+}
+
+// radio is a radio button with a label.
+func radio(gtx C, th *material.Theme, cl *widget.Clickable, label string, on bool) D {
+	return cl.Layout(gtx, func(gtx C) D {
+		ic, c := icRadioOff, pal.TextDim
+		if on {
+			ic, c = icRadioOn, pal.Accent
+		}
+		return insetHV(2, 4).Layout(gtx, func(gtx C) D {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx C) D { return mdi(gtx, ic, c, 17) }),
+				layout.Rigid(layout.Spacer{Width: 8}.Layout),
+				layout.Flexed(1, func(gtx C) D { return lbl(gtx, th, fontSans, 12.5, pal.Text, label) }),
+			)
+		})
+	})
+}

@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Kubeon</string>
+	<string>Lumino</string>
 	<key>CFBundleDisplayName</key>
-	<string>Kubeon</string>
+	<string>Lumino</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.twoojoo.kubeon</string>
+	<string>io.github.twoojoo.lumino</string>
 	<key>CFBundleExecutable</key>
-	<string>kubeon</string>
+	<string>lumino</string>
 	<key>CFBundleIconFile</key>
-	<string>kubeon</string>
+	<string>lumino</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>@VERSION@</string>
 	<key>CFBundleGetInfoString</key>
-	<string>Kubeon @DISPLAY_VERSION@</string>
+	<string>Lumino @DISPLAY_VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
 	<key>LSMinimumSystemVersion</key>

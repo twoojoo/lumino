@@ -2,27 +2,35 @@
 
 package safety
 
-import "testing"
+import (
+	"testing"
 
-func TestDevRefusesUserKubeconfig(t *testing.T) {
-	for _, p := range []string{"/home/x/.kube/config", "/tmp/kubeconfig"} {
-		if _, err := ResolveKubeconfig(p); err == nil {
-			t.Fatalf("expected %q to be refused", p)
+	"github.com/giovanni/lumino/internal/db"
+	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
+	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
+)
+
+func TestDevGuard(t *testing.T) {
+	ok := []db.Config{
+		{Driver: "postgres", Host: "127.0.0.1", Port: 55432},
+		{Driver: "postgres", Host: "postgres", Port: 5432, SSH: &db.SSHConfig{Host: "127.0.0.1", Port: 55222}},
+		{Driver: "sqlite", File: "/x/.dev/a.sqlite"},
+	}
+	for _, c := range ok {
+		if err := CheckConnection(&c); err != nil {
+			t.Errorf("%+v refused: %v", c, err)
 		}
 	}
-	if _, err := ResolveKubeconfig("/repo/.dev/kubeconfig"); err != nil {
-		t.Fatal(err)
+	bad := []db.Config{
+		{Driver: "postgres", Host: "127.0.0.1", Port: 5432},
+		{Driver: "postgres", Host: "db.example.com", Port: 55432},
+		{Driver: "postgres", Host: "127.0.0.1"},
+		{Driver: "postgres", Host: "x", SSH: &db.SSHConfig{Host: "bastion.example.com", Port: 22}},
+		{Driver: "sqlite", File: "/home/u/real.db"},
 	}
-}
-
-func TestDevRefusesForeignContexts(t *testing.T) {
-	if CheckContext("prod-eu") == nil {
-		t.Fatal("prod-eu must be refused")
-	}
-	if err := CheckContext("kind-kubeon-dev"); err != nil {
-		t.Fatal(err)
-	}
-	if got := FilterContexts([]string{"a", "kind-kubeon-dev"}); len(got) != 1 {
-		t.Fatalf("got %v", got)
+	for _, c := range bad {
+		if err := CheckConnection(&c); err == nil {
+			t.Errorf("%+v accepted", c)
+		}
 	}
 }

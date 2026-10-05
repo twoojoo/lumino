@@ -56,39 +56,51 @@ type Agent struct {
 
 // ContextInfo is what the user is looking at.
 type ContextInfo struct {
-	KubeContext string
-	K8sVersion  string
-	Namespace   string // "" = all
-	View        string // e.g. "Pods"
-	Selected    string // e.g. "v1/pods demo/web-123"
+	Connection string // connection name
+	Database   string // product and version
+	Dialect    string
+	Schema     string // current schema
+	View       string // e.g. "Console" or "Table public.users"
+	SQL        string // SQL in the editor (or the selected statement)
+	Error      string // last error of the console
+	ReadOnly   bool
+	Protected  bool
 }
 
 func systemPrompt(ci ContextInfo) string {
-	ns := ci.Namespace
-	if ns == "" {
-		ns = "all namespaces"
-	}
 	var b strings.Builder
-	b.WriteString(`You are the assistant built into Kubeon, a desktop Kubernetes IDE. You help the user understand and troubleshoot their cluster.
+	b.WriteString(`You are the assistant built into Lumino, a desktop database IDE. You help the user write, understand, fix and optimize SQL, and understand their database schema.
 
 How to work:
-- Use the tools to gather evidence before answering; don't guess cluster state. Prefer a few targeted calls (describe, events, previous logs) over broad listing.
-- Call tools directly through the tool-calling interface; never write tool calls as text or JSON in your reply, and never use placeholder values. If you don't know an exact name, call list_resources first to find it.
-- Your tools are read-only. To change anything (scale, restart, delete, apply, cordon), call propose_action: the user reviews and confirms it in the UI. Never claim a change was made.
-- Ground conclusions in what the tools returned: quote the relevant event, status or log line. If evidence is inconclusive, say what is missing.
-- Secret values and credentials are redacted before you see them; never ask the user to paste secrets.
-- Answer in the user's language. Be concise and practical: root cause first, then the fix. Use Markdown: short paragraphs, bullet lists, ` + "`code`" + ` and fenced YAML blocks.
+- Use the tools to look at the real schema (list_objects, describe_table, get_ddl, sample_rows) before writing SQL against it; never invent table or column names. Prefer a few targeted calls.
+- Call tools directly through the tool-calling interface; never write tool calls as text or JSON in your reply, and never use placeholder values.
+- Your tools are read-only. To change anything (INSERT, UPDATE, DELETE, DDL), call propose_sql: the user reviews it and runs it themselves. Never claim a change was made.
+- Write SQL in the dialect of this database. Quote identifiers only when needed.
+- Sample rows and query results have sensitive columns redacted; never ask the user to paste credentials.
+- Answer in the user's language. Be concise and practical. Use Markdown, with SQL in fenced sql blocks.
 `)
-	fmt.Fprintf(&b, "\nCurrent UI context:\n- kube context: %s", ci.KubeContext)
-	if ci.K8sVersion != "" {
-		fmt.Fprintf(&b, " (Kubernetes %s)", ci.K8sVersion)
+	fmt.Fprintf(&b, "\nCurrent UI context:\n- connection: %s\n- database: %s (dialect %s)\n", ci.Connection, ci.Database, ci.Dialect)
+	if ci.Schema != "" {
+		fmt.Fprintf(&b, "- current schema: %s\n", ci.Schema)
 	}
-	fmt.Fprintf(&b, "\n- namespace filter: %s\n", ns)
+	if ci.ReadOnly {
+		b.WriteString("- the connection is READ-ONLY: don't propose changes\n")
+	}
+	if ci.Protected {
+		b.WriteString("- the connection is a PROTECTED production database: be careful, explain the risks of every change\n")
+	}
 	if ci.View != "" {
 		fmt.Fprintf(&b, "- open view: %s\n", ci.View)
 	}
-	if ci.Selected != "" {
-		fmt.Fprintf(&b, "- selected resource: %s (\"this\" usually refers to it)\n", ci.Selected)
+	if ci.SQL != "" {
+		sql := ci.SQL
+		if len(sql) > 6000 {
+			sql = sql[:6000] + "\n…"
+		}
+		fmt.Fprintf(&b, "- SQL in the editor (\"this query\" usually refers to it):\n```sql\n%s\n```\n", sql)
+	}
+	if ci.Error != "" {
+		fmt.Fprintf(&b, "- last error: %s\n", ci.Error)
 	}
 	return b.String()
 }
@@ -198,7 +210,7 @@ func compactJSON(b json.RawMessage) string {
 		return ""
 	}
 	parts := make([]string, 0, len(v))
-	for _, k := range []string{"action", "kind", "namespace", "name", "container", "filter", "object", "previous", "tail_lines", "grep", "replicas"} {
+	for _, k := range []string{"schema", "table", "name", "type", "limit", "sql"} {
 		if x, ok := v[k]; ok && fmt.Sprint(x) != "" && fmt.Sprint(x) != "false" {
 			parts = append(parts, fmt.Sprintf("%s=%v", k, x))
 		}

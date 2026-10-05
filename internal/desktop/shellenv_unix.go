@@ -13,10 +13,10 @@ import (
 	"golang.org/x/term"
 )
 
-const envMarker = "__KUBEON_ENV__"
+const envMarker = "__LUMINO_ENV__"
 
 // ImportShellEnv copies the login shell environment into the process when
-// kubeon was started from a desktop launcher (Finder, Dock, app menu): those
+// lumino was started from a desktop launcher (Finder, Dock, app menu): those
 // get a minimal environment, so kubeconfig exec plugins (aws,
 // gke-gcloud-auth-plugin, kubelogin, …) installed in shell-configured paths
 // wouldn't be found. PATH is replaced; other variables are only added.
@@ -69,5 +69,5 @@ func parseEnvBlock(out []byte) map[string]string {
 	return env
 }
 
-// skipEnv lists shell-session variables that must not leak into kubeon.
+// skipEnv lists shell-session variables that must not leak into lumino.
 var skipEnv = map[string]bool{"_": true, "PWD": true, "OLDPWD": true, "SHLVL": true, "PS1": true}

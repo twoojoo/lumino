@@ -1,6 +1,6 @@
-// Package update checks GitHub releases for a newer kubeon and installs it
+// Package update checks GitHub releases for a newer lumino and installs it
 // in place: the AppImage, the tar.gz binary, the portable Windows exe or the
-// macOS app bundle is replaced, then kubeon restarts. Package-manager
+// macOS app bundle is replaced, then lumino restarts. Package-manager
 // installs (deb/rpm in /usr) only get a link to the release.
 //
 // Every download is checked against SHA256SUMS.txt, whose ed25519 signature
@@ -27,12 +27,12 @@ import (
 
 // DefaultURL is the "latest release" endpoint of the public repository that
 // hosts the packages (drafts and prereleases excluded); the source
-// repository is private. KUBEON_UPDATE_URL overrides it.
-const DefaultURL = "https://api.github.com/repos/twoojoo/kubeon-releases/releases/latest"
+// repository is private. LUMINO_UPDATE_URL overrides it.
+const DefaultURL = "https://api.github.com/repos/twoojoo/lumino-releases/releases/latest"
 
 // PublicKey verifies SHA256SUMS.txt.sig (base64 ed25519 public key; its
 // private half signs releases in CI, secret UPDATE_SIGNING_KEY).
-var PublicKey = "pX1Dosf+ulIw6K2Q6uyYvCbwz99oGrYDw3AmXOLltvg="
+var PublicKey = "CK1TEM6TZg/WTFIoj/e46uM9J5TtSx7RFQ5P6fUXFGE="
 
 const (
 	sumsName = "SHA256SUMS.txt"
@@ -49,7 +49,7 @@ type Release struct {
 
 // URL returns the endpoint to query.
 func URL() string {
-	if u := os.Getenv("KUBEON_UPDATE_URL"); u != "" {
+	if u := os.Getenv("LUMINO_UPDATE_URL"); u != "" {
 		return u
 	}
 	return DefaultURL
@@ -122,7 +122,7 @@ func Latest(ctx context.Context) (*Release, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "kubeon-updater")
+	req.Header.Set("User-Agent", "lumino-updater")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -173,7 +173,7 @@ func verifySums(sums, sig []byte) (map[string]string, error) {
 	}
 	s, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
 	if err != nil || !ed25519.Verify(pub, sums, s) {
-		return nil, errors.New("release checksums are not signed by the Kubeon release key")
+		return nil, errors.New("release checksums are not signed by the Lumino release key")
 	}
 	out := map[string]string{}
 	for _, l := range strings.Split(string(sums), "\n") {
@@ -191,13 +191,13 @@ func assetName(k Kind, version string) string {
 	switch k {
 	case KindAppImage:
 		a := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[arch]
-		return fmt.Sprintf("kubeon-%s-%s.AppImage", version, a)
+		return fmt.Sprintf("lumino-%s-%s.AppImage", version, a)
 	case KindTarball:
-		return fmt.Sprintf("kubeon-%s-linux-%s.tar.gz", version, arch)
+		return fmt.Sprintf("lumino-%s-linux-%s.tar.gz", version, arch)
 	case KindWindows:
-		return fmt.Sprintf("kubeon-%s-windows-%s.zip", version, arch)
+		return fmt.Sprintf("lumino-%s-windows-%s.zip", version, arch)
 	case KindMacApp:
-		return fmt.Sprintf("kubeon-%s-macos-universal.zip", version)
+		return fmt.Sprintf("lumino-%s-macos-universal.zip", version)
 	}
 	return ""
 }

@@ -8,10 +8,10 @@ import (
 	"strings"
 )
 
-// downloadsDir resolves where exported files go: $KUBEON_DOWNLOAD_DIR,
+// downloadsDir resolves where exported files go: $LUMINO_DOWNLOAD_DIR,
 // XDG_DOWNLOAD_DIR (user-dirs.dirs), ~/Downloads, then home.
 func downloadsDir() string {
-	if d := os.Getenv("KUBEON_DOWNLOAD_DIR"); d != "" {
+	if d := os.Getenv("LUMINO_DOWNLOAD_DIR"); d != "" {
 		_ = os.MkdirAll(d, 0o755)
 		if abs, err := filepath.Abs(d); err == nil {
 			return abs

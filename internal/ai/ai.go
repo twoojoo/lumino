@@ -1,5 +1,5 @@
-// Package ai implements the kubeon cluster assistant: a provider-neutral
-// agent loop with read-only Kubernetes tools, on top of Anthropic (official
+// Package ai implements the lumino database assistant: a provider-neutral
+// agent loop with read-only database tools, on top of Anthropic (official
 // SDK) and any OpenAI-compatible API (OpenAI, Gemini, Mistral, Groq,
 // OpenRouter, DeepSeek, xAI, Ollama, LM Studio, vLLM, llama.cpp…).
 package ai

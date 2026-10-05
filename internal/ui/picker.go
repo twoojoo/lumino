@@ -25,6 +25,7 @@ type Picker struct {
 	onPick    func(string)
 	exact     func(string) bool // free text accepted as-is when true
 	icon      *widget.Icon      // item icon override
+	itemIcons []*widget.Icon    // per item (parallel to items), optional
 	done      bool
 	focused   bool
 	lastQ     string
@@ -201,6 +202,9 @@ func (p *Picker) Layout(gtx C) D {
 									return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 										layout.Rigid(func(gtx C) D {
 											ico := p.icon
+											if p.itemIcons != nil && p.itemIcons[p.matches[i]] != nil {
+												ico = p.itemIcons[p.matches[i]]
+											}
 											if ico == nil {
 												ico = pickerIcon(item)
 											}
@@ -238,6 +242,8 @@ type Confirm struct {
 	opts       []bool
 	optBtns    []widget.Clickable
 	onOK       func(opts []bool)
+	onCancel   func() // also when dismissed with Esc or a click outside
+	okLabel    string
 	done       bool
 	ok, cancel widget.Clickable
 
@@ -257,18 +263,13 @@ func (c *Confirm) accept() {
 		return
 	}
 	c.done = true
+	c.onCancel = nil
 	c.onOK(c.opts)
 }
 
-// newConfirm: danger dialogs offer a single "force" option.
+// newConfirm is a yes/no dialog (onOK's argument is unused).
 func newConfirm(a *App, title, msg string, danger bool, onOK func(bool)) *Confirm {
-	var labels []string
-	if danger && title == "Delete" {
-		labels = []string{"Force (grace 0)"}
-	}
-	return newConfirmOpts(a, title, msg, danger, labels, make([]bool, len(labels)), func(o []bool) {
-		onOK(len(o) > 0 && o[0])
-	})
+	return newConfirmOpts(a, title, msg, danger, nil, nil, func([]bool) { onOK(false) })
 }
 
 func newConfirmOpts(a *App, title, msg string, danger bool, labels []string, defaults []bool, onOK func([]bool)) *Confirm {
@@ -277,6 +278,15 @@ func newConfirmOpts(a *App, title, msg string, danger bool, labels []string, def
 }
 
 func (c *Confirm) Done() bool { return c.done }
+
+// cancelled implements canceler.
+func (c *Confirm) cancelled() {
+	if c.onCancel != nil {
+		f := c.onCancel
+		c.onCancel = nil
+		f()
+	}
+}
 
 func (c *Confirm) Layout(gtx C) D {
 	th := c.app.th
@@ -310,6 +320,7 @@ func (c *Confirm) Layout(gtx C) D {
 	}
 	if c.cancel.Clicked(gtx) {
 		c.done = true
+		c.cancelled()
 	}
 	for i := range c.optBtns {
 		if c.optBtns[i].Clicked(gtx) {
@@ -354,7 +365,7 @@ func (c *Confirm) Layout(gtx C) D {
 										return rbg(gtx, withAlpha(pal.Err, 0x22), 6, func(gtx C) D {
 											gtx.Constraints.Min.X = gtx.Constraints.Max.X
 											return insetHV(9, 6).Layout(gtx, func(gtx C) D {
-												return iconText(gtx, th, icWarning, 12, pal.Err, "Protected context: "+c.prodCtx)
+												return iconText(gtx, th, icWarning, 12, pal.Err, "Protected connection: "+c.prodCtx)
 											})
 										})
 									}),
@@ -411,7 +422,11 @@ func (c *Confirm) Layout(gtx C) D {
 									if !c.armed() {
 										col = pal.Border
 									}
-									return button(gtx, th, &c.ok, c.title, col)
+									lbl := c.okLabel
+									if lbl == "" {
+										lbl = c.title
+									}
+									return button(gtx, th, &c.ok, lbl, col)
 								}),
 							)
 						}),
@@ -422,20 +437,8 @@ func (c *Confirm) Layout(gtx C) D {
 	})
 }
 
-// pickerIcon picks an icon for a picker entry.
+// pickerIcon picks an icon for a picker entry ("title  ·  sub" items may
+// carry an icon key in PickerIcons).
 func pickerIcon(item string) *widget.Icon {
-	if _, gvr, ok := strings.Cut(item, "  ·  "); ok {
-		return iconFor(gvr)
-	}
-	switch {
-	case strings.HasPrefix(item, "ns ") || item == "All namespaces":
-		return icNamespace
-	case strings.HasPrefix(item, "ctx "):
-		return icCluster
-	case strings.Contains(item, "→"):
-		return icForward
-	case strings.Contains(item, ":") && !strings.Contains(item, " "):
-		return icForward
-	}
 	return icCommand
 }

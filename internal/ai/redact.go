@@ -2,9 +2,6 @@ package ai
 
 import (
 	"regexp"
-	"strings"
-
-	"sigs.k8s.io/yaml"
 )
 
 // Redaction keeps credentials out of what is sent to the model.
@@ -40,86 +37,6 @@ func RedactText(s string) string {
 	return s
 }
 
-// lastApplied holds the full previous manifest as JSON: it must be scrubbed
-// like the object itself, on every kind.
-const lastApplied = "kubectl.kubernetes.io/last-applied-configuration"
-
-var docSep = regexp.MustCompile(`(?m)^---[ \t]*$`)
-
-// RedactManifest scrubs YAML (one or more documents, e.g. a Helm release
-// manifest): Secret data/stringData values, env vars with sensitive names,
-// last-applied-configuration annotations, then text rules.
-func RedactManifest(kind, y string) string {
-	docs := docSep.Split(y, -1)
-	if len(docs) > 1 {
-		for i, d := range docs {
-			if strings.TrimSpace(d) != "" {
-				docs[i] = "\n" + strings.TrimLeft(RedactManifest("", d), "\n")
-			}
-		}
-		return strings.TrimLeft(strings.Join(docs, "---"), "\n")
-	}
-	var obj map[string]any
-	if err := yaml.Unmarshal([]byte(y), &obj); err != nil || obj == nil {
-		return RedactText(y)
-	}
-	redactObject(kind, obj)
-	b, err := yaml.Marshal(obj)
-	if err != nil {
-		return RedactText(y)
-	}
-	return RedactText(string(b))
-}
-
-func redactObject(kind string, obj map[string]any) {
-	isSecret := strings.EqualFold(kind, "secret") || strings.EqualFold(kind, "secrets") ||
-		strings.EqualFold(str(obj["kind"]), "Secret")
-	if isSecret {
-		for _, k := range []string{"data", "stringData"} {
-			if m, ok := obj[k].(map[string]any); ok {
-				for key := range m {
-					m[key] = redacted
-				}
-			}
-		}
-	}
-	if md, ok := obj["metadata"].(map[string]any); ok {
-		if an, ok := md["annotations"].(map[string]any); ok {
-			if la, ok := an[lastApplied].(string); ok {
-				var prev map[string]any
-				if isSecret || yaml.Unmarshal([]byte(la), &prev) != nil || prev == nil {
-					an[lastApplied] = redacted
-				} else {
-					redactObject("", prev)
-					b, _ := yaml.Marshal(prev)
-					an[lastApplied] = string(b)
-				}
-			}
-		}
-	}
-	walk(obj)
-}
-
-func str(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
-// walk redacts {name: <sensitive>, value: x} env entries anywhere.
-func walk(v any) {
-	switch t := v.(type) {
-	case map[string]any:
-		if name, ok := t["name"].(string); ok && sensitiveName.MatchString(name) {
-			if _, has := t["value"]; has {
-				t["value"] = redacted
-			}
-		}
-		for _, c := range t {
-			walk(c)
-		}
-	case []any:
-		for _, c := range t {
-			walk(c)
-		}
-	}
-}
+// SensitiveColumn reports whether a column name looks like it holds
+// credentials (its values are redacted in samples sent to the model).
+func SensitiveColumn(name string) bool { return sensitiveName.MatchString(name) }

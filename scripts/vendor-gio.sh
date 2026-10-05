@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vendors gioui.org into third_party/gio and applies kubeon patches
+# Vendors gioui.org into third_party/gio and applies lumino patches
 # (third_party/_gio-patches). go.mod replaces gioui.org with this copy.
 #
 # Patches (wayland):

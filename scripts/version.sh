@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Version helpers for the packaging scripts (source it).
-#   kubeon_version  display version: $VERSION, else git describe, without "v"
+#   lumino_version  display version: $VERSION, else git describe, without "v"
 #   pkg_version V   Debian/RPM-safe version that sorts correctly:
 #                     1.2.0           → 1.2.0
 #                     1.2.0-rc1       → 1.2.0~rc1          (before 1.2.0)
@@ -8,7 +8,7 @@
 #                     abc1234[-dirty] → 0.0.0~gitabc1234   (no tag yet)
 #   num_version V   numeric a.b.c for Windows/macOS resources (0.0.0 if none)
 
-kubeon_version() {
+lumino_version() {
   local v="${VERSION:-}"
   if [[ -z "$v" ]]; then
     v="$(git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)"

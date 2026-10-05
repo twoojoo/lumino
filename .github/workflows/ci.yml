@@ -78,13 +78,13 @@ jobs:
             libwayland-client0 libwayland-egl1 libwayland-cursor0 libxkbcommon-x11-0 libx11-xcb1 libxcursor1
           printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > /tmp/empty-kubeconfig
           set +e
-          xvfb-run -a timeout 15 dist/linux-${{ matrix.arch }}/kubeon --kubeconfig /tmp/empty-kubeconfig </dev/null
+          xvfb-run -a timeout 15 dist/linux-${{ matrix.arch }}/lumino --kubeconfig /tmp/empty-kubeconfig </dev/null
           code=$?
           set -e
-          [ "$code" = 124 ] || { echo "kubeon exited early with $code"; exit 1; }
+          [ "$code" = 124 ] || { echo "lumino exited early with $code"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
-          name: kubeon-linux-${{ matrix.arch }}
+          name: lumino-linux-${{ matrix.arch }}
           path: |
             dist/*.AppImage
             dist/*.deb
@@ -113,14 +113,14 @@ jobs:
         shell: pwsh
         run: |
           "apiVersion: v1`nkind: Config`nclusters: []`ncontexts: []`nusers: []" | Set-Content "$env:RUNNER_TEMP\empty-kubeconfig"
-          & dist\windows-amd64\kubeon.exe --version
-          $p = Start-Process -FilePath dist\windows-amd64\kubeon.exe -ArgumentList "--kubeconfig", "$env:RUNNER_TEMP\empty-kubeconfig" -PassThru
+          & dist\windows-amd64\lumino.exe --version
+          $p = Start-Process -FilePath dist\windows-amd64\lumino.exe -ArgumentList "--kubeconfig", "$env:RUNNER_TEMP\empty-kubeconfig" -PassThru
           Start-Sleep -Seconds 15
-          if ($p.HasExited) { throw "kubeon exited early with $($p.ExitCode)" }
+          if ($p.HasExited) { throw "lumino exited early with $($p.ExitCode)" }
           Stop-Process -Id $p.Id
       - uses: actions/upload-artifact@v4
         with:
-          name: kubeon-windows
+          name: lumino-windows
           path: dist/*.zip
 
   macos:
@@ -157,23 +157,23 @@ jobs:
           identity="$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
           if [ -n "$MACOS_NOTARY_APPLE_ID" ]; then
-            xcrun notarytool store-credentials kubeon --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            xcrun notarytool store-credentials lumino --apple-id "$MACOS_NOTARY_APPLE_ID" \
               --team-id "$MACOS_NOTARY_TEAM_ID" --password "$MACOS_NOTARY_PASSWORD" --keychain "$kc"
-            echo "MACOS_NOTARY_PROFILE=kubeon" >> "$GITHUB_ENV"
+            echo "MACOS_NOTARY_PROFILE=lumino" >> "$GITHUB_ENV"
           fi
       - name: build packages (universal app, dmg)
         run: make package-macos
       - name: smoke test (start, must stay up)
         run: |
           printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > "$RUNNER_TEMP/empty-kubeconfig"
-          dist/macos/Kubeon.app/Contents/MacOS/kubeon --kubeconfig "$RUNNER_TEMP/empty-kubeconfig" </dev/null &
+          dist/macos/Lumino.app/Contents/MacOS/lumino --kubeconfig "$RUNNER_TEMP/empty-kubeconfig" </dev/null &
           pid=$!
           sleep 15
-          kill -0 $pid || { wait $pid; echo "kubeon exited early with $?"; exit 1; }
+          kill -0 $pid || { wait $pid; echo "lumino exited early with $?"; exit 1; }
           kill $pid
       - uses: actions/upload-artifact@v4
         with:
-          name: kubeon-macos
+          name: lumino-macos
           path: |
             dist/*.dmg
             dist/*.zip
@@ -192,12 +192,12 @@ jobs:
           go-version-file: go.mod
       - uses: actions/download-artifact@v4
         with:
-          pattern: kubeon-*
+          pattern: lumino-*
           path: dist
           merge-multiple: true
       - name: checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      # kubeon's self-updater installs only releases whose checksums verify
+      # lumino's self-updater installs only releases whose checksums verify
       # with the public key built into the app (internal/update)
       - name: sign checksums
         env:
@@ -226,12 +226,12 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-          RELEASES_REPO: twoojoo/kubeon-releases
+          RELEASES_REPO: twoojoo/lumino-releases
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "::error::secret RELEASES_TOKEN is missing (Contents write on $RELEASES_REPO)"
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$RELEASES_REPO" --target main \
-            --title "Kubeon ${GITHUB_REF_NAME#v}" --notes-file notes.md \
+            --title "Lumino ${GITHUB_REF_NAME#v}" --notes-file notes.md \
             $([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease)

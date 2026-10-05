@@ -12,9 +12,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 # shellcheck source=scripts/version.sh
 source "$ROOT/scripts/version.sh"
-VERSION="$(kubeon_version)"
+VERSION="$(lumino_version)"
 DIST="${DIST:-dist}"
-IMAGE="kubeon-build-linux"
+IMAGE="lumino-build-linux"
 
 if [[ "${1:-}" != "--inside" ]]; then
   # needs network for license metadata: generated on the host
@@ -45,30 +45,30 @@ mkdir -p "$OUT"
 echo "==> go build linux/$ARCH ($VERSION)"
 CGO_ENABLED=1 go build -trimpath \
   -ldflags "-s -w -X main.version=$VERSION" \
-  -o "$OUT/kubeon" ./cmd/kubeon
-"$OUT/kubeon" --version
+  -o "$OUT/lumino" ./cmd/lumino
+"$OUT/lumino" --version
 
 echo "==> AppImage"
 APPDIR="$OUT/AppDir"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/doc/kubeon"
-cp "$DIST/THIRD_PARTY_NOTICES.txt" "$APPDIR/usr/share/doc/kubeon/"
-cp "$OUT/kubeon" "$APPDIR/usr/bin/kubeon"
-cp packaging/linux/kubeon.desktop "$APPDIR/usr/share/applications/"
-cp packaging/linux/kubeon.desktop "$APPDIR/kubeon.desktop"
-cp packaging/linux/kubeon.metainfo.xml "$APPDIR/usr/share/metainfo/io.github.twoojoo.kubeon.appdata.xml"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/doc/lumino"
+cp "$DIST/THIRD_PARTY_NOTICES.txt" "$APPDIR/usr/share/doc/lumino/"
+cp "$OUT/lumino" "$APPDIR/usr/bin/lumino"
+cp packaging/linux/lumino.desktop "$APPDIR/usr/share/applications/"
+cp packaging/linux/lumino.desktop "$APPDIR/lumino.desktop"
+cp packaging/linux/lumino.metainfo.xml "$APPDIR/usr/share/metainfo/io.github.twoojoo.lumino.appdata.xml"
 for s in 16 24 32 48 64 128 256 512; do
   mkdir -p "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps"
-  cp "packaging/icons/kubeon-$s.png" "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps/kubeon.png"
+  cp "packaging/icons/lumino-$s.png" "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps/lumino.png"
 done
-cp packaging/icons/kubeon-256.png "$APPDIR/kubeon.png"
-ln -sf kubeon.png "$APPDIR/.DirIcon"
+cp packaging/icons/lumino-256.png "$APPDIR/lumino.png"
+ln -sf lumino.png "$APPDIR/.DirIcon"
 cat > "$APPDIR/AppRun" <<'RUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
-exec "$HERE/usr/bin/kubeon" "$@"
+exec "$HERE/usr/bin/lumino" "$@"
 RUN
 chmod +x "$APPDIR/AppRun"
-ARCH="$AARCH" appimagetool --no-appstream "$APPDIR" "$DIST/kubeon-$VERSION-$AARCH.AppImage"
+ARCH="$AARCH" appimagetool --no-appstream "$APPDIR" "$DIST/lumino-$VERSION-$AARCH.AppImage"
 rm -rf "$APPDIR"
 
 echo "==> deb / rpm"
@@ -85,9 +85,9 @@ for f in "$DIST"/*'~'*; do
 done
 
 echo "==> tar.gz"
-TAR="kubeon-$VERSION-linux-$ARCH"
+TAR="lumino-$VERSION-linux-$ARCH"
 mkdir -p "$OUT/$TAR"
-cp "$OUT/kubeon" packaging/linux/kubeon.desktop packaging/icons/kubeon-256.png "$OUT/$TAR/"
+cp "$OUT/lumino" packaging/linux/lumino.desktop packaging/icons/lumino-256.png "$OUT/$TAR/"
 cp "$DIST/THIRD_PARTY_NOTICES.txt" "$OUT/$TAR/"
 tar -C "$OUT" -czf "$DIST/$TAR.tar.gz" "$TAR"
 rm -rf "${OUT:?}/${TAR:?}"

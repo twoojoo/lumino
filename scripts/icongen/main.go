@@ -1,6 +1,6 @@
 // Command icongen builds every icon file from the logo artwork
 // (packaging/logo-source.png, 1024×1024 RGBA): PNGs 16–1024 for Linux,
-// kubeon.ico (Windows) and kubeon.icns (macOS) in -out, and the tile-only
+// lumino.ico (Windows) and lumino.icns (macOS) in -out, and the tile-only
 // logo the UI draws in -ui.
 //
 //	go run ./scripts/icongen
@@ -113,14 +113,14 @@ func main() {
 	pngs := map[int][]byte{}
 	for _, s := range sizes {
 		pngs[s] = encode(resize(art, s))
-		if err := os.WriteFile(filepath.Join(*out, fmt.Sprintf("kubeon-%d.png", s)), pngs[s], 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(*out, fmt.Sprintf("lumino-%d.png", s)), pngs[s], 0o644); err != nil {
 			log.Fatal(err)
 		}
 	}
-	if err := writeICO(filepath.Join(*out, "kubeon.ico"), []int{16, 24, 32, 48, 64, 128, 256}, pngs); err != nil {
+	if err := writeICO(filepath.Join(*out, "lumino.ico"), []int{16, 24, 32, 48, 64, 128, 256}, pngs); err != nil {
 		log.Fatal(err)
 	}
-	if err := writeICNS(filepath.Join(*out, "kubeon.icns"), pngs); err != nil {
+	if err := writeICNS(filepath.Join(*out, "lumino.icns"), pngs); err != nil {
 		log.Fatal(err)
 	}
 	// UI: the tile without the transparent safe-area margin, sized for

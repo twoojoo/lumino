@@ -2,5 +2,5 @@
 
 package safety
 
-// Dev is true in development builds: only the kind dev cluster is allowed.
+// Dev is true in development builds: only the development databases are allowed.
 const Dev = false

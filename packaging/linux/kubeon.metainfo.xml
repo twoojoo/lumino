@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.twoojoo.kubeon</id>
+  <id>io.github.twoojoo.lumino</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <name>Kubeon</name>
+  <name>Lumino</name>
   <summary>Native Kubernetes IDE powered by the k9s engine</summary>
   <description>
     <p>
-      Kubeon is a fast, native desktop IDE for Kubernetes: live resource tables,
+      Lumino is a fast, native desktop IDE for Kubernetes: live resource tables,
       logs, shell, port-forwards, Helm, XRay, YAML editing with diff review,
       cluster sanitizer, RBAC explorer and an AI assistant with read-only tools.
     </p>
   </description>
-  <launchable type="desktop-id">kubeon.desktop</launchable>
-  <url type="homepage">https://github.com/twoojoo/kubeon</url>
+  <launchable type="desktop-id">lumino.desktop</launchable>
+  <url type="homepage">https://github.com/twoojoo/lumino</url>
   <provides>
-    <binary>kubeon</binary>
+    <binary>lumino</binary>
   </provides>
   <categories>
     <category>Development</category>

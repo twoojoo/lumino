@@ -1,10 +1,5 @@
 package ui
 
-import (
-	"regexp"
-	"strings"
-)
-
 // ---- line diff ----
 
 type diffOp uint8
@@ -123,80 +118,4 @@ func diffStats(lines []diffLine) (add, del int) {
 		}
 	}
 	return
-}
-
-// ---- YAML highlighting ----
-
-type tokKind uint8
-
-const (
-	tkPlain tokKind = iota
-	tkKey
-	tkString
-	tkNumber
-	tkBool
-	tkComment
-	tkPunct
-)
-
-type token struct {
-	kind tokKind
-	text string
-}
-
-var (
-	yamlKeyRx  = regexp.MustCompile(`^(\s*)(- )?("[^"]*"|'[^']*'|[^\s#'"][^:#]*?)(:)(\s+|$)`)
-	yamlNumRx  = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?$`)
-	yamlBoolRx = regexp.MustCompile(`^(true|false|null|~|yes|no|True|False|Null)$`)
-)
-
-// yamlTokens splits one YAML line into highlight tokens.
-func yamlTokens(line string) []token {
-	var out []token
-	rest := line
-	trimmed := strings.TrimLeft(rest, " ")
-	if strings.HasPrefix(trimmed, "#") {
-		return []token{{tkComment, line}}
-	}
-	if m := yamlKeyRx.FindStringSubmatch(rest); m != nil {
-		out = append(out, token{tkPlain, m[1]})
-		if m[2] != "" {
-			out = append(out, token{tkPunct, m[2]})
-		}
-		out = append(out, token{tkKey, m[3]}, token{tkPunct, m[4] + m[5]})
-		rest = rest[len(m[0]):]
-	} else {
-		ind := len(rest) - len(trimmed)
-		out = append(out, token{tkPlain, rest[:ind]})
-		rest = trimmed
-		if strings.HasPrefix(rest, "- ") || rest == "-" {
-			out = append(out, token{tkPunct, rest[:min(2, len(rest))]})
-			rest = rest[min(2, len(rest)):]
-		}
-	}
-	if rest == "" {
-		return out
-	}
-	// trailing comment (not inside quotes)
-	comment := ""
-	if i := strings.Index(rest, " #"); i >= 0 && !strings.ContainsAny(rest[:i], `"'`) {
-		rest, comment = rest[:i], rest[i:]
-	}
-	v := strings.TrimSpace(rest)
-	switch {
-	case v == "|" || v == ">" || v == "|-" || v == ">-" || v == "{}" || v == "[]":
-		out = append(out, token{tkPunct, rest})
-	case strings.HasPrefix(v, `"`) || strings.HasPrefix(v, `'`):
-		out = append(out, token{tkString, rest})
-	case yamlNumRx.MatchString(v):
-		out = append(out, token{tkNumber, rest})
-	case yamlBoolRx.MatchString(v):
-		out = append(out, token{tkBool, rest})
-	default:
-		out = append(out, token{tkPlain, rest})
-	}
-	if comment != "" {
-		out = append(out, token{tkComment, comment})
-	}
-	return out
 }
