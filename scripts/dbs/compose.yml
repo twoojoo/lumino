@@ -1,0 +1,132 @@
+# Disposable databases for development and integration tests.
+# Ports are bound to 127.0.0.1 only, in the 55xxx range (never the default
+# ports, which may belong to other local databases). Managed by
+# scripts/dbs/dbs.sh (make db-up / db-down). Passwords are test-only.
+name: lumino-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lumino
+      POSTGRES_PASSWORD: lumino
+      POSTGRES_DB: lumino
+    ports: ["127.0.0.1:55432:5432"]
+    volumes:
+      - ../../.dev/certs:/certs:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /certs/server.crt /certs/server.key /tmp/ && chown postgres /tmp/server.* && chmod 600 /tmp/server.key
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c max_connections=200
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "lumino"]
+      interval: 2s
+      retries: 60
+
+  cockroach:
+    image: cockroachdb/cockroach:latest-v25.3
+    command: start-single-node --insecure --cache=256MiB --max-sql-memory=256MiB
+    ports: ["127.0.0.1:55257:26257"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health?ready=1"]
+      interval: 3s
+      retries: 60
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: lumino
+      MYSQL_DATABASE: lumino
+      MYSQL_USER: lumino
+      MYSQL_PASSWORD: lumino
+    command: --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key --log-bin-trust-function-creators=1 --max-connections=300
+    volumes:
+      - ../../.dev/certs:/certs:ro
+    ports: ["127.0.0.1:55306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plumino"]
+      interval: 3s
+      retries: 60
+
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: lumino
+      MARIADB_DATABASE: lumino
+      MARIADB_USER: lumino
+      MARIADB_PASSWORD: lumino
+    command: --log-bin-trust-function-creators=1
+    ports: ["127.0.0.1:55307:3306"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      retries: 60
+
+  tidb:
+    image: pingcap/tidb:v8.5.3
+    ports: ["127.0.0.1:55400:4000"]
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Lumino_pass1"
+      MSSQL_MEMORY_LIMIT_MB: "2048"
+    ports: ["127.0.0.1:55433:1433"]
+
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    environment:
+      ORACLE_PASSWORD: lumino
+      APP_USER: lumino
+      APP_USER_PASSWORD: lumino
+    ports: ["127.0.0.1:55521:1521"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 5s
+      retries: 120
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_USER: lumino
+      CLICKHOUSE_PASSWORD: lumino
+      CLICKHOUSE_DB: lumino
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    ports: ["127.0.0.1:55900:9000", "127.0.0.1:55123:8123"]
+
+  firebird:
+    image: firebirdsql/firebird:5
+    environment:
+      FIREBIRD_ROOT_PASSWORD: lumino
+      FIREBIRD_USER: lumino
+      FIREBIRD_PASSWORD: lumino
+      FIREBIRD_DATABASE: lumino.fdb
+      FIREBIRD_DATABASE_DEFAULT_CHARSET: UTF8
+    ports: ["127.0.0.1:55050:3050"]
+
+  scylla:
+    image: scylladb/scylla:6.2
+    command: --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
+    ports: ["127.0.0.1:55042:9042"]
+
+  trino:
+    image: trinodb/trino:476
+    ports: ["127.0.0.1:55080:8080"]
+
+  # SSH bastion for tunnel tests: user lumino / password lumino, or the
+  # key in .dev/ssh/id_ed25519; it reaches the other services by name.
+  bastion:
+    image: linuxserver/openssh-server:latest
+    environment:
+      USER_NAME: lumino
+      USER_PASSWORD: lumino
+      PASSWORD_ACCESS: "true"
+      PUBLIC_KEY_FILE: /keys/id_ed25519.pub
+      DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
+    volumes:
+      - ../../.dev/ssh:/keys:ro
+    ports: ["127.0.0.1:55222:2222"]

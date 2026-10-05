@@ -1,0 +1,113 @@
+--- a/app/os_wayland.go	2026-10-05 08:54:29.499173459 +0200
++++ b/app/os_wayland.go	2026-10-05 08:54:29.499173459 +0200
+@@ -215,6 +215,9 @@
+ 	size         image.Point
+ 	config       Config
+ 	wsize        image.Point // window config size before going fullscreen or maximized
++	// kubeon patch: double-click detection on move areas.
++	lastMovePress time.Duration
++	lastMovePos   f32.Point
+ 	inCompositor bool        // window is moving or being resized
+ 
+ 	clipReads chan transfer.DataEvent
+@@ -584,10 +587,54 @@
+ //export gio_onToplevelConfigure
+ func gio_onToplevelConfigure(data unsafe.Pointer, topLvl *C.struct_xdg_toplevel, width, height C.int32_t, states *C.struct_wl_array) {
+ 	w := callbackLoad(data).(*window)
++	// kubeon patch: track maximized/fullscreen state changes initiated by
++	// the compositor (keyboard shortcuts, drag-to-top, drag-to-restore).
++	maximized, fullscreen, activated := false, false, false
++	if states != nil && states.size > 0 {
++		n := int(states.size) / 4
++		for _, st := range unsafe.Slice((*C.uint32_t)(states.data), n) {
++			switch st {
++			case C.XDG_TOPLEVEL_STATE_MAXIMIZED:
++				maximized = true
++			case C.XDG_TOPLEVEL_STATE_FULLSCREEN:
++				fullscreen = true
++			case C.XDG_TOPLEVEL_STATE_ACTIVATED:
++				activated = true
++			}
++		}
++	}
++	prevMode := w.config.Mode
++	switch {
++	case fullscreen:
++	case prevMode == Minimized:
++		// restored from the dock/overview
++		if activated {
++			w.config.Mode = Windowed
++			if maximized {
++				w.config.Mode = Maximized
++			}
++		}
++	case maximized:
++		if prevMode == Windowed {
++			w.wsize = w.config.Size
++			w.config.Mode = Maximized
++		}
++	default:
++		if prevMode == Maximized {
++			w.config.Mode = Windowed
++			if (width == 0 || height == 0) && w.wsize != (image.Point{}) {
++				w.size = w.wsize.Div(w.scale)
++				w.updateOpaqueRegion()
++			}
++		}
++	}
+ 	if width != 0 && height != 0 {
+ 		w.size = image.Pt(int(width), int(height))
+ 		w.updateOpaqueRegion()
+ 	}
++	if w.config.Mode != prevMode {
++		w.ProcessEvent(ConfigEvent{Config: w.config})
++	}
+ }
+ 
+ //export gio_onToplevelDecorationConfigure
+@@ -882,7 +929,8 @@
+ 	w := callbackLoad(unsafe.Pointer(surf)).(*window)
+ 	s.pointerFocus = w
+ 	w.setCursor(pointer, serial)
+-	w.lastPos = f32.Point{X: fromFixed(x), Y: fromFixed(y)}
++	// kubeon: scale like onPointerMotion (HiDPI double-click detection)
++	w.lastPos = f32.Point{X: fromFixed(x) * float32(w.scale), Y: fromFixed(y) * float32(w.scale)}
+ }
+ 
+ //export gio_onPointerLeave
+@@ -939,12 +987,31 @@
+ 			return
+ 		}
+ 		act, ok := w.w.ActionAt(w.lastPos)
+-		if ok && w.config.Mode == Windowed {
+-			switch act {
+-			case system.ActionMove:
+-				w.move(serial)
++		if ok && act == system.ActionMove && (w.config.Mode == Windowed || w.config.Mode == Maximized) {
++			// kubeon patch: double-click on a move area toggles maximize;
++			// maximized windows can be dragged (the compositor restores them).
++			now := time.Duration(t) * time.Millisecond
++			d := w.lastPos.Sub(w.lastMovePos)
++			if w.lastMovePress != 0 && now-w.lastMovePress < 400*time.Millisecond && d.X*d.X+d.Y*d.Y < 64 {
++				w.lastMovePress = 0
++				if w.config.Mode == Maximized {
++					w.Configure([]Option{Windowed.Option()})
++				} else {
++					w.Configure([]Option{Maximized.Option()})
++				}
+ 				return
+ 			}
++			w.lastMovePress, w.lastMovePos = now, w.lastPos
++			w.move(serial)
++			return
++		}
++	}
++	if state == 1 && btn == pointer.ButtonSecondary {
++		// kubeon patch: right-click on a move area opens the compositor window menu.
++		if act, ok := w.w.ActionAt(w.lastPos); ok && act == system.ActionMove {
++			sc := float32(w.scale)
++			C.xdg_toplevel_show_window_menu(w.topLvl, w.disp.seat.seat, serial, C.int32_t(w.lastPos.X/sc), C.int32_t(w.lastPos.Y/sc))
++			return
+ 		}
+ 	}
+ 	var kind pointer.Kind

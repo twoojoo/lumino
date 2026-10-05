@@ -1,0 +1,237 @@
+# Tests and release packages for Linux, Windows and macOS.
+# Every push/PR builds the packages as workflow artifacts; pushing a v* tag
+# also publishes them as a GitHub release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GIO_LINUX_DEPS: >-
+    libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libxkbcommon-dev
+    libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libxfixes-dev libvulkan-dev
+
+jobs:
+  test:
+    name: unit tests (linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $GIO_LINUX_DEPS
+      - run: make test GIO_TAGS=
+
+  integration:
+    name: integration + UI screenshots (kind)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $GIO_LINUX_DEPS xvfb mesa-utils libgl1-mesa-dri
+      - name: kind cluster (.dev/kubeconfig only)
+        run: make dev-up
+      # headless Gio renders through EGL; Xvfb + Mesa llvmpipe provide it
+      - run: xvfb-run -a make test-int GIO_TAGS=
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: .dev/shots/
+          if-no-files-found: ignore
+
+  linux:
+    name: package linux-${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          # arm64 hosted runners are free only for public repositories:
+          # - { runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build packages (Docker, Ubuntu 22.04 baseline)
+        run: make package-linux
+      - name: smoke test (start under Xvfb, must stay up)
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb libegl1 libgles2 libgl1-mesa-dri \
+            libwayland-client0 libwayland-egl1 libwayland-cursor0 libxkbcommon-x11-0 libx11-xcb1 libxcursor1
+          printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > /tmp/empty-kubeconfig
+          set +e
+          xvfb-run -a timeout 15 dist/linux-${{ matrix.arch }}/kubeon --kubeconfig /tmp/empty-kubeconfig </dev/null
+          code=$?
+          set -e
+          [ "$code" = 124 ] || { echo "kubeon exited early with $code"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubeon-linux-${{ matrix.arch }}
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/THIRD_PARTY_NOTICES.txt
+
+  windows:
+    name: package windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: unit tests
+        run: go test -tags dev ./internal/...
+      - name: build packages (amd64 + arm64)
+        run: ./scripts/package-windows.sh
+      - name: smoke test (start, must stay up)
+        shell: pwsh
+        run: |
+          "apiVersion: v1`nkind: Config`nclusters: []`ncontexts: []`nusers: []" | Set-Content "$env:RUNNER_TEMP\empty-kubeconfig"
+          & dist\windows-amd64\kubeon.exe --version
+          $p = Start-Process -FilePath dist\windows-amd64\kubeon.exe -ArgumentList "--kubeconfig", "$env:RUNNER_TEMP\empty-kubeconfig" -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { throw "kubeon exited early with $($p.ExitCode)" }
+          Stop-Process -Id $p.Id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubeon-windows
+          path: dist/*.zip
+
+  macos:
+    name: package macos
+    runs-on: macos-14
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: unit tests
+        run: go test -tags dev ./internal/...
+      - name: import signing certificate
+        if: env.HAS_SIGNING_CERT == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p ci "$kc"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          if [ -n "$MACOS_NOTARY_APPLE_ID" ]; then
+            xcrun notarytool store-credentials kubeon --apple-id "$MACOS_NOTARY_APPLE_ID" \
+              --team-id "$MACOS_NOTARY_TEAM_ID" --password "$MACOS_NOTARY_PASSWORD" --keychain "$kc"
+            echo "MACOS_NOTARY_PROFILE=kubeon" >> "$GITHUB_ENV"
+          fi
+      - name: build packages (universal app, dmg)
+        run: make package-macos
+      - name: smoke test (start, must stay up)
+        run: |
+          printf 'apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n' > "$RUNNER_TEMP/empty-kubeconfig"
+          dist/macos/Kubeon.app/Contents/MacOS/kubeon --kubeconfig "$RUNNER_TEMP/empty-kubeconfig" </dev/null &
+          pid=$!
+          sleep 15
+          kill -0 $pid || { wait $pid; echo "kubeon exited early with $?"; exit 1; }
+          kill $pid
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kubeon-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+  release:
+    name: github release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, linux, windows, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kubeon-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # kubeon's self-updater installs only releases whose checksums verify
+      # with the public key built into the app (internal/update)
+      - name: sign checksums
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::secret UPDATE_SIGNING_KEY is missing: an unsigned release can't be installed by the updater"
+            exit 1
+          fi
+          go run ./scripts/signsums sign dist/SHA256SUMS.txt
+          pub="$(sed -n 's/^var PublicKey = "\(.*\)"/\1/p' internal/update/update.go)"
+          go run ./scripts/signsums verify "$pub" dist/SHA256SUMS.txt
+      # release notes come from this (private) repository's history
+      - name: release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" \
+            --jq .body > notes.md
+          # links into the private repo are useless to the public
+          sed -i -E '/\*\*Full Changelog\*\*/d; s# in https://github.com/[^ )]*/pull/[0-9]+##g; s/ by @[A-Za-z0-9-]+//g' notes.md
+          cat notes.md
+      # packages go to the public releases repository (the app updates from
+      # there); RELEASES_TOKEN: fine-grained token, Contents read/write on
+      # that repository only
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_REPO: twoojoo/kubeon-releases
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::secret RELEASES_TOKEN is missing (Contents write on $RELEASES_REPO)"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$RELEASES_REPO" --target main \
+            --title "Kubeon ${GITHUB_REF_NAME#v}" --notes-file notes.md \
+            $([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease)

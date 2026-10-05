@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kubeon
+GenericName=Kubernetes IDE
+Comment=Native Kubernetes IDE powered by the k9s engine
+Exec=kubeon %U
+Icon=kubeon
+Terminal=false
+Categories=Development;System;Utility;
+Keywords=kubernetes;k8s;kubectl;k9s;lens;cluster;devops;
+StartupWMClass=kubeon
+StartupNotify=true

@@ -1,0 +1,71 @@
+# .deb/.rpm metadata; scripts/package-linux.sh substitutes VERSION, ARCH and DIST.
+name: kubeon
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: devel
+priority: optional
+maintainer: twoojoo <giovanni.campeol.95@gmail.com>
+description: |
+  Native Kubernetes IDE powered by the k9s engine.
+  Live resource tables, logs, shell, port-forwards, Helm, XRay, YAML editing
+  with diff review, sanitizer, RBAC explorer and an AI assistant.
+homepage: https://github.com/twoojoo/kubeon
+license: Proprietary
+depends:
+  - libc6 (>= 2.34)
+  - libwayland-client0
+  - libwayland-egl1
+  - libwayland-cursor0
+  - libxkbcommon0
+  - libegl1
+  - libx11-6
+  - libx11-xcb1
+  - libxkbcommon-x11-0
+  - libxcursor1
+  - libxfixes3
+# Vulkan is loaded at runtime when available (GPU backend), OpenGL ES otherwise
+recommends:
+  - libvulkan1
+overrides:
+  rpm:
+    depends:
+      - glibc >= 2.34
+      - libwayland-client
+      - libwayland-egl
+      - libwayland-cursor
+      - libxkbcommon
+      - mesa-libEGL
+      - libX11
+      - libX11-xcb
+      - libxkbcommon-x11
+      - libXcursor
+      - libXfixes
+    recommends:
+      - vulkan-loader
+contents:
+  - src: ${DIST}/linux-${ARCH}/kubeon
+    dst: /usr/bin/kubeon
+  - src: ${DIST}/THIRD_PARTY_NOTICES.txt
+    dst: /usr/share/doc/kubeon/THIRD_PARTY_NOTICES.txt
+  - src: packaging/linux/kubeon.desktop
+    dst: /usr/share/applications/kubeon.desktop
+  - src: packaging/linux/kubeon.metainfo.xml
+    dst: /usr/share/metainfo/io.github.twoojoo.kubeon.metainfo.xml
+  - src: packaging/icons/kubeon-16.png
+    dst: /usr/share/icons/hicolor/16x16/apps/kubeon.png
+  - src: packaging/icons/kubeon-24.png
+    dst: /usr/share/icons/hicolor/24x24/apps/kubeon.png
+  - src: packaging/icons/kubeon-32.png
+    dst: /usr/share/icons/hicolor/32x32/apps/kubeon.png
+  - src: packaging/icons/kubeon-48.png
+    dst: /usr/share/icons/hicolor/48x48/apps/kubeon.png
+  - src: packaging/icons/kubeon-64.png
+    dst: /usr/share/icons/hicolor/64x64/apps/kubeon.png
+  - src: packaging/icons/kubeon-128.png
+    dst: /usr/share/icons/hicolor/128x128/apps/kubeon.png
+  - src: packaging/icons/kubeon-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/kubeon.png
+  - src: packaging/icons/kubeon-512.png
+    dst: /usr/share/icons/hicolor/512x512/apps/kubeon.png

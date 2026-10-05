@@ -1,0 +1,21 @@
+--- a/widget/button.go	2026-10-05 18:53:17.417800470 +0200
++++ b/widget/button.go	2026-10-05 18:53:17.417800470 +0200
+@@ -9,6 +9,7 @@
+ 	"gioui.org/gesture"
+ 	"gioui.org/io/event"
+ 	"gioui.org/io/key"
++	"gioui.org/io/pointer"
+ 	"gioui.org/io/semantic"
+ 	"gioui.org/layout"
+ 	"gioui.org/op"
+@@ -91,6 +92,10 @@
+ 	c := m.Stop()
+ 	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
+ 	semantic.EnabledOp(gtx.Enabled()).Add(gtx.Ops)
++	// kubeon: clickable things show the hand cursor (content may override)
++	if gtx.Enabled() {
++		pointer.CursorPointer.Add(gtx.Ops)
++	}
+ 	b.click.Add(gtx.Ops)
+ 	event.Op(gtx.Ops, t)
+ 	c.Add(gtx.Ops)
