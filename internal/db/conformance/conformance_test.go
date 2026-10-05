@@ -13,6 +13,7 @@ import (
 
 	"github.com/giovanni/lumino/internal/db"
 	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
+	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
 	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
@@ -162,5 +163,18 @@ func TestClickHouse(t *testing.T) {
 		Samples:       map[string]string{"c_arr": "[1,2,3]", "c_ubig": "18446744073709551615"},
 		NoErrPosition: true,
 		Expect:        []db.ObjectType{db.ObjMatView},
+	})
+}
+
+func TestFirebird(t *testing.T) {
+	dbtest.Run(t, dbtest.Target{
+		Name:    "firebird",
+		Config:  db.Config{Driver: "firebird", Host: "127.0.0.1", Port: 55050, Database: "/var/lib/firebird/data/lumino.fdb", User: "lumino", Password: "lumino"},
+		Fixture: dbtest.Fixture("firebird"),
+		Upper:   true,
+		BigRows: 100000,
+		Sleep:   "SELECT COUNT(*) FROM big a, big b WHERE a.v + b.v < 0",
+		Samples: map[string]string{"c_int128": "170141183460469231731687303715884105727", "c_char": "abc", "c_ts": "2024-02-29 13:14:15.1234"},
+		Expect:  []db.ObjectType{db.ObjFunction, db.ObjProcedure, db.ObjSequence},
 	})
 }
