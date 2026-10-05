@@ -682,11 +682,7 @@ func (g *DataGrid) drawHeader(gtx C, th *material.Theme, r image.Rectangle, c in
 	gg.Constraints = layout.Exact(image.Pt(max(0, r.Dx()-gtx.Dp(14)), r.Dy()))
 	layout.W.Layout(gg, func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Flexed(1, func(gtx C) D {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontBold, 12, pal.TextBright, col.Name) }),
-				)
-			}),
+			layout.Flexed(1, func(gtx C) D { return lbl(gtx, th, fontBold, 12, pal.TextBright, col.Name) }),
 			layout.Rigid(func(gtx C) D {
 				if g.SortCol != c {
 					return D{}

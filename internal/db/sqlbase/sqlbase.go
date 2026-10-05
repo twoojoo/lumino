@@ -244,7 +244,16 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	rctx, cancel := context.WithCancel(context.Background())
 	// caller cancellation goes through Cancel: cancelling the statement's
 	// context directly would make several drivers drop the connection
-	stop := context.AfterFunc(ctx, s.Cancel)
+	stop := context.AfterFunc(ctx, func() {
+		// only while a statement or fetch runs: an open cursor outlives
+		// the context of the Execute call
+		s.mu.Lock()
+		running := s.running
+		s.mu.Unlock()
+		if running {
+			s.Cancel()
+		}
+	})
 	runID := ""
 	if f := s.c.H.StatementContext; f != nil {
 		rctx, runID = f(rctx)

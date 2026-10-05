@@ -382,3 +382,33 @@ func (cs *connState) defaultSchema(cat string) string {
 }
 
 func secretsAvailable() bool { return secrets.Available() }
+
+// releaseCursors closes the open cursors of a connection's tabs before a
+// write when the database allows a single writer at a time (SQLite).
+func (a *App) releaseCursors(connID string) {
+	cs := a.connState(connID)
+	if !cs.caps().SingleWriter {
+		return
+	}
+	for _, t := range a.tabs {
+		if t.ConnID() != connID {
+			continue
+		}
+		switch x := t.(type) {
+		case *ConsoleTab:
+			for _, rs := range x.results {
+				if rs.res != nil {
+					rs.closeCursor()
+					rs.partial = "cursor closed to let a write through (re-run to fetch more)"
+					rs.more = false
+				}
+			}
+		case *TableTab:
+			if x.data != nil && x.data.rs.res != nil {
+				x.data.rs.closeCursor()
+				x.data.rs.partial = "cursor closed to let a write through (reload to fetch more)"
+				x.data.rs.more = false
+			}
+		}
+	}
+}

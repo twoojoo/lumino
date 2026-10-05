@@ -479,7 +479,7 @@ func (a *App) layoutStatus(gtx C) D {
 				})
 			})),
 			layout.Rigid(center(func(gtx C) D {
-				hints := [][2]string{{shortcutLabel("K"), "commands"}, {shortcutLabel("⏎"), "run"}, {shortcutLabel("T"), "console"}}
+				hints := [][2]string{{shortcutLabel("K"), "commands"}, {shortcutLabel("Enter"), "run"}, {shortcutLabel("T"), "console"}}
 				var ch []layout.FlexChild
 				for _, k := range hints {
 					k := k

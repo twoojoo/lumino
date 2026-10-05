@@ -338,7 +338,12 @@ func (t *ConsoleTab) run(all bool) {
 		a.flash("Blocked: "+t.cs().name()+" is read-only ("+worst.String()+" statement)", true)
 		return
 	}
-	exec := func() { t.execute(stmts) }
+	exec := func() {
+		if worst.Modifies() {
+			a.releaseCursors(t.connID)
+		}
+		t.execute(stmts)
+	}
 	if worst.Modifies() && a.connProtected(t.connID) && !t.manual {
 		msg := fmt.Sprintf("Run %d statement(s) with %s changes on the protected connection %s? Auto-commit is on: changes are permanent.",
 			len(stmts), worst.String(), t.cs().name())
@@ -773,10 +778,10 @@ func (t *ConsoleTab) layoutToolbar(gtx C) D {
 			if t.running {
 				items = append(items, btn(&t.stopBtn, icStop, "Stop", "Cancel the running statement", pal.Err))
 			} else {
-				items = append(items, btn(&t.runBtn, icRun, "Run", "Run the statement at the caret or the selection ("+shortcutLabel("⏎")+")", pal.Ok))
+				items = append(items, btn(&t.runBtn, icRun, "Run", "Run the statement at the caret or the selection ("+shortcutLabel("Enter")+")", pal.Ok))
 			}
 			items = append(items,
-				btn(&t.scriptBtn, icRunAll, "Script", "Run every statement ("+shortcutLabel("Shift ⏎")+")", pal.Text),
+				btn(&t.scriptBtn, icRunAll, "Script", "Run every statement ("+shortcutLabel("Shift Enter")+")", pal.Text),
 				layout.Rigid(func(gtx C) D { return layout.Inset{Left: 6, Right: 6}.Layout(gtx, vsep) }),
 				layout.Rigid(func(gtx C) D {
 					sel := 0
@@ -897,7 +902,7 @@ func (t *ConsoleTab) layoutResults(gtx C) D {
 				return t.layoutRunning(gtx)
 			case rs == nil:
 				return layout.Center.Layout(gtx, func(gtx C) D {
-					return lbl(gtx, th, fontSans, 12.5, pal.TextDim, "Run a statement with "+shortcutLabel("⏎")+" — results appear here")
+					return lbl(gtx, th, fontSans, 12.5, pal.TextDim, "Run a statement with "+shortcutLabel("Enter")+" — results appear here")
 				})
 			case rs.err != nil:
 				return t.layoutError(gtx, rs)
@@ -1021,8 +1026,8 @@ func (t *ConsoleTab) editorMenu(at image.Point) {
 	a := t.a
 	ed := t.ed
 	items := []*menuItem{
-		{icon: icRun, label: "Run statement", hint: shortcutLabel("⏎"), action: func() { t.run(false) }},
-		{icon: icRunAll, label: "Run script", hint: shortcutLabel("Shift ⏎"), action: func() { t.run(true) }},
+		{icon: icRun, label: "Run statement", hint: shortcutLabel("Enter"), action: func() { t.run(false) }},
+		{icon: icRunAll, label: "Run script", hint: shortcutLabel("Shift Enter"), action: func() { t.run(true) }},
 		{sep: true},
 		{icon: icCopyText, label: "Copy", hint: shortcutLabel("C"), action: func() {
 			if s := ed.Selected(); s != "" {

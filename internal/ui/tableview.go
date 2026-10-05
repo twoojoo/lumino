@@ -560,6 +560,7 @@ func (t *TableTab) review() {
 
 func (t *TableTab) apply(changes []db.Change) {
 	a := t.a
+	a.releaseCursors(t.connID)
 	t.withSession(func(s db.Session) {
 		cs := t.cs()
 		caps, dia, ref := cs.caps(), cs.dialect(), t.ref

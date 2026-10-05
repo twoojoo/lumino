@@ -26,7 +26,7 @@ type Driver struct{}
 
 var caps = db.Capabilities{
 	Schemas: true, Transactions: true, ReadOnlyTx: true, Cancel: true, ForeignKeys: true, Triggers: true, Views: true,
-	Insert: true, Update: true, Delete: true,
+	Insert: true, Update: true, Delete: true, SingleWriter: true,
 }
 
 func (Driver) Info() db.Info {

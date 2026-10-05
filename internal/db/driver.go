@@ -30,6 +30,9 @@ type Capabilities struct {
 	EditNeedsWarning string
 	TLS              bool
 	MultiResultSets  bool
+	// SingleWriter: an open cursor in one session blocks writes from the
+	// others (SQLite): the UI closes cursors before writing.
+	SingleWriter bool
 }
 
 // Field is a connection form field shown for a driver.

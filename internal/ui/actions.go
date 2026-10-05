@@ -119,6 +119,7 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 		verb = "Truncate"
 	}
 	c := newConfirm(a, verb+" "+string(ref.Type), "This runs:\n\n"+stmt+"\n\nIt can't be undone.", true, func(bool) {
+		a.releaseCursors(connID)
 		a.do(verb+" "+ref.Name, func() error {
 			s, err := cs.conn.Session(context.Background())
 			if err != nil {

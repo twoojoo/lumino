@@ -68,7 +68,7 @@ var ayuDark = Palette{
 	Null:       rgb(0x565b66),
 	RowAlt:     rgb(0x0f131a),
 	Modified:   withAlpha(rgb(0x73b8ff), 0x30),
-	Inserted:   withAlpha(rgb(0x7fd962), 0x26),
+	Inserted:   withAlpha(rgb(0x7fd962), 0x16),
 	Deleted:    withAlpha(rgb(0xf26d78), 0x2c),
 	CellSel:    withAlpha(rgb(0x409fff), 0x40),
 }
@@ -105,7 +105,7 @@ var ayuMirage = Palette{
 	Null:       rgb(0x6e7c8f),
 	RowAlt:     rgb(0x1c212b),
 	Modified:   withAlpha(rgb(0x80bfff), 0x30),
-	Inserted:   withAlpha(rgb(0x87d96c), 0x26),
+	Inserted:   withAlpha(rgb(0x87d96c), 0x16),
 	Deleted:    withAlpha(rgb(0xf27983), 0x2c),
 	CellSel:    withAlpha(rgb(0x409fff), 0x40),
 }
