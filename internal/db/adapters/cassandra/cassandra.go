@@ -5,10 +5,11 @@ package cassandra
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"reflect"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -56,22 +57,30 @@ var lexOptions = sqlx.Options{
 // dialect inlines values gocql can't bind from text.
 type dialect struct{ db.BaseDialect }
 
-// BuildChange binds values except decimals, UUIDs and big integers, which
-// arrive as validated text and are inlined as CQL literals.
+// BuildChange validates every edited value for its column kind: values
+// gocql can't bind from grid text (decimals, UUIDs, big integers, floats,
+// which may target float or double) are inlined as CQL literals built only
+// from validated text; invalid ones make Execute fail with a clear error.
 func (d *dialect) BuildChange(ref db.ObjectRef, chg db.Change, literal bool) (string, []any) {
-	inline := func(vals []db.ColValue) []db.ColValue {
+	prep := func(vals []db.ColValue) []db.ColValue {
 		out := make([]db.ColValue, len(vals))
 		for i, cv := range vals {
-			if s, ok := cv.Value.(string); ok && (cv.Kind == db.KindDecimal || cv.Kind == db.KindUUID || cv.Kind == db.KindInt) {
-				cv.Value = db.Raw(s)
-			}
+			cv.Value = prepare(cv)
 			out[i] = cv
 		}
 		return out
 	}
-	chg.Values, chg.Key = inline(chg.Values), inline(chg.Key)
+	chg.Values, chg.Key = prep(chg.Values), prep(chg.Key)
 	q, args := db.StandardChange(d, ref, chg, literal)
 	return q, args
+}
+
+// Literal renders CQL literals: bare UUIDs, NaN/Infinity, durations.
+func (d *dialect) Literal(v any, k db.Kind) string {
+	if s, ok := literal(&d.BaseDialect, v, k); ok {
+		return s
+	}
+	return d.BaseDialect.Literal(v, k)
 }
 
 func (d *dialect) Placeholder(i int) string { return "?" }
@@ -199,7 +208,13 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		return nil, err
 	}
 	if tc != nil {
-		cl.SslOpts = &gocql.SslOptions{Config: tc, EnableHostVerification: cfg.TLS.Mode == "verify-full"}
+		// gocql only knows the nodes' IP addresses: each node is verified
+		// against the name it was configured with (unless ServerName is set)
+		hd := &tlsDialer{tc: tc, names: map[string]string{}, timeout: cl.ConnectTimeout, fixed: cfg.TLS.ServerName != ""}
+		if !hd.fixed {
+			hd.resolve(ctx, hosts, cl.Port)
+		}
+		cl.HostDialer = hd
 	}
 	sess, err := cl.CreateSession()
 	if err != nil {
@@ -215,6 +230,57 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	dia := NewDialect()
 	return &conn{s: sess, cluster: cl, d: dia, ver: ver, keyspace: cfg.Database, init: cfg.InitSQL,
 		cat: &catalog{s: sess, d: dia}, byKS: map[string]*gocql.Session{}}, nil
+}
+
+// tlsDialer dials nodes over TLS, verifying each against its own host name.
+type tlsDialer struct {
+	tc      *tls.Config
+	names   map[string]string // ip:port and ip -> configured host name
+	timeout time.Duration
+	fixed   bool // ServerName set explicitly
+}
+
+func (d *tlsDialer) resolve(ctx context.Context, hosts []string, defPort int) {
+	for _, h := range hosts {
+		name, port := h, strconv.Itoa(defPort)
+		if hh, pp, err := net.SplitHostPort(h); err == nil {
+			name, port = hh, pp
+		}
+		if net.ParseIP(name) != nil {
+			continue
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			d.names[net.JoinHostPort(ip.IP.String(), port)] = name
+			if _, ok := d.names[ip.IP.String()]; !ok {
+				d.names[ip.IP.String()] = name
+			}
+		}
+	}
+}
+
+func (d *tlsDialer) DialHost(ctx context.Context, host *gocql.HostInfo) (*gocql.DialedHost, error) {
+	addr := host.ConnectAddressAndPort()
+	c, err := (&net.Dialer{Timeout: d.timeout}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := d.tc.Clone()
+	if !d.fixed {
+		ip := host.ConnectAddress().String()
+		name, ok := d.names[addr]
+		if !ok {
+			name, ok = d.names[ip]
+		}
+		if !ok {
+			name = ip // discovered node: its address
+		}
+		tc.ServerName = name
+	}
+	return gocql.WrapTLS(ctx, c, addr, tc)
 }
 
 type conn struct {
@@ -297,40 +363,51 @@ type session struct {
 
 func (s *session) Execute(ctx context.Context, stmt string, args ...any) (db.Result, error) {
 	s.closeCursor()
-	w := sqlx.Words(stmt, &lexOptions, 2)
-	if len(w) == 2 && w[0] == "USE" {
-		ks := strings.Trim(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(stmt[strings.Index(strings.ToUpper(stmt), "USE")+3:]), ";")), `"`)
+	if ks, ok := useKeyspace(stmt); ok {
+		if ks == "" {
+			return nil, errors.New("USE: keyspace name expected")
+		}
 		return &result{affected: -1, done: true}, s.SetCurrentSchema(ctx, ks)
 	}
-	rctx, cancel := context.WithCancel(ctx)
+	for _, a := range args {
+		if b, ok := a.(badValue); ok {
+			return nil, b
+		}
+	}
+	// the iterator outlives ctx (an open cursor is scrolled after Execute
+	// returns): caller cancellation is forwarded only while Execute or a
+	// Fetch runs
+	rctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.cancel = cancel
 	s.mu.Unlock()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
 	gs, err := s.c.sessionFor(s.keyspace)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	q := gs.Query(stmt, args...).WithContext(rctx).PageSize(1000)
-	if !sqlx.ReturnsRows(stmt, &lexOptions) {
+	if !sqlx.ReturnsRows(stmt, &lexOptions) && !conditional(stmt) {
 		err := q.Exec()
 		cancel()
 		if err != nil {
-			return nil, mapError(err)
+			return nil, ctxErr(ctx, mapError(err))
 		}
 		return &result{affected: -1, done: true}, nil
 	}
 	it := q.Iter()
 	r := &result{it: it, cancel: cancel, affected: -1}
 	for _, ci := range it.Columns() {
-		r.cols = append(r.cols, db.Column{Name: ci.Name, DBType: strings.ToUpper(fmt.Sprint(ci.TypeInfo)), Kind: kindOf(ci.TypeInfo.Type()), Nullable: true})
+		r.cols = append(r.cols, db.Column{Name: ci.Name, DBType: typeName(ci.TypeInfo, false), Kind: kindOf(ci.TypeInfo.Type()), Nullable: true})
 		r.types = append(r.types, ci.TypeInfo)
 	}
 	if len(r.cols) == 0 {
 		// statement returned no rows metadata: check for an error now
 		if err := it.Close(); err != nil {
 			cancel()
-			return nil, mapError(err)
+			return nil, ctxErr(ctx, mapError(err))
 		}
 		r.done = true
 	}
@@ -338,6 +415,66 @@ func (s *session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	s.cur = r
 	s.mu.Unlock()
 	return r, nil
+}
+
+// ctxErr prefers the caller's cancellation over the driver's error.
+func ctxErr(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// useKeyspace parses USE ks: unquoted names fold to lower case, quoted
+// ones keep their case.
+func useKeyspace(stmt string) (string, bool) {
+	toks := sqlx.Tokens(stmt, &lexOptions)
+	seen := false
+	for _, t := range toks {
+		if t.Kind == sqlx.TSpace || t.Kind == sqlx.TComment {
+			continue
+		}
+		txt := stmt[t.Start:t.End]
+		if !seen {
+			if t.Kind != sqlx.TWord || !strings.EqualFold(txt, "USE") {
+				return "", false
+			}
+			seen = true
+			continue
+		}
+		switch t.Kind {
+		case sqlx.TWord:
+			return strings.ToLower(txt), true
+		case sqlx.TQuotedIdent:
+			if len(txt) >= 2 && txt[0] == '"' && txt[len(txt)-1] == '"' {
+				return strings.ReplaceAll(txt[1:len(txt)-1], `""`, `"`), true
+			}
+		}
+		return "", true
+	}
+	return "", seen
+}
+
+// conditional reports a lightweight transaction (INSERT … IF NOT EXISTS,
+// UPDATE/DELETE … IF cond, batches of them): the server answers with an
+// [applied] row the user must see.
+func conditional(stmt string) bool {
+	w := sqlx.Words(stmt, &lexOptions, 1)
+	if len(w) == 0 {
+		return false
+	}
+	switch w[0] {
+	case "INSERT", "UPDATE", "DELETE", "BEGIN":
+	default:
+		return false
+	}
+	for _, t := range sqlx.Tokens(stmt, &lexOptions) {
+		// IF is reserved: a column named if is a quoted identifier
+		if t.Kind == sqlx.TWord && strings.EqualFold(stmt[t.Start:t.End], "IF") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *session) closeCursor() {
@@ -411,10 +548,22 @@ func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
 	if r.done || r.it == nil {
 		return nil, false, nil
 	}
-	// **T destinations: gocql leaves the *T nil for NULL cells
-	dest := make([]any, len(r.types))
+	if r.cancel != nil {
+		stop := context.AfterFunc(ctx, r.cancel)
+		defer stop()
+	}
+	// top-level tuples are scanned into one destination per element
+	var dest []any
+	start := make([]int, len(r.types))
 	for i, ti := range r.types {
-		dest[i] = reflect.New(reflect.PointerTo(reflect.TypeOf(ti.Zero()))).Interface()
+		start[i] = len(dest)
+		if tt, ok := ti.(gocql.TupleTypeInfo); ok && len(tt.Elems) > 0 {
+			for _, e := range tt.Elems {
+				dest = append(dest, scanDest(e))
+			}
+			continue
+		}
+		dest = append(dest, scanDest(ti))
 	}
 	var out []db.Row
 	for len(out) < n {
@@ -427,50 +576,28 @@ func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
 			if r.cancel != nil {
 				r.cancel()
 			}
-			return out, false, mapError(err)
+			return out, false, ctxErr(ctx, mapError(err))
 		}
-		row := make(db.Row, len(dest))
-		for i, p := range dest {
-			ptr := reflect.ValueOf(p).Elem() // *T
-			if ptr.IsNil() {
-				row[i] = nil
-			} else {
-				row[i] = value(r.types[i], ptr.Elem().Interface())
+		row := make(db.Row, len(r.types))
+		for i, ti := range r.types {
+			if tt, ok := ti.(gocql.TupleTypeInfo); ok && len(tt.Elems) > 0 {
+				el := make([]any, len(tt.Elems))
+				null := true
+				for j, e := range tt.Elems {
+					if el[j] = takeScanned(e, dest[start[i]+j]); el[j] != nil {
+						null = false
+					}
+				}
+				if !null {
+					row[i] = el
+				}
+				continue
 			}
-			ptr.Set(reflect.Zero(ptr.Type()))
+			row[i] = takeScanned(ti, dest[start[i]])
 		}
 		out = append(out, row)
 	}
 	return out, true, nil
-}
-
-// value converts a scanned CQL value (zero values of absent cells become
-// NULL only for pointer-like types: gocql scans NULL as the zero value).
-func value(ti gocql.TypeInfo, v any) any {
-	switch x := v.(type) {
-	case time.Time:
-		return x
-	case time.Duration: // time of day
-		if ti.Type() == gocql.TypeTime {
-			h := x / time.Hour
-			m := x % time.Hour / time.Minute
-			sec := x % time.Minute / time.Second
-			ns := x % time.Second
-			s := fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
-			if ns != 0 {
-				s += strings.TrimRight(fmt.Sprintf(".%09d", ns), "0")
-			}
-			return s
-		}
-		return x.String()
-	case gocql.UUID:
-		return x.String()
-	case []byte:
-		return append([]byte{}, x...)
-	case gocql.Duration:
-		return fmt.Sprintf("%dmo%dd%dns", x.Months, x.Days, x.Nanoseconds)
-	}
-	return db.Normalize(v)
 }
 
 func (r *result) Close() error {

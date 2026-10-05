@@ -54,7 +54,7 @@ longtext enum set json geometry point linestring polygon unsigned
 // lexOptions are MySQL's lexical rules (default sql_mode).
 var lexOptions = sqlx.Options{
 	Backticks: true, HashComments: true, BackslashEscape: true, DoubleQuoteStrings: true, AtParams: true,
-	Delimiter: true,
+	Delimiter: true, DashSpace: true,
 	BlockStart: func(w []string) bool {
 		if len(w) >= 2 && w[0] == "BEGIN" && w[1] == "NOT" { // MariaDB BEGIN NOT ATOMIC
 			return true
@@ -91,7 +91,8 @@ func KindOf(t string) db.Kind {
 		t = t[:i]
 	}
 	switch t {
-	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR":
+	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR", "BIT":
+		// BIT(n) is shown and edited as an unsigned integer
 		return db.KindInt
 	case "FLOAT", "DOUBLE", "REAL":
 		return db.KindFloat
@@ -107,7 +108,7 @@ func KindOf(t string) db.Kind {
 		return db.KindTimestamp
 	case "CHAR", "VARCHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET":
 		return db.KindText
-	case "BINARY", "VARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BIT", "GEOMETRY", "POINT",
+	case "BINARY", "VARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "GEOMETRY", "POINT",
 		"LINESTRING", "POLYGON":
 		return db.KindBytes
 	case "JSON":

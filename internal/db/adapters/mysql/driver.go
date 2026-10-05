@@ -7,6 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,35 +76,46 @@ var tlsSeq atomic.Int64
 
 func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	info := d.Info()
-	mc, err := mysql.ParseDSN("/?charset=utf8mb4")
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]") // [::1]
+	port := cfg.Port
+	if port == 0 {
+		port = info.DefaultPort
+	}
+	mc, given, sessionVars, err := dsnConfig(cfg.Params, cfg.TLS.Mode == "")
 	if err != nil {
 		return nil, err
 	}
 	mc.User, mc.Passwd = cfg.User, cfg.Password
 	mc.Net = "tcp"
-	host := strings.TrimSpace(cfg.Host)
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := cfg.Port
-	if port == 0 {
-		port = info.DefaultPort
-	}
-	mc.Addr = fmt.Sprintf("%s:%d", host, port)
+	mc.Addr = net.JoinHostPort(host, strconv.Itoa(port))
 	mc.DBName = cfg.Database
-	mc.ParseTime = true
-	mc.Loc = time.UTC
-	mc.Timeout = 15 * time.Second
-	mc.AllowNativePasswords = true
-	mc.AllowCleartextPasswords = cfg.TLS.Enabled()
+	mc.ParseTime = true // values are decoded by convert
+	if !given["loc"] {
+		mc.Loc = time.UTC
+	}
+	if !given["timeout"] {
+		mc.Timeout = 15 * time.Second
+	}
+	if !given["allowNativePasswords"] {
+		mc.AllowNativePasswords = true
+	}
+	if !given["clientFoundRows"] {
+		// matched rows, not changed ones: a grid UPDATE writing a value
+		// equal to the stored one must not look like "no row matched"
+		mc.ClientFoundRows = true
+	}
+	if !given["allowCleartextPasswords"] {
+		mc.AllowCleartextPasswords = cfg.TLS.Enabled()
+	}
 	mc.MultiStatements = false
-	if mc.Params == nil {
-		mc.Params = map[string]string{}
+	mc.Params = sessionVars
+	if mc.ConnectionAttributes == "" {
+		mc.ConnectionAttributes = "program_name:lumino"
 	}
-	for k, v := range cfg.Params {
-		mc.Params[k] = v
-	}
-	mc.ConnectionAttributes = "program_name:lumino"
 	tc, err := cfg.TLS.TLS(host)
 	if err != nil {
 		return nil, err
@@ -113,7 +127,7 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 			return nil, err
 		}
 		mc.TLSConfig = name
-	case cfg.TLS.Mode == "":
+	case cfg.TLS.Mode == "" && !given["tls"]:
 		mc.TLSConfig = "preferred"
 	}
 	connector, err := mysql.NewConnector(mc)
@@ -147,6 +161,81 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	return c, nil
 }
 
+// dsnParams are the go-sql-driver options that connection parameters may
+// set (matched case-insensitively); other parameters are session
+// variables (SET name = value on every connection).
+var dsnParams = func() map[string]string {
+	m := map[string]string{}
+	for _, k := range strings.Fields(`allowCleartextPasswords allowFallbackToPlaintext allowNativePasswords
+		allowOldPasswords charset checkConnLiveness clientFoundRows collation compress connectionAttributes
+		interpolateParams loc maxAllowedPacket readTimeout rejectReadOnly serverPubKey timeTruncate timeout tls
+		writeTimeout`) {
+		m[strings.ToLower(k)] = k
+	}
+	return m
+}()
+
+// ignoredParams are driver options the adapter manages itself (parseTime,
+// multiStatements, columnsWithAlias change how results are read) or that
+// are unsafe (allowAllFiles lets the server read any local file).
+var ignoredParams = map[string]bool{"parsetime": true, "multistatements": true, "columnswithalias": true,
+	"allowallfiles": true, "strict": true}
+
+// dsnConfig builds the driver configuration from connection parameters.
+// It returns the options that were given explicitly and the session
+// variables. tls is honoured only when the connection has no TLS settings.
+func dsnConfig(params map[string]string, allowTLS bool) (*mysql.Config, map[string]bool, map[string]string, error) {
+	given := map[string]bool{}
+	vars := map[string]string{}
+	opts := map[string]string{}
+	for k, v := range params {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if ignoredParams[lk] {
+			continue
+		}
+		name, ok := dsnParams[lk]
+		if !ok {
+			vars[k] = v
+			continue
+		}
+		if name == "tls" && !allowTLS {
+			continue
+		}
+		if name == "tls" {
+			switch strings.ToLower(v) {
+			case "true", "false", "1", "0", "skip-verify", "preferred":
+			default:
+				return nil, nil, nil, fmt.Errorf("parameter tls=%q: expected true, false, skip-verify or preferred (use the TLS settings for certificates)", v)
+			}
+		}
+		opts[name] = v
+		given[name] = true
+	}
+	if !given["charset"] && !given["collation"] {
+		opts["charset"] = "utf8mb4"
+	}
+	q := make([]string, 0, len(opts))
+	for k, v := range opts {
+		switch k {
+		case "loc", "connectionAttributes":
+			v = url.QueryEscape(v) // unescaped by the driver
+		default:
+			if strings.ContainsAny(v, "&") {
+				return nil, nil, nil, fmt.Errorf("parameter %s: invalid value %q", k, v)
+			}
+		}
+		if _, err := mysql.ParseDSN("/?" + k + "=" + v); err != nil {
+			return nil, nil, nil, fmt.Errorf("parameter %s: %w", k, err)
+		}
+		q = append(q, k+"="+v)
+	}
+	mc, err := mysql.ParseDSN("/?" + strings.Join(q, "&"))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("connection parameters: %w", err)
+	}
+	return mc, given, vars, nil
+}
+
 func hooks(f Flavor) sqlbase.Hooks {
 	return sqlbase.Hooks{
 		Kind:    KindOf,
@@ -155,13 +244,21 @@ func hooks(f Flavor) sqlbase.Hooks {
 			if sqlx.ReturnsRows(stmt, &lexOptions) {
 				return true
 			}
-			w := sqlx.Words(stmt, &lexOptions, 1)
+			w := sqlx.Words(stmt, &lexOptions, 2)
 			if len(w) == 0 {
 				return false
 			}
 			switch w[0] {
 			case "CHECK", "ANALYZE", "OPTIMIZE", "REPAIR", "CHECKSUM", "HELP", "TRACE", "ADMIN":
 				return true
+			case "XA":
+				return len(w) > 1 && w[1] == "RECOVER"
+			case "HANDLER": // HANDLER t READ …
+				for _, t := range sqlx.Tokens(stmt, &lexOptions) {
+					if t.Kind == sqlx.TWord && strings.EqualFold(stmt[t.Start:t.End], "READ") {
+						return true
+					}
+				}
 			}
 			return false
 		},
@@ -199,6 +296,13 @@ func hooks(f Flavor) sqlbase.Hooks {
 
 // convert decodes text-protocol values by column kind.
 func convert(col *db.Column, v any) any {
+	if t, ok := v.(time.Time); ok && t.IsZero() {
+		// the driver decodes zero dates ('0000-00-00') as time.Time{}
+		if col.Kind == db.KindDate || col.DBType == "DATE" {
+			return "0000-00-00"
+		}
+		return "0000-00-00 00:00:00"
+	}
 	b, ok := v.([]byte)
 	if !ok {
 		return v
@@ -207,7 +311,7 @@ func convert(col *db.Column, v any) any {
 	switch col.Kind {
 	case db.KindInt:
 		if col.DBType == "BIT" {
-			return b
+			return bitValue(b)
 		}
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return n
@@ -232,6 +336,21 @@ func convert(col *db.Column, v any) any {
 		return s // TIME can exceed 24h: keep the server text
 	}
 	return v
+}
+
+// bitValue decodes a BIT(n) value (big-endian bytes) as an integer.
+func bitValue(b []byte) any {
+	if len(b) > 8 {
+		return b
+	}
+	var n uint64
+	for _, x := range b {
+		n = n<<8 | uint64(x)
+	}
+	if n <= math.MaxInt64 {
+		return int64(n)
+	}
+	return n
 }
 
 var lineRx = regexp.MustCompile(`at line (\d+)$`)

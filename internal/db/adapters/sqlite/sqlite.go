@@ -70,14 +70,105 @@ var lexOptions = sqlx.Options{
 	},
 }
 
+// Dialect is the SQLite dialect.
+type Dialect struct{ db.BaseDialect }
+
 // NewDialect builds the SQLite dialect.
-func NewDialect() *db.BaseDialect {
-	return &db.BaseDialect{
+func NewDialect() *Dialect {
+	return &Dialect{db.BaseDialect{
 		ID: "sqlite", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldNone, Params: db.ParamQuestion, LexOpts: lexOptions,
 		Reserved: reserved, KeywordSet: db.Merge(reserved, db.CommonKeywords), FuncList: functions,
 		TypeList: strings.Fields("integer real text blob numeric boolean date datetime timestamp varchar decimal"),
 		BoolTrue: "1", BoolFalse: "0",
+	}}
+}
+
+// TimeText renders a time the way SQLite stores dates as text: date only
+// for a midnight DATE, "YYYY-MM-DD HH:MM:SS[.fff]" otherwise, with the
+// offset only when the value had one (the driver parses text without an
+// offset as UTC). It reproduces the stored text of the usual formats, so
+// edits neither rewrite untouched values nor miss rows keyed by a date.
+func TimeText(t time.Time, k db.Kind) string {
+	utc := t.Location() == time.UTC
+	if k == db.KindDate && utc && t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+		return t.Format("2006-01-02")
 	}
+	s := t.Format("2006-01-02 15:04:05")
+	if t.Nanosecond() != 0 {
+		s += strings.TrimRight(t.Format(".000000000"), "0")
+	}
+	if !utc {
+		s += t.Format("-07:00")
+	}
+	return s
+}
+
+// Literal renders times like TimeText.
+func (d *Dialect) Literal(v any, k db.Kind) string {
+	if t, ok := v.(time.Time); ok {
+		return d.QuoteString(TimeText(t, k))
+	}
+	return d.BaseDialect.Literal(v, k)
+}
+
+// BuildChange binds times as text in SQLite's format (the driver would
+// write "… +00:00" and a bound time never equals a stored date text).
+// Time keys also match by instant (julianday) so rows stored in another
+// text format ('T' separator, no seconds, 'Z') can still be edited; a
+// key matching several rows fails the batch as usual.
+func (d *Dialect) BuildChange(ref db.ObjectRef, ch db.Change, literal bool) (string, []any) {
+	var args []any
+	val := func(cv db.ColValue) string {
+		if r, ok := cv.Value.(db.Raw); ok {
+			return string(r)
+		}
+		if literal || cv.Value == nil {
+			return d.Literal(cv.Value, cv.Kind)
+		}
+		v := cv.Value
+		if t, ok := v.(time.Time); ok {
+			v = TimeText(t, cv.Kind)
+		}
+		args = append(args, v)
+		return "?"
+	}
+	table := d.Qualified(ref)
+	where := func() string {
+		conds := make([]string, len(ch.Key))
+		for i, cv := range ch.Key {
+			col := d.Quote(cv.Column)
+			if cv.Value == nil {
+				conds[i] = col + " IS NULL"
+				continue
+			}
+			if _, ok := cv.Value.(time.Time); ok {
+				conds[i] = "(" + col + " = " + val(cv) + " OR julianday(" + col + ") = julianday(" + val(cv) + "))"
+				continue
+			}
+			conds[i] = col + " = " + val(cv)
+		}
+		return strings.Join(conds, " AND ")
+	}
+	switch ch.Op {
+	case db.OpInsert:
+		if len(ch.Values) == 0 {
+			return "INSERT INTO " + table + " DEFAULT VALUES", nil
+		}
+		cols := make([]string, len(ch.Values))
+		vals := make([]string, len(ch.Values))
+		for i, cv := range ch.Values {
+			cols[i], vals[i] = d.Quote(cv.Column), val(cv)
+		}
+		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(vals, ", ")), args
+	case db.OpUpdate:
+		sets := make([]string, len(ch.Values))
+		for i, cv := range ch.Values {
+			sets[i] = d.Quote(cv.Column) + " = " + val(cv)
+		}
+		set := strings.Join(sets, ", ")
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, set, where()), args
+	}
+	return fmt.Sprintf("DELETE FROM %s WHERE %s", table, where()), args
 }
 
 // KindOf applies SQLite's type affinity rules to a declared type.
@@ -122,12 +213,31 @@ func expand(p string) string {
 	return p
 }
 
+// fileURI builds the SQLite URI of a file path: the path is made absolute
+// and percent-encoded, so '?', '#', '%' and the like name the file instead
+// of starting the query, a fragment or an escape.
+func fileURI(path string, q url.Values) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // C:/x → /C:/x
+	}
+	u := url.URL{Scheme: "file", Path: p, RawQuery: q.Encode()}
+	// EscapedPath leaves some characters alone that are fine in URLs; make
+	// sure none of SQLite's delimiters remains
+	return "file://" + strings.NewReplacer("?", "%3F", "#", "%23").Replace(u.EscapedPath()) + "?" + u.RawQuery, nil
+}
+
 func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	path := strings.TrimSpace(cfg.File)
 	if path == "" {
 		return nil, errors.New("no database file")
 	}
 	memory := path == ":memory:"
+	var err error
 	if !memory {
 		path = expand(path)
 		if cfg.Param("create") != "true" {
@@ -143,9 +253,11 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		q.Set("mode", "ro")
 	}
 	q.Set("_time_format", "sqlite")
-	dsn := "file:" + path + "?" + q.Encode()
-	if memory {
-		dsn = "file::memory:?" + q.Encode()
+	dsn := "file::memory:?" + q.Encode()
+	if !memory {
+		if dsn, err = fileURI(path, q); err != nil {
+			return nil, err
+		}
 	}
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -217,7 +329,7 @@ func mapError(err error) error {
 
 type catalog struct {
 	db *sql.DB
-	d  *db.BaseDialect
+	d  *Dialect
 }
 
 func (c *catalog) Catalogs(ctx context.Context) ([]string, error) { return nil, db.ErrNotSupported }
