@@ -48,7 +48,7 @@ type connState struct {
 	completion map[metaKey]map[string][]string
 	loading    map[string]bool
 	errs       map[string]error
-	waiters    []func(*connState)
+	waiters    []connWaiter
 }
 
 func newID() string {
@@ -122,9 +122,19 @@ func (a *App) connReadOnly(id string) bool {
 	return ok && c.ReadOnly
 }
 
+// connWaiter is a caller waiting for a connection attempt.
+type connWaiter struct {
+	ok   func(*connState)
+	fail func(error)
+}
+
 // connect opens a connection (asking for missing secrets) and runs then
 // once it is ready. Concurrent calls share the attempt.
-func (a *App) connect(id string, then func(*connState)) {
+func (a *App) connect(id string, then func(*connState)) { a.connectOr(id, then, nil) }
+
+// connectOr is connect with a callback for a failed or cancelled attempt
+// (callers holding a "busy" state reset it there).
+func (a *App) connectOr(id string, then func(*connState), failed func(error)) {
 	cs := a.connState(id)
 	if cs.status == stReady {
 		if then != nil {
@@ -132,14 +142,15 @@ func (a *App) connect(id string, then func(*connState)) {
 		}
 		return
 	}
-	if then != nil {
-		cs.waiters = append(cs.waiters, then)
+	if then != nil || failed != nil {
+		cs.waiters = append(cs.waiters, connWaiter{then, failed})
 	}
 	if cs.status == stConnecting {
 		return
 	}
 	cfg := cs.cfg()
 	if cfg == nil {
+		cs.fail(errors.New("connection not found"))
 		return
 	}
 	c := *cfg
@@ -168,29 +179,46 @@ func (a *App) connect(id string, then func(*connState)) {
 		c.SSH = &s
 	}
 	if (needPw && !passwordOptional(&c)) || needSSH {
+		// connecting while the prompt is open: the tree doesn't ask again
+		cs.status, cs.err = stConnecting, nil
+		cs.gen++
+		gen := cs.gen
 		a.overlay = newSecretPrompt(a, &c, needPw, needSSH, func(pw, sshSecret string, save bool) {
+			if cs.gen != gen {
+				return
+			}
 			if needPw {
 				c.Password = pw
-				_ = secrets.Set(id, secrets.Password, pw, save && c.SavePassword)
 			}
 			if needSSH {
 				c.SSH.Secret = sshSecret
-				_ = secrets.Set(id, secrets.SSH, sshSecret, save && c.SavePassword)
 			}
-			a.openConn(cs, c)
+			// secrets are remembered only once they worked
+			a.openConn(cs, c, func() {
+				if needPw {
+					_ = secrets.Set(id, secrets.Password, pw, save && c.SavePassword)
+				}
+				if needSSH {
+					_ = secrets.Set(id, secrets.SSH, sshSecret, save && c.SavePassword)
+				}
+			})
 		}, func() {
-			cs.waiters = nil
+			if cs.gen == gen {
+				cs.fail(errConnectCancelled)
+			}
 		})
 		return
 	}
-	a.openConn(cs, c)
+	a.openConn(cs, c, nil)
 }
+
+var errConnectCancelled = errors.New("connection cancelled")
 
 // passwordOptional: connections without a user (trust/peer auth, Trino,
 // local ClickHouse) don't need a prompt.
 func passwordOptional(c *db.Config) bool { return strings.TrimSpace(c.User) == "" }
 
-func (a *App) openConn(cs *connState, c db.Config) {
+func (a *App) openConn(cs *connState, c db.Config, onOK func()) {
 	cs.status, cs.err = stConnecting, nil
 	cs.gen++
 	gen := cs.gen
@@ -225,12 +253,17 @@ func (a *App) openConn(cs *connState, c db.Config) {
 			}
 			cs.conn, cs.status = conn, stReady
 			cs.resetMeta()
+			if onOK != nil {
+				onOK()
+			}
 			slog.Info("connected", "conn", c.Name, "version", conn.ServerVersion(), "took", time.Since(start))
 			a.flash(fmt.Sprintf("Connected to %s (%s)", c.Name, conn.ServerVersion()), false)
 			w := cs.waiters
 			cs.waiters = nil
 			for _, f := range w {
-				f(cs)
+				if f.ok != nil {
+					f.ok(cs)
+				}
 			}
 			a.sidebar.expand(connKey(cs.id), true)
 		})
@@ -239,12 +272,25 @@ func (a *App) openConn(cs *connState, c db.Config) {
 
 func (cs *connState) fail(err error) {
 	cs.status, cs.err = stFailed, err
-	cs.waiters = nil
+	cs.dropWaiters(err)
 	var ce *knownhosts.ErrChanged
 	if errors.As(err, &ce) {
 		cs.a.overlay = newMessage(cs.a, "SSH host key changed", ce.Error(), true)
 	}
-	cs.a.flash(fmt.Sprintf("%s: %v", cs.name(), err), true)
+	if err != errConnectCancelled {
+		cs.a.flash(fmt.Sprintf("%s: %v", cs.name(), err), true)
+	}
+}
+
+// dropWaiters tells the waiting callers that the attempt is over.
+func (cs *connState) dropWaiters(err error) {
+	w := cs.waiters
+	cs.waiters = nil
+	for _, f := range w {
+		if f.fail != nil {
+			f.fail(err)
+		}
+	}
 }
 
 // disconnect closes the connection and the sessions of its tabs.
@@ -261,7 +307,7 @@ func (a *App) disconnect(id string) {
 		go c.Close()
 	}
 	cs.conn, cs.status, cs.err = nil, stIdle, nil
-	cs.waiters = nil
+	cs.dropWaiters(errors.New("disconnected"))
 	cs.resetMeta()
 }
 
@@ -332,7 +378,11 @@ func (cs *connState) loadTable(ref db.ObjectRef, then func(*db.TableInfo, error)
 			t, err := c.Catalog().Table(ctx, ref)
 			cancel()
 			cs.a.post(func() {
-				if cs.gen == gen && err == nil {
+				if cs.gen != gen {
+					then(nil, errors.New("connection was reset"))
+					return
+				}
+				if err == nil {
 					cs.tables[ref] = t
 				}
 				then(t, err)

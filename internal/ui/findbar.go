@@ -57,6 +57,7 @@ func (f *findBar) show(gtx C, replace bool, sel string) {
 func (f *findBar) close(gtx C) {
 	f.open = false
 	f.matches = nil
+	f.version = -1
 	gtx.Execute(key.FocusCmd{Tag: f.e})
 }
 
@@ -72,24 +73,12 @@ func (f *findBar) search() {
 		f.cur = -1
 		return
 	}
-	needle := q
-	if !f.caseSens {
-		needle = strings.ToLower(q)
-	}
 	for ln, s := range f.e.buf.lines {
-		hay := s
-		if !f.caseSens {
-			hay = strings.ToLower(s)
+		if len(f.matches) >= maxFindMatches {
+			break
 		}
-		off := 0
-		for {
-			i := strings.Index(hay[off:], needle)
-			if i < 0 || len(f.matches) > 100000 {
-				break
-			}
-			a := off + i
-			f.matches = append(f.matches, findMatch{a: tpos{ln, a}, z: tpos{ln, a + len(needle)}})
-			off = a + max(1, len(needle))
+		for _, m := range findAll(s, q, !f.caseSens) {
+			f.matches = append(f.matches, findMatch{a: tpos{ln, m[0]}, z: tpos{ln, m[1]}})
 		}
 	}
 	// current: first match at or after the caret
@@ -103,6 +92,55 @@ func (f *findBar) search() {
 	if f.cur < 0 && len(f.matches) > 0 {
 		f.cur = 0
 	}
+}
+
+const maxFindMatches = 100000
+
+// findAll returns the byte ranges of the non-overlapping occurrences of q
+// in s. Case-insensitive matching lowers rune by rune and maps the offsets
+// back to s: lowering can change byte lengths (Ⱥ, İ, the Kelvin sign).
+func findAll(s, q string, fold bool) [][2]int {
+	var out [][2]int
+	if q == "" {
+		return nil
+	}
+	if !fold {
+		for off := 0; ; {
+			i := strings.Index(s[off:], q)
+			if i < 0 {
+				return out
+			}
+			a := off + i
+			out = append(out, [2]int{a, a + len(q)})
+			off = a + len(q)
+		}
+	}
+	var low strings.Builder
+	orig := make([]int, 0, len(s)+1) // lowered byte offset → s offset (-1 inside a rune)
+	for i, r := range s {
+		l := strings.ToLower(string(r))
+		low.WriteString(l)
+		orig = append(orig, i)
+		for k := 1; k < len(l); k++ {
+			orig = append(orig, -1)
+		}
+	}
+	orig = append(orig, len(s))
+	hay, needle := low.String(), strings.ToLower(q)
+	for off := 0; off < len(hay); {
+		i := strings.Index(hay[off:], needle)
+		if i < 0 {
+			break
+		}
+		a, z := off+i, off+i+len(needle)
+		if orig[a] >= 0 && orig[z] >= 0 {
+			out = append(out, [2]int{orig[a], orig[z]})
+			off = z
+			continue
+		}
+		off = a + 1
+	}
+	return out
 }
 
 // next selects the next (or previous) match.
@@ -169,8 +207,23 @@ func (f *findBar) replaceAll() {
 	}
 	b.WriteString(f.e.buf.slice(last, f.e.buf.end()))
 	n := len(f.matches)
+	// keep the caret (shifted by the replacements before it) and the view
+	caret := f.e.buf.offset(f.e.caret)
+	shift := 0
+	for _, m := range f.matches {
+		if !f.e.caret.before(m.z) {
+			shift += len(r) - (m.z.col - m.a.col) // matches never span lines
+		}
+	}
+	sy, sx := f.e.scrollY, f.e.scrollX
 	f.e.replaceRange(tpos{}, f.e.buf.end(), b.String(), true)
-	f.e.app.flash("Replaced "+itoa(n)+" occurrence(s)", false)
+	f.e.SetCaretOffset(caret + shift)
+	f.e.scrollY, f.e.scrollX = sy, sx
+	msg := "Replaced " + itoa(n) + " occurrence(s)"
+	if n >= maxFindMatches {
+		msg += " (limit reached: run Replace All again)"
+	}
+	f.e.app.flash(msg, false)
 }
 
 func (f *findBar) visibleMatches(first, last int) []findMatch {

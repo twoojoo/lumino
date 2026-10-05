@@ -247,3 +247,21 @@ func TestSplitCQLBatch(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestReturnsRowsClause(t *testing.T) {
+	o := &Options{}
+	cases := map[string]bool{
+		"UPDATE t SET output = $1 WHERE id = $2":            false,
+		"UPDATE t SET a = 1, returning = 2 WHERE id = 1":    false,
+		"INSERT INTO t (a, output) VALUES (1, 2)":           false,
+		"INSERT INTO t VALUES (1) RETURNING id":             true,
+		"UPDATE t SET a = 1 OUTPUT inserted.a WHERE id = 1": true,
+		"DELETE FROM t OUTPUT deleted.* WHERE id = 1":       true,
+		"DELETE FROM t WHERE x IN (SELECT 1) RETURNING *":   true,
+	}
+	for q, want := range cases {
+		if got := ReturnsRows(q, o); got != want {
+			t.Errorf("%q: got %v", q, got)
+		}
+	}
+}

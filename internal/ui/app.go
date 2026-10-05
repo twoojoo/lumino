@@ -385,6 +385,9 @@ func (a *App) layoutMain(gtx C) D {
 		layout.Rigid(a.layoutTabs),
 		layout.Flexed(1, func(gtx C) D {
 			gtx.Constraints.Min = gtx.Constraints.Max
+			if a.tabIdx < 0 || a.tabIdx >= len(a.tabs) { // the last tab was closed by the strip
+				return D{Size: gtx.Constraints.Max}
+			}
 			return a.tabs[a.tabIdx].Layout(gtx)
 		}),
 	)

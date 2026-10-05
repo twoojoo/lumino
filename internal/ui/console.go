@@ -35,6 +35,8 @@ type ConsoleTab struct {
 	sess     db.Session
 	sessGen  int
 	opening  bool
+	sessWait []sessWaiter // callers waiting for the session being opened
+	disposed bool
 	manual   bool // manual transactions
 	txActive bool
 
@@ -175,7 +177,10 @@ func (t *ConsoleTab) Disconnected() {
 	t.running = false
 }
 
-func (t *ConsoleTab) Dispose() { t.closeSession() }
+func (t *ConsoleTab) Dispose() {
+	t.disposed = true
+	t.closeSession()
+}
 
 func (t *ConsoleTab) closeSession() {
 	if t.cancelRun != nil {
@@ -205,14 +210,20 @@ func (t *ConsoleTab) log(isErr bool, f string, args ...any) {
 	}
 }
 
-// withSession runs then with an open session (connecting first).
-func (t *ConsoleTab) withSession(then func(db.Session)) {
+// withSession runs then with an open session (connecting first); failed
+// runs instead when the connection or the session can't be opened.
+func (t *ConsoleTab) withSession(then func(db.Session), failed func(error)) {
 	a := t.a
-	a.connect(t.connID, func(cs *connState) {
+	a.connectOr(t.connID, func(cs *connState) {
+		if t.disposed {
+			failed(errTabClosed)
+			return
+		}
 		if t.sess != nil && t.sessGen == cs.gen {
 			then(t.sess)
 			return
 		}
+		t.sessWait = append(t.sessWait, sessWaiter{then, failed})
 		if t.opening {
 			return
 		}
@@ -243,13 +254,23 @@ func (t *ConsoleTab) withSession(then func(db.Session)) {
 			}
 			a.post(func() {
 				t.opening = false
-				if err != nil {
-					t.log(true, "Session: %v", err)
-					a.flash("Open session: "+err.Error(), true)
-					return
+				w := t.sessWait
+				t.sessWait = nil
+				if err == nil && (cs.gen != gen || t.disposed) {
+					go s.Close()
+					err = errTabClosed
+					if !t.disposed {
+						err = errors.New("the connection was reset")
+					}
 				}
-				if cs.gen != gen {
-					s.Close()
+				if err != nil {
+					if !t.disposed {
+						t.log(true, "Session: %v", err)
+						a.flash("Open session: "+err.Error(), true)
+					}
+					for _, f := range w {
+						f.fail(err)
+					}
 					return
 				}
 				if warn != nil {
@@ -259,11 +280,21 @@ func (t *ConsoleTab) withSession(then func(db.Session)) {
 					t.schema = cur
 				}
 				t.sess, t.sessGen = s, gen
-				then(s)
+				for _, f := range w {
+					f.ok(s)
+				}
 			})
 		}()
-	})
+	}, failed)
 }
+
+// sessWaiter is a caller waiting for a tab session.
+type sessWaiter struct {
+	ok   func(db.Session)
+	fail func(error)
+}
+
+var errTabClosed = errors.New("tab closed")
 
 // command handles editor shortcuts.
 func (t *ConsoleTab) command(cmd string) bool {
@@ -507,10 +538,18 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 					if rs := t.lastErr(); rs != nil {
 						msg = "Failed: " + rs.err.Error()
 					}
-					go func() { _ = a.notifier.Send(AppName+" · "+t.cs().name(), msg, notify.Normal) }()
+					title := AppName + " · " + t.cs().name()
+					go func() { _ = a.notifier.Send(title, msg, notify.Normal) }()
 				}
 			})
 		}()
+	}, func(err error) {
+		if gen == t.runGen && !t.disposed {
+			t.running, t.cancelRun = false, nil
+			if err != errConnectCancelled {
+				t.log(true, "%v", err)
+			}
+		}
 	})
 }
 
@@ -952,7 +991,7 @@ func (t *ConsoleTab) layoutResults(gtx C) D {
 				})
 			}
 			return t.value.layoutWith(gtx, t.grid, func(r, c int) (any, db.Column, bool) {
-				if r < rs.Rows() && c < len(rs.cols) {
+				if r >= 0 && c >= 0 && r < rs.Rows() && c < len(rs.cols) {
 					return rs.Value(r, c), rs.cols[c], true
 				}
 				return nil, db.Column{}, false

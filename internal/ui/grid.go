@@ -127,6 +127,31 @@ func (g *DataGrid) SetModel(m gridModel) {
 		g.scrollX, g.scrollY = 0, 0
 		g.hasSel = false
 		g.SortCol = -1
+		g.resizeCol, g.dragging, g.sbDrag = -1, false, 0
+	}
+	g.validate()
+}
+
+// validate drops state pointing past the model: owners may shrink their
+// rows in place (reverted inserts, a filter with fewer rows).
+func (g *DataGrid) validate() {
+	n, nc := g.rows(), len(g.cols())
+	if g.colW != nil && len(g.colW) != nc {
+		g.colW = nil
+	}
+	if g.hasSel {
+		if n == 0 || nc == 0 {
+			g.hasSel = false
+		} else {
+			cl := func(v, hi int) int { return max(0, min(hi, v)) }
+			g.sel = cellRange{cl(g.sel.r0, n-1), cl(g.sel.c0, nc-1), cl(g.sel.r1, n-1), cl(g.sel.c1, nc-1)}
+		}
+	}
+	if g.editing && (g.editR >= n || g.editC >= nc) {
+		g.editing = false
+	}
+	if g.resizeCol >= nc {
+		g.resizeCol = -1
 	}
 }
 
@@ -326,7 +351,7 @@ func tsvEscape(s string) string {
 }
 
 func (g *DataGrid) beginEdit(gtx C, r, c int) bool {
-	if g.Editable == nil || !g.Editable(r, c) || r >= g.rows() {
+	if r < 0 || c < 0 || r >= g.rows() || c >= len(g.cols()) || g.Editable == nil || !g.Editable(r, c) {
 		return false
 	}
 	g.editing, g.editR, g.editC, g.editInit = true, r, c, true
@@ -353,7 +378,7 @@ func (g *DataGrid) commitEdit(gtx C) {
 		return
 	}
 	g.editing = false
-	if g.OnEdit != nil {
+	if g.OnEdit != nil && g.editR < g.rows() && g.editC < len(g.cols()) {
 		g.OnEdit(g.editR, g.editC, g.editor.Text())
 	}
 	gtx.Execute(key.FocusCmd{Tag: &g.tag})
@@ -365,9 +390,16 @@ func (g *DataGrid) cancelEdit(gtx C) {
 }
 
 func (g *DataGrid) onKey(gtx C, k key.Event) {
-	if !g.hasSel && g.rows() > 0 && len(g.colW) > 0 {
-		g.SelectCell(0, 0)
+	g.validate()
+	if g.rows() == 0 || len(g.colW) == 0 {
 		return
+	}
+	if !g.hasSel {
+		g.SelectCell(0, 0)
+		switch k.Name {
+		case key.NameUpArrow, key.NameDownArrow, key.NameLeftArrow, key.NameRightArrow, key.NameHome, key.NameEnd, key.NamePageUp, key.NamePageDown, key.NameTab:
+			return // the first move only lands on the first cell
+		}
 	}
 	shift := k.Modifiers.Contain(key.ModShift)
 	short := k.Modifiers.Contain(key.ModShortcut)
@@ -471,6 +503,7 @@ func (g *DataGrid) Layout(gtx C) D {
 	if g.model == nil {
 		return D{Size: size}
 	}
+	g.validate()
 	g.autosize(gtx)
 	cols := g.cols()
 	nrows := g.rows()
@@ -822,7 +855,7 @@ func (g *DataGrid) onPointer(gtx C, e pointer.Event) {
 			g.scrollTo(e.Position)
 			return
 		}
-		if g.resizeCol >= 0 {
+		if g.resizeCol >= 0 && g.resizeCol < len(g.colW) {
 			g.colW[g.resizeCol] = max(gtx.Dp(30), g.resizeW+int(e.Position.X-g.resizeX))
 			return
 		}

@@ -8,7 +8,7 @@ import (
 
 const redacted = "<redacted>"
 
-var sensitiveName = regexp.MustCompile(`(?i)(pass(word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth|cookie|session|signature|dsn|connection[_-]?string)`)
+var sensitiveName = regexp.MustCompile(`(?i)(pass(word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|ssh[_-]?key|credential|(^|_)auth($|_)|auth[_-]?(code|key)|cookie|session[_-]?(key|token|data)|signature|dsn|connection[_-]?string|(^|_)pem$|salt|otp|totp|mfa)`)
 
 var textRules = []struct {
 	rx   *regexp.Regexp
@@ -16,6 +16,10 @@ var textRules = []struct {
 }{
 	// PEM private keys
 	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`), "-----BEGIN PRIVATE KEY-----" + redacted + "-----END PRIVATE KEY-----"},
+	// truncated PEM keys (no END marker)
+	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*`), "-----BEGIN PRIVATE KEY-----" + redacted},
+	// PASSWORD 'x' / IDENTIFIED BY 'x' in DDL
+	{regexp.MustCompile(`(?i)\b(password|identified\s+by)(\s+)'(?:[^']|'')*'`), "${1}${2}'" + redacted + "'"},
 	// Authorization headers
 	{regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?(bearer|basic|token)\s+)[^\s"',]+`), "${1}" + redacted},
 	// key=value / key: value with sensitive keys

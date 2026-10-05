@@ -122,6 +122,7 @@ type Session struct {
 	c        *Conn
 	conn     *sql.Conn
 	tx       *sql.Tx
+	rawTx    bool // a transaction opened by a raw BEGIN variant (BEGIN IMMEDIATE…)
 	id       string
 	readOnly bool
 
@@ -131,6 +132,7 @@ type Session struct {
 	cancel  context.CancelFunc // of the running statement / open cursor
 	running bool
 	runID   string // StatementContext id of the current statement
+	seq     int    // statement number (cancellation hooks of old statements are ignored)
 	cur     *Result
 }
 
@@ -156,7 +158,10 @@ func (s *Session) connect(ctx context.Context) error {
 		}
 	}
 	if h := s.c.H.SessionID; h != nil {
-		s.id, _ = h(ctx, conn)
+		id, _ := h(ctx, conn)
+		s.mu.Lock()
+		s.id = id
+		s.mu.Unlock()
 	}
 	if s.readOnly && s.c.H.SetReadOnly != nil {
 		_ = s.c.H.SetReadOnly(ctx, conn, true)
@@ -191,7 +196,7 @@ func (s *Session) recover(ctx context.Context, err error) error {
 	if s.conn != nil {
 		s.conn.Close()
 	}
-	s.tx, s.conn = nil, nil
+	s.tx, s.conn, s.rawTx = nil, nil, false
 	if cerr := s.connect(ctx); cerr != nil {
 		return fmt.Errorf("%w; reconnect failed: %v", err, cerr)
 	}
@@ -208,24 +213,47 @@ func (s *Session) closeCursor() {
 	}
 }
 
-// txVerb maps client transaction statements to session calls.
+// txVerb maps client transaction statements to session calls: BEGIN,
+// COMMIT, ROLLBACK, or RAWBEGIN for a BEGIN variant database/sql can't
+// express (isolation levels, BEGIN IMMEDIATE, named transactions), which
+// runs as is and is tracked by the session.
 func txVerb(stmt string, o *sqlx.Options) string {
-	w := sqlx.Words(stmt, o, 4)
-	switch len(w) {
-	case 1:
+	w := sqlx.Words(stmt, o, 8)
+	if len(w) == 0 {
+		return ""
+	}
+	txWord := func(x string) bool { return x == "TRANSACTION" || x == "WORK" || x == "TRAN" }
+	switch w[0] {
+	case "BEGIN", "START":
+		if len(w) == 1 {
+			if w[0] == "BEGIN" {
+				return "BEGIN"
+			}
+			return ""
+		}
+		if len(w) == 2 && txWord(w[1]) {
+			return "BEGIN"
+		}
+		switch w[1] {
+		case "TRANSACTION", "WORK", "TRAN", "DEFERRED", "IMMEDIATE", "EXCLUSIVE", "ISOLATION", "READ", "NOT", "DISTRIBUTED":
+			return "RAWBEGIN"
+		}
+	case "COMMIT", "ROLLBACK", "END", "ABORT":
+		for _, x := range w[1:] {
+			if x == "TO" || x == "PREPARED" || x == "CHAIN" {
+				return "" // ROLLBACK TO SAVEPOINT, two-phase commit, AND CHAIN
+			}
+		}
+		if len(w) > 2 && !txWord(w[1]) {
+			return ""
+		}
 		switch w[0] {
-		case "BEGIN", "COMMIT", "ROLLBACK":
-			return w[0]
 		case "END":
 			return "COMMIT"
+		case "ABORT":
+			return "ROLLBACK"
 		}
-	case 2:
-		switch {
-		case (w[0] == "BEGIN" || w[0] == "START") && (w[1] == "TRANSACTION" || w[1] == "WORK" || w[1] == "TRAN"):
-			return "BEGIN"
-		case (w[0] == "COMMIT" || w[0] == "ROLLBACK") && (w[1] == "TRANSACTION" || w[1] == "WORK" || w[1] == "TRAN"):
-			return w[0]
-		}
+		return w[0]
 	}
 	return ""
 }
@@ -240,35 +268,57 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	}
 	start := time.Now()
 	if len(args) == 0 {
+		ok := &Result{exec: true, affected: -1}
 		switch txVerb(stmt, s.c.D.Lex()) {
 		case "BEGIN":
-			return &Result{exec: true, affected: -1, elapsed: time.Since(start)}, s.Begin(ctx)
+			return ok, s.Begin(ctx)
 		case "COMMIT":
-			return &Result{exec: true, affected: -1, elapsed: time.Since(start)}, s.Commit(ctx)
+			if s.tx != nil || !s.rawTx && !s.c.H.NoTx {
+				return ok, s.Commit(ctx)
+			}
+			defer func() { s.rawTx = false }()
 		case "ROLLBACK":
-			return &Result{exec: true, affected: -1, elapsed: time.Since(start)}, s.Rollback(ctx)
+			if s.tx != nil || !s.rawTx && !s.c.H.NoTx {
+				return ok, s.Rollback(ctx)
+			}
+			defer func() { s.rawTx = false }()
+		case "RAWBEGIN":
+			if s.tx != nil || s.rawTx {
+				return nil, fmt.Errorf("a transaction is already open")
+			}
+			if !s.c.H.NoTx {
+				defer func() {
+					if s.conn != nil {
+						s.rawTx = true
+					}
+				}()
+			}
 		}
 	}
 	rctx, cancel := context.WithCancel(context.Background())
-	// caller cancellation goes through Cancel: cancelling the statement's
-	// context directly would make several drivers drop the connection
-	stop := context.AfterFunc(ctx, func() {
-		// only while a statement or fetch runs: an open cursor outlives
-		// the context of the Execute call
-		s.mu.Lock()
-		running := s.running
-		s.mu.Unlock()
-		if running {
-			s.Cancel()
-		}
-	})
 	runID := ""
 	if f := s.c.H.StatementContext; f != nil {
 		rctx, runID = f(rctx)
 	}
 	s.mu.Lock()
+	s.seq++
+	seq := s.seq
 	s.cancel, s.running, s.runID = cancel, true, runID
 	s.mu.Unlock()
+	// caller cancellation goes through Cancel: cancelling the statement's
+	// context directly would make several drivers drop the connection.
+	// Registered once the statement is marked running, so an already
+	// expired context cancels it too.
+	stop := context.AfterFunc(ctx, func() {
+		// only while this statement or one of its fetches runs: an open
+		// cursor outlives the context of the Execute call
+		s.mu.Lock()
+		running := s.running && s.seq == seq
+		s.mu.Unlock()
+		if running {
+			s.Cancel()
+		}
+	})
 	done := func() {
 		s.mu.Lock()
 		s.running = false
@@ -336,7 +386,7 @@ func (s *Session) Begin(ctx context.Context) error {
 	if s.c.H.NoTx {
 		return db.ErrNotSupported
 	}
-	if s.tx != nil {
+	if s.tx != nil || s.rawTx {
 		return fmt.Errorf("a transaction is already open")
 	}
 	s.closeCursor()
@@ -369,6 +419,9 @@ func (s *Session) Begin(ctx context.Context) error {
 
 func (s *Session) Commit(ctx context.Context) error {
 	if s.tx == nil {
+		if s.rawTx {
+			return s.rawEnd(ctx, "COMMIT")
+		}
 		return nil
 	}
 	s.closeCursor()
@@ -379,6 +432,9 @@ func (s *Session) Commit(ctx context.Context) error {
 
 func (s *Session) Rollback(ctx context.Context) error {
 	if s.tx == nil {
+		if s.rawTx {
+			return s.rawEnd(ctx, "ROLLBACK")
+		}
 		return nil
 	}
 	s.closeCursor()
@@ -390,7 +446,18 @@ func (s *Session) Rollback(ctx context.Context) error {
 	return s.c.mapErr(s.recover(ctx, err))
 }
 
-func (s *Session) TxActive() bool { return s.tx != nil }
+// rawEnd ends a transaction opened by a raw BEGIN variant.
+func (s *Session) rawEnd(ctx context.Context, verb string) error {
+	s.closeCursor()
+	s.rawTx = false
+	if s.conn == nil {
+		return nil
+	}
+	_, err := s.conn.ExecContext(ctx, verb)
+	return s.c.mapErr(s.recover(ctx, err))
+}
+
+func (s *Session) TxActive() bool { return s.tx != nil || s.rawTx }
 
 func (s *Session) SetReadOnly(ctx context.Context, on bool) error {
 	s.readOnly = on
@@ -429,6 +496,10 @@ func (s *Session) SetCurrentSchema(ctx context.Context, schema string) error {
 	return s.c.mapErr(s.c.H.SetCurrentSchema(ctx, s.q(), schema))
 }
 
+// Close ends the session. Its connection is discarded rather than returned
+// to the pool: session state (read-only mode, search_path, USE, SET ROLE,
+// temporary tables, a raw transaction) must not leak into other sessions
+// or metadata queries.
 func (s *Session) Close() error {
 	s.closeCursor()
 	if s.tx != nil {
@@ -438,8 +509,18 @@ func (s *Session) Close() error {
 	if s.conn == nil {
 		return nil
 	}
+	if s.rawTx {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = s.conn.ExecContext(ctx, "ROLLBACK")
+		cancel()
+		s.rawTx = false
+	}
+	_ = s.conn.Raw(func(any) error { return driver.ErrBadConn })
 	err := s.conn.Close()
 	s.conn = nil
+	if errors.Is(err, sql.ErrConnDone) {
+		err = nil
+	}
 	return err
 }
 
@@ -633,9 +714,21 @@ func (r *Result) Close() error {
 		return nil
 	}
 	r.closed = true
+	done := r.done || r.exec
 	r.mu.Unlock()
 	var err error
 	if r.rows != nil {
+		if !done && r.s != nil && r.s.c.H.Cancel != nil {
+			// closing a partly read cursor makes drivers read the rest of
+			// the result: stop the statement on the server first
+			r.s.mu.Lock()
+			r.s.running = true
+			r.s.mu.Unlock()
+			r.s.Cancel()
+			r.s.mu.Lock()
+			r.s.running = false
+			r.s.mu.Unlock()
+		}
 		err = r.rows.Close()
 	}
 	if r.cancel != nil {

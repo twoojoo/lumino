@@ -183,6 +183,7 @@ func (a *App) layoutTabs(gtx C) D {
 			break
 		}
 	}
+	a.middleClickTabs(gtx)
 	if a.newTabBtn.Clicked(gtx) {
 		if id := a.currentConn(); id != "" {
 			a.newConsole(id, a.currentSchema(), "")
@@ -238,17 +239,18 @@ func (a *App) layoutTabs(gtx C) D {
 			}
 			fillRect(gtx, pal.Border, image.Rect(w-gtx.Dp(1), gtx.Dp(6), w, h-gtx.Dp(6)))
 			call.Add(gtx.Ops)
-			// middle click closes
+			// middle click closes (passing the other clicks to the buttons)
+			pass := pointer.PassOp{}.Push(gtx.Ops)
 			area := clip.Rect{Max: image.Pt(w, h)}.Push(gtx.Ops)
 			event.Op(gtx.Ops, &a.tabTags[i])
 			area.Pop()
+			pass.Pop()
 			return D{Size: image.Pt(w, h)}
 		}))
 	}
 	items = append(items, layout.Rigid(func(gtx C) D {
 		return layout.Inset{Left: 4, Top: 6}.Layout(gtx, func(gtx C) D { return iconOnly(gtx, &a.newTabBtn, icAdd, 16) })
 	}))
-	a.middleClickTabs(gtx)
 	return layout.Flex{Alignment: layout.Start}.Layout(gtx, items...)
 }
 

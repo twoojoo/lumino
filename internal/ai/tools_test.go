@@ -62,6 +62,15 @@ func TestToolsDirect(t *testing.T) {
 	if _, err := call(t, tl, "run_query", map[string]any{"sql": "DELETE FROM users"}); err == nil {
 		t.Fatal("run_query accepted a DELETE")
 	}
+	for _, q := range []string{"SELECT 1; DELETE FROM users", "SELECT 1; PRAGMA query_only=0; DELETE FROM users", "PRAGMA journal_mode(DELETE)"} {
+		if _, err := call(t, tl, "run_query", map[string]any{"sql": q}); err == nil {
+			t.Fatalf("run_query accepted %q", q)
+		}
+	}
+	out, err = call(t, tl, "run_query", map[string]any{"sql": "SELECT password_hash AS h, api_token t FROM users"})
+	if err != nil || strings.Contains(out, "pbkdf2") || strings.Contains(out, "tok_123") {
+		t.Fatalf("aliased sensitive columns leaked: %v\n%s", err, out)
+	}
 	out, err = call(t, tl, "run_query", map[string]any{"sql": "SELECT count(*) AS n FROM users"})
 	if err != nil || !strings.Contains(out, "2") {
 		t.Fatalf("run_query: %v %s", err, out)

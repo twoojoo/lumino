@@ -53,6 +53,7 @@ type sqlRef struct {
 type sqlContext struct {
 	qualifier   string // "t" in "t.col|"
 	qualParts   []string
+	qualStart   int // offset where the qualifier chain starts
 	prefix      string
 	refs        []sqlRef
 	expectTable bool // after FROM / JOIN / INTO / UPDATE / TABLE
@@ -122,6 +123,7 @@ func analyzeSQL(stmt string, caret int, lex *sqlx.Options, kw map[string]bool) s
 		ctx.qualParts = append([]string{stmt[s:k]}, ctx.qualParts...)
 		j = s
 	}
+	ctx.qualStart = j
 	if len(ctx.qualParts) > 0 {
 		ctx.qualifier = ctx.qualParts[len(ctx.qualParts)-1]
 	}
@@ -198,10 +200,7 @@ func analyzeSQL(stmt string, caret int, lex *sqlx.Options, kw map[string]bool) s
 		k--
 	}
 	// expected object type from the last significant word before the prefix
-	stop := caret - len(ctx.prefix)
-	for _, p := range ctx.qualParts {
-		stop -= len(p) + 1
-	}
+	stop := ctx.qualStart
 	var last string
 	inFrom := false
 	for _, w := range words {
@@ -311,7 +310,12 @@ func (e *CodeEditor) triggerCompletion(explicit bool) {
 			}
 		}
 	}
-	e.comp = &completion{all: req.items, items: items, sel: sel, start: start}
+	nc := &completion{all: req.items, items: items, sel: sel, start: start}
+	if e.comp != nil && e.comp.start == start {
+		nc.top, nc.hovered = e.comp.top, e.comp.hovered
+		nc.move(0)
+	}
+	e.comp = nc
 }
 
 func (e *CodeEditor) refreshCompletion() {
@@ -373,7 +377,20 @@ func (e *CodeEditor) acceptCompletion() {
 	e.comp = nil
 	_, end := e.buf.wordAt(e.caret)
 	end.col = max(end.col, e.caret.col)
-	e.replaceRange(c.start, end, ins, true)
+	start := c.start
+	// an identifier typed after an opening quote: replace the quote too and
+	// close it
+	if line := e.buf.lines[start.line]; it.insert == "" && start.col > 0 && (it.kind == "table" || it.kind == "view" || it.kind == "column" || it.kind == "schema") {
+		if open := line[start.col-1]; open == '"' || open == '`' || open == '[' {
+			cl := map[byte]string{'"': `"`, '`': "`", '[': "]"}[open]
+			ins = string(open) + strings.ReplaceAll(it.label, cl, cl+cl) + cl
+			start.col--
+			if end.col < len(line) && line[end.col] == cl[0] {
+				end.col++
+			}
+		}
+	}
+	e.replaceRange(start, end, ins, true)
 	if strings.HasSuffix(ins, "()") {
 		e.caret.col--
 		e.anchor = e.caret

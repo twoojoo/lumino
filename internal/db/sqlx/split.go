@@ -1,6 +1,7 @@
 package sqlx
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -322,22 +323,49 @@ func ReturnsRows(stmt string, o *Options) bool {
 		"CALL", "EXEC", "EXECUTE", "LIST", "FETCH":
 		return true
 	case "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT":
-		up := strings.ToUpper(stmt)
-		return containsWord(up, "RETURNING") || containsWord(up, "OUTPUT")
+		return hasClause(stmt, o, "RETURNING", "OUTPUT")
 	}
 	return false
 }
 
-func containsWord(s, w string) bool {
-	for i := 0; ; {
-		j := strings.Index(s[i:], w)
-		if j < 0 {
-			return false
+// hasClause reports whether one of the keywords appears as a top-level
+// clause: not inside parentheses and not used as a column name
+// (SET output = 1, (a, returning)).
+func hasClause(stmt string, o *Options, kws ...string) bool {
+	toks := Tokens(stmt, o)
+	depth := 0
+	prev := ""
+	for i, t := range toks {
+		txt := stmt[t.Start:t.End]
+		switch t.Kind {
+		case TSpace, TComment:
+			continue
+		case TPunct:
+			switch txt {
+			case "(":
+				depth++
+			case ")":
+				depth = max(0, depth-1)
+			}
+		case TWord:
+			up := strings.ToUpper(txt)
+			if depth == 0 && slices.Contains(kws, up) && prev != "SET" && prev != "," && prev != "." {
+				next := ""
+				for _, n := range toks[i+1:] {
+					if n.Kind != TSpace && n.Kind != TComment {
+						next = stmt[n.Start:n.End]
+						break
+					}
+				}
+				if next != "=" && next != "." && next != "," {
+					return true
+				}
+			}
+			prev = up
+			continue
 		}
-		a, b := i+j, i+j+len(w)
-		if (a == 0 || !isIdent(s[a-1])) && (b >= len(s) || !isIdent(s[b])) {
-			return true
-		}
-		i = b
+		prev = txt
 	}
+	return false
 }
+

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/giovanni/lumino/internal/db"
+	"github.com/giovanni/lumino/internal/db/sqlx"
 )
 
 const maxToolOutput = 14000
@@ -220,10 +221,18 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 	return "", fmt.Errorf("unknown tool %q", call.Name)
 }
 
-// query runs a read-only statement on a read-only session.
+// query runs one read-only statement on a read-only session. Several
+// layers guard it: the statement must split to exactly one read statement,
+// the session is set read-only by the server (or, where that is not
+// available, the statement runs in a transaction rolled back afterwards).
 func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error) {
-	sql = strings.TrimSuffix(strings.TrimSpace(sql), ";")
-	if k := db.Classify(sql, t.Conn.Dialect().Lex()); k != db.StmtRead {
+	lex := t.Conn.Dialect().Lex()
+	stmts := sqlx.Split(sql, lex)
+	if len(stmts) != 1 {
+		return "", fmt.Errorf("refused: run exactly one statement (got %d)", len(stmts))
+	}
+	sql = strings.TrimSuffix(strings.TrimSpace(stmts[0].Text), ";")
+	if k := db.Classify(sql, lex); k != db.StmtRead {
 		return "", fmt.Errorf("refused: this is a %s statement; only read-only queries can run (use propose_sql)", k)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -233,7 +242,17 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 		return "", err
 	}
 	defer s.Close()
-	_ = s.SetReadOnly(ctx, true)
+	if err := s.SetReadOnly(ctx, true); err != nil {
+		if !errors.Is(err, db.ErrNotSupported) {
+			return "", fmt.Errorf("refused: can't make the session read-only: %w", err)
+		}
+		if t.Conn.Caps().Transactions {
+			if err := s.Begin(ctx); err != nil {
+				return "", fmt.Errorf("refused: can't open a transaction to roll back: %w", err)
+			}
+			defer s.Rollback(context.Background())
+		}
+	}
 	if t.Schema != "" {
 		_ = s.SetCurrentSchema(ctx, t.Schema)
 	}
@@ -250,6 +269,15 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 	if err != nil {
 		return "", err
 	}
+	// columns can be renamed (SELECT password AS x): a query reading a
+	// sensitive column gets all its values redacted
+	all := false
+	for _, tk := range sqlx.Tokens(sql, lex) {
+		if (tk.Kind == sqlx.TWord || tk.Kind == sqlx.TQuotedIdent) && SensitiveColumn(strings.Trim(sql[tk.Start:tk.End], "\"`[]")) {
+			all = true
+			break
+		}
+	}
 	var b strings.Builder
 	names := make([]string, len(cols))
 	for i, c := range cols {
@@ -262,10 +290,10 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 			switch {
 			case v == nil:
 				cells[i] = "NULL"
-			case SensitiveColumn(cols[i].Name):
+			case all || SensitiveColumn(cols[i].Name):
 				cells[i] = redacted
 			default:
-				cells[i] = db.CellText(v, cols[i].Kind)
+				cells[i] = RedactText(db.CellText(v, cols[i].Kind))
 				if len(cells[i]) > 200 {
 					cells[i] = cells[i][:200] + "…"
 				}
@@ -275,6 +303,9 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 	}
 	if more {
 		fmt.Fprintf(&b, "…more rows not shown (limit %d)\n", limit)
+	}
+	if all {
+		b.WriteString("(values redacted: the query reads columns that look sensitive)\n")
 	}
 	return clip(RedactText(b.String())), nil
 }

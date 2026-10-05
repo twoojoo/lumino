@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"sort"
@@ -216,20 +217,23 @@ type TableTab struct {
 	infoErr error
 	loading bool
 
-	sess    db.Session
-	sessGen int
-	data    *tableData
-	grid    *DataGrid
-	value   *valuePanel
-	where   widget.Editor
-	order   []string // ORDER BY terms
-	sortCol int
-	sortDsc bool
-	query   string
-	running bool
-	loadErr error
-	count   string
-	gen     int
+	sess     db.Session
+	sessGen  int
+	opening  bool
+	sessWait []sessWaiter
+	disposed bool
+	data     *tableData
+	grid     *DataGrid
+	value    *valuePanel
+	where    widget.Editor
+	order    []string // ORDER BY terms
+	sortCol  int
+	sortDsc  bool
+	query    string
+	running  bool
+	loadErr  error
+	count    string
+	gen      int
 
 	ddl      *CodeEditor
 	ddlState int // 0 none, 1 loading, 2 loaded
@@ -317,7 +321,10 @@ func (t *TableTab) Disconnected() {
 	t.running = false
 }
 
-func (t *TableTab) Dispose() { t.Disconnected() }
+func (t *TableTab) Dispose() {
+	t.disposed = true
+	t.Disconnected()
+}
 
 func (t *TableTab) show(view string) {
 	if view == "data" && !t.ref.Type.Relation() {
@@ -332,7 +339,7 @@ func (t *TableTab) ensureInfo() {
 		return
 	}
 	t.loading = true
-	t.a.connect(t.connID, func(cs *connState) {
+	t.a.connectOr(t.connID, func(cs *connState) {
 		cs.loadTable(t.ref, func(info *db.TableInfo, err error) {
 			t.loading = false
 			t.info, t.infoErr = info, err
@@ -340,11 +347,11 @@ func (t *TableTab) ensureInfo() {
 				t.fillStructure()
 			}
 		})
-	})
+	}, func(err error) { t.loading, t.infoErr = false, err })
 }
 
 func (t *TableTab) editable(r, c int) bool {
-	if t.data == nil || t.info == nil || t.ref.Type != db.ObjTable || t.a.connReadOnly(t.connID) {
+	if t.data == nil || t.info == nil || t.ref.Type != db.ObjTable || r < 0 || r >= t.data.Rows() || c < 0 || c >= len(t.data.rs.cols) || t.a.connReadOnly(t.connID) {
 		return false
 	}
 	caps := t.cs().caps()
@@ -373,35 +380,79 @@ func (t *TableTab) readOnlyReason() string {
 	return ""
 }
 
-func (t *TableTab) withSession(then func(db.Session)) {
+// withSession runs then with the tab's session (opened once, shared by
+// concurrent callers); failed runs instead when that is impossible.
+func (t *TableTab) withSession(then func(db.Session), failed func(error)) {
 	a := t.a
-	a.connect(t.connID, func(cs *connState) {
+	a.connectOr(t.connID, func(cs *connState) {
+		if t.disposed {
+			failed(errTabClosed)
+			return
+		}
 		if t.sess != nil && t.sessGen == cs.gen {
 			then(t.sess)
 			return
 		}
+		t.sessWait = append(t.sessWait, sessWaiter{then, failed})
+		if t.opening {
+			return
+		}
+		t.opening = true
 		conn, gen := cs.conn, cs.gen
 		ro := a.connReadOnly(t.connID)
 		go func() {
-			s, err := conn.Session(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), db.ConnectTimeout)
+			defer cancel()
+			s, err := conn.Session(ctx)
 			if err == nil && ro {
-				_ = s.SetReadOnly(context.Background(), true)
+				if e := s.SetReadOnly(ctx, true); e != nil && !errors.Is(e, db.ErrNotSupported) {
+					s.Close()
+					s, err = nil, fmt.Errorf("read-only session: %w", e)
+				}
 			}
 			a.post(func() {
-				if err != nil {
-					t.loadErr = err
-					t.running = false
-					return
+				t.opening = false
+				w := t.sessWait
+				t.sessWait = nil
+				if err == nil && (cs.gen != gen || t.disposed) {
+					go s.Close()
+					err = errTabClosed
 				}
-				if cs.gen != gen {
-					s.Close()
+				if err != nil {
+					for _, f := range w {
+						f.fail(err)
+					}
 					return
 				}
 				t.sess, t.sessGen = s, gen
-				then(s)
+				for _, f := range w {
+					f.ok(s)
+				}
 			})
 		}()
-	})
+	}, failed)
+}
+
+// refresh reloads the data after change (filter edits…), asking first
+// when unsaved edits would be discarded.
+func (t *TableTab) refresh(change func()) {
+	do := func() {
+		if change != nil {
+			change()
+		}
+		if t.data != nil {
+			t.data.revert()
+		}
+		t.loadErr = nil
+		t.reload()
+	}
+	if t.data == nil || t.data.pending() == 0 {
+		do()
+		return
+	}
+	c := newConfirm(t.a, "Discard changes?", fmt.Sprintf("Reloading discards %d unsaved change(s).", t.data.pending()), true, func(bool) { do() })
+	c.okLabel = "Discard and reload"
+	t.a.overlay = c
 }
 
 // reload runs the browse query.
@@ -450,6 +501,10 @@ func (t *TableTab) reload() {
 				t.grid.SortCol, t.grid.SortDesc = t.sortCol, t.sortDsc
 			})
 		}()
+	}, func(err error) {
+		if gen == t.gen {
+			t.running, t.loadErr = false, err
+		}
 	})
 }
 
@@ -520,7 +575,11 @@ func (t *TableTab) deleteRows(rows []int) {
 	}
 	// inserted rows are simply dropped (from the last one)
 	sort.Sort(sort.Reverse(sort.IntSlice(rows)))
-	for _, r := range rows {
+	n := t.data.Rows()
+	for k, r := range rows {
+		if r < 0 || r >= n || k > 0 && rows[k-1] == r {
+			continue
+		}
 		i, isBase := t.data.base(r)
 		if !isBase {
 			t.data.inserted = append(t.data.inserted[:i], t.data.inserted[i+1:]...)
@@ -572,7 +631,7 @@ func (t *TableTab) apply(changes []db.Change) {
 			delete(cs.tables, ref)
 			t.reload()
 		})
-	})
+	}, func(err error) { a.flash("Save: "+err.Error(), true) })
 }
 
 func (t *TableTab) countRows() {
@@ -604,7 +663,7 @@ func (t *TableTab) countRows() {
 				t.count = n
 			})
 		}()
-	})
+	}, func(error) { t.count = "" })
 }
 
 // loadDDL fetches the object's DDL.
@@ -694,29 +753,14 @@ func (t *TableTab) layoutData(gtx C) D {
 			break
 		}
 		if _, ok := ev.(widget.SubmitEvent); ok {
-			if t.data != nil && t.data.pending() > 0 {
-				a.flash("Save or revert the pending changes before filtering", true)
-			} else {
-				t.reload()
-			}
+			t.refresh(nil)
 		}
 	}
 	if t.refreshBtn.Clicked(gtx) {
-		if t.data != nil && t.data.pending() > 0 {
-			c := newConfirm(a, "Discard changes?", fmt.Sprintf("Reloading discards %d unsaved change(s).", t.data.pending()), true, func(bool) {
-				t.data.revert()
-				t.reload()
-			})
-			c.okLabel = "Discard and reload"
-			a.overlay = c
-		} else {
-			t.loadErr = nil
-			t.reload()
-		}
+		t.refresh(nil)
 	}
 	if t.clearWhere.Clicked(gtx) {
-		t.where.SetText("")
-		t.reload()
+		t.refresh(func() { t.where.SetText("") })
 	}
 	if t.addBtn.Clicked(gtx) {
 		t.addRow()
@@ -879,8 +923,7 @@ func (t *TableTab) gridMenu(at image.Point) {
 		if v != nil {
 			cond = dia.Quote(col.Name) + " = " + dia.Literal(v, col.Kind)
 		}
-		t.where.SetText(cond)
-		t.reload()
+		t.refresh(func() { t.where.SetText(cond) })
 	}})
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}
 }

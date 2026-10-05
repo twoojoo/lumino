@@ -27,7 +27,7 @@ type valuePanel struct {
 	r, c                                 int
 	shown                                string
 	isNull                               bool
-	edited                               bool
+	edited, wasEditable                  bool
 	modeBtn                              [3]widget.Clickable
 	copyBtn, nullBtn, applyBtn, closeBtn widget.Clickable
 }
@@ -102,8 +102,17 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	if v.closeBtn.Clicked(gtx) {
 		v.open = false
 	}
+	// a pending edit is kept as a grid change when the panel moves away
+	// from its cell (they are only buffered until Save)
+	keepEdit := func() {
+		if v.edited && v.wasEditable && edit != nil && v.r >= 0 {
+			edit(v.r, v.c, v.ed.Text(), false)
+			v.edited = false
+		}
+	}
 	for i := range v.modeBtn {
 		if v.modeBtn[i].Clicked(gtx) {
+			keepEdit()
 			v.mode = i
 			v.r = -1 // re-render
 		}
@@ -111,6 +120,9 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	text := renderValue(val, col, v.mode)
 	// load the cell into the editor when the selection moves (or the value
 	// changed under an unedited editor)
+	if r != v.r || c != v.c {
+		keepEdit()
+	}
 	if r != v.r || c != v.c || !v.edited && text != v.shown {
 		v.r, v.c, v.shown, v.isNull, v.edited = r, c, text, val == nil, false
 		v.ed.SetText(text)
@@ -126,6 +138,7 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	}
 	editable := edit != nil && has && v.mode == 0 && g.Editable != nil && g.Editable(r, c)
 	v.ed.ReadOnly = !editable
+	v.wasEditable = editable
 	if v.copyBtn.Clicked(gtx) && has {
 		v.app.copyLater(v.ed.Text())
 	}

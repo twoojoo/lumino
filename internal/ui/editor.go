@@ -66,6 +66,7 @@ type CodeEditor struct {
 	funcs   map[string]bool
 	types   map[string]bool
 	hl      []lineHL
+	hlValid int // lines [0, hlValid) were lexed with their correct start state
 
 	focused     bool
 	blinkStart  time.Time
@@ -125,6 +126,7 @@ func (e *CodeEditor) setDialect(d db.Dialect) {
 	for i := range e.hl {
 		e.hl[i].dirty = true
 	}
+	e.hlValid = 0
 }
 
 func toSet(l []string) map[string]bool {
@@ -148,6 +150,7 @@ func (e *CodeEditor) splice(from, removed, added int) {
 	}
 	nl = append(nl, e.hl[end:]...)
 	e.hl = nl
+	e.hlValid = min(e.hlValid, from)
 	if e.comp != nil {
 		e.comp.stale = true
 	}
@@ -162,6 +165,7 @@ func (e *CodeEditor) SetText(s string) {
 	e.caret = e.buf.end()
 	e.anchor = e.caret
 	e.scrollCaret = true
+	e.maxVisCols = 0
 }
 
 // Selected returns the selected text.
@@ -323,15 +327,17 @@ func (e *CodeEditor) tokens(i int) []sqlx.Token {
 	if i >= len(e.hl) {
 		return nil
 	}
-	// find the first line needing work before i
-	j := i
-	for j > 0 && (e.hl[j].dirty || !e.hl[j].ok || e.hl[j-1].dirty || !e.hl[j-1].ok) {
-		j--
+	if i < e.hlValid {
+		return e.hl[i].toks
 	}
+	// lex forward from the last line known to be right: a cached line is
+	// reused only when its start state still matches
+	j := e.hlValid
 	var st sqlx.State
 	if j > 0 {
 		st = e.hl[j-1].end
 	}
+	e.hlValid = i + 1
 	for k := j; k <= i; k++ {
 		h := &e.hl[k]
 		if h.ok && !h.dirty && h.start == st {
@@ -426,7 +432,7 @@ func (e *CodeEditor) update(gtx C) {
 		key.Filter{Focus: e, Name: "F", Required: key.ModShortcut},
 		key.Filter{Focus: e, Name: "H", Required: key.ModShortcut},
 		key.Filter{Focus: e, Name: "K", Required: key.ModShortcut | key.ModShift},
-		key.Filter{Focus: e, Name: "/", Required: key.ModShortcut},
+		key.Filter{Focus: e, Name: "/", Required: key.ModShortcut, Optional: key.ModShift},
 		key.Filter{Focus: e, Name: key.NameSpace, Required: key.ModCtrl},
 		key.Filter{Focus: e, Name: key.NameF3, Optional: key.ModShift},
 		key.Filter{Focus: e, Name: "U", Required: key.ModShortcut | key.ModShift},
@@ -677,7 +683,7 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 			from := e.buf.left(e.caret)
 			if word {
 				from = e.buf.wordLeft(e.caret)
-			} else if l := e.buf.lines[e.caret.line]; e.caret.col > 0 && strings.TrimSpace(l[:e.caret.col]) == "" && e.caret.col%4 == 0 {
+			} else if l := e.buf.lines[e.caret.line]; e.caret.col > 0 && strings.Trim(l[:e.caret.col], " ") == "" && e.caret.col%4 == 0 {
 				from = tpos{e.caret.line, e.caret.col - 4} // unindent
 			} else if e.caret.col > 0 && e.caret.col < len(l) {
 				// remove an empty bracket pair
@@ -905,7 +911,7 @@ func (e *CodeEditor) moveLines(d int) {
 	}
 	caret.line += d
 	anchor.line += d
-	e.caret, e.anchor = caret, anchor
+	e.caret, e.anchor = e.buf.clamp(caret), e.buf.clamp(anchor)
 }
 
 // posAt maps a point in the text area to a position.
@@ -1047,7 +1053,9 @@ func (e *CodeEditor) Layout(gtx C) D {
 		} else if cy+e.lineH > e.scrollY+size.Y {
 			e.scrollY = cy + e.lineH - size.Y
 		}
-		cx := int(float32(visCol(e.buf.lines[e.caret.line], e.caret.col)) * e.charW)
+		vc := visCol(e.buf.lines[e.caret.line], e.caret.col)
+		e.maxVisCols = max(e.maxVisCols, vc)
+		cx := int(float32(vc) * e.charW)
 		textW := size.X - e.gutterW - gtx.Dp(14)
 		if cx < e.scrollX {
 			e.scrollX = max(0, cx-gtx.Dp(40))

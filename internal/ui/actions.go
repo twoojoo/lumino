@@ -581,7 +581,7 @@ func (a *App) onKey(gtx C, e key.Event) {
 	case short && e.Name == "R" || e.Name == key.NameF5:
 		switch t := a.activeTab().(type) {
 		case *TableTab:
-			t.reload()
+			t.refresh(nil)
 		case *ConsoleTab:
 			t.run(false)
 		}
