@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"strings"
 
 	"gioui.org/io/event"
 	"gioui.org/io/pointer"
@@ -289,4 +290,22 @@ func (a *App) currentSchema() string {
 		return t.schema
 	}
 	return a.sidebar.selectedSchema()
+}
+
+// requestClose asks before quitting with open transactions or unsaved
+// edits, then runs close.
+func (a *App) requestClose(close func()) {
+	var why []string
+	for _, t := range a.tabs {
+		if d := t.Dirty(); d != "" {
+			why = append(why, "• "+t.Title()+": "+d)
+		}
+	}
+	if len(why) == 0 {
+		close()
+		return
+	}
+	c := newConfirm(a, "Quit "+AppName+"?", strings.Join(why, "\n")+"\n\nOpen transactions are rolled back.", true, func(bool) { close() })
+	c.okLabel = "Quit anyway"
+	a.overlay = c
 }

@@ -44,6 +44,9 @@ type Hooks struct {
 	CurrentSchema    func(ctx context.Context, q Querier) (string, error)
 	SetCurrentSchema func(ctx context.Context, q Querier, schema string) error
 	SetReadOnly      func(ctx context.Context, q Querier, on bool) error
+	// Notices returns a function draining the server notices of a session
+	// connection (RAISE NOTICE, PRINT…), registered when the session opens.
+	Notices func(c *sql.Conn) func() []string
 	// MapError converts driver errors (position, code).
 	MapError func(err error) error
 	// TxOptions used by Begin (nil = driver default).
@@ -122,6 +125,8 @@ type Session struct {
 	id       string
 	readOnly bool
 
+	notices func() []string
+
 	mu      sync.Mutex
 	cancel  context.CancelFunc // of the running statement / open cursor
 	running bool
@@ -155,6 +160,9 @@ func (s *Session) connect(ctx context.Context) error {
 	}
 	if s.readOnly && s.c.H.SetReadOnly != nil {
 		_ = s.c.H.SetReadOnly(ctx, conn, true)
+	}
+	if h := s.c.H.Notices; h != nil {
+		s.notices = h(conn)
 	}
 	s.conn = conn
 	return nil
@@ -283,7 +291,7 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 		if err != nil {
 			n = -1
 		}
-		return &Result{exec: true, affected: n, elapsed: time.Since(start)}, nil
+		return &Result{s: s, exec: true, affected: n, elapsed: time.Since(start)}, nil
 	}
 	r, err := s.q().QueryContext(rctx, stmt, args...)
 	done()
@@ -446,6 +454,7 @@ type Result struct {
 	elapsed  time.Duration
 	done     bool
 	closed   bool
+	msgs     []string
 	mu       sync.Mutex
 }
 
@@ -541,7 +550,13 @@ func (r *Result) Columns() []db.Column {
 
 func (r *Result) RowsAffected() int64 { return r.affected }
 
-func (r *Result) Messages() []string { return nil }
+// Messages drains the server notices received so far.
+func (r *Result) Messages() []string {
+	if r.s == nil || r.s.notices == nil {
+		return r.msgs
+	}
+	return append(r.msgs, r.s.notices()...)
+}
 
 // Fetch reads up to n rows.
 func (r *Result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {

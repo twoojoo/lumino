@@ -438,6 +438,9 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 					res.Close()
 				}
 				rs.err = err
+				if res != nil {
+					rs.notices = res.Messages()
+				}
 				if k := db.Classify(st.Text, lex); k == db.StmtDDL || k == db.StmtDestructive {
 					ddl = true
 				}
@@ -496,6 +499,9 @@ func (t *ConsoleTab) addResult(gen int, rs *resultSet) {
 	short := strings.ReplaceAll(rs.sql, "\n", " ")
 	if len(short) > 90 {
 		short = short[:90] + "…"
+	}
+	for _, n := range rs.notices {
+		t.log(false, "%s", n)
 	}
 	if rs.err != nil {
 		t.log(true, "%s\n%s", short, rs.err)

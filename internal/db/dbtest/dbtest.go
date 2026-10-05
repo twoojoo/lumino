@@ -83,8 +83,10 @@ func Reachable(addr string) bool {
 	return true
 }
 
-// Run executes the conformance suite.
-func Run(t *testing.T, tg Target) {
+// Prepare connects to a target (waiting for the server to start) and
+// loads its fixture. It skips the test when the server isn't reachable.
+func Prepare(t *testing.T, tg Target) db.Conn {
+	t.Helper()
 	if tg.Config.Host != "" {
 		addr := tg.Config.Addr(0)
 		if !Reachable(addr) {
@@ -115,7 +117,6 @@ func Run(t *testing.T, tg Target) {
 	}
 	t.Cleanup(func() { conn.Close() })
 	t.Logf("%s: %s", tg.Name, conn.ServerVersion())
-
 	if err := Load(ctx, conn, tg.Fixture); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
@@ -124,6 +125,19 @@ func Run(t *testing.T, tg Target) {
 			t.Fatalf("fixture data: %v", err)
 		}
 	}
+	return conn
+}
+
+// Ref names a fixture table of the target.
+func (tg *Target) Ref(name string) db.ObjectRef { return tg.ref(name) }
+
+// ID folds a fixture identifier like the server.
+func (tg *Target) ID(s string) string { return tg.id(s) }
+
+// Run executes the conformance suite.
+func Run(t *testing.T, tg Target) {
+	conn := Prepare(t, tg)
+	ctx := context.Background()
 	caps := conn.Caps()
 	cat := conn.Catalog()
 	d := conn.Dialect()

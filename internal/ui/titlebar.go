@@ -49,7 +49,7 @@ func (t *TitleBar) Layout(gtx C) D {
 		}
 	}
 	if t.closeBtn.Clicked(gtx) {
-		t.perform(system.ActionClose)
+		a.requestClose(func() { t.perform(system.ActionClose) })
 	}
 	if t.prefsBtn.Clicked(gtx) {
 		a.overlay = newPrefsPanel(a)

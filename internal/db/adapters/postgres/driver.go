@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,7 @@ func ConnConfig(cfg *db.Config, defPort int, defDB string) (*pgx.ConnConfig, err
 	cc.ConnectTimeout = 15 * time.Second
 	cc.Fallbacks = nil
 	cc.RuntimeParams = map[string]string{"application_name": "lumino"}
+	cc.OnNotice = collectNotice
 	for k, v := range cfg.Params {
 		cc.RuntimeParams[k] = v
 	}
@@ -145,7 +147,52 @@ func Hooks() sqlbase.Hooks {
 			_, err := q.ExecContext(ctx, "SET SESSION CHARACTERISTICS AS TRANSACTION "+mode)
 			return err
 		},
+		Notices:  sessionNotices,
 		MapError: MapError,
+	}
+}
+
+// notices buffers the server notices of each session connection.
+var notices sync.Map // *pgconn.PgConn → *noticeBuf
+
+type noticeBuf struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func collectNotice(pc *pgconn.PgConn, n *pgconn.Notice) {
+	v, ok := notices.Load(pc)
+	if !ok {
+		return // pool connections: nobody reads them
+	}
+	b := v.(*noticeBuf)
+	b.mu.Lock()
+	if len(b.msgs) < 1000 {
+		b.msgs = append(b.msgs, n.Severity+": "+n.Message)
+	}
+	b.mu.Unlock()
+}
+
+// sessionNotices registers a session connection and returns its drain.
+func sessionNotices(c *sql.Conn) func() []string {
+	var pc *pgconn.PgConn
+	_ = c.Raw(func(dc any) error {
+		if sc, ok := dc.(*stdlib.Conn); ok {
+			pc = sc.Conn().PgConn()
+		}
+		return nil
+	})
+	if pc == nil {
+		return nil
+	}
+	b := &noticeBuf{}
+	notices.Store(pc, b)
+	return func() []string {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		out := b.msgs
+		b.msgs = nil
+		return out
 	}
 }
 

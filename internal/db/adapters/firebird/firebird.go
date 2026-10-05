@@ -175,7 +175,9 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	sdb.SetMaxIdleConns(4)
+	// idle attachments keep their transaction context (and metadata locks)
+	// open with this driver: DDL from other sessions would wait on them
+	sdb.SetMaxIdleConns(0)
 	sdb.SetConnMaxIdleTime(5 * time.Minute)
 	if err := sdb.PingContext(ctx); err != nil {
 		sdb.Close()

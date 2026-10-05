@@ -148,3 +148,31 @@ func TestSSHTunnel(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresNotices(t *testing.T) {
+	needs(t, "127.0.0.1:55432")
+	conn := ping(t, db.Config{Driver: "postgres", Host: "127.0.0.1", Port: 55432, Database: "lumino", User: "lumino", Password: "lumino"}, db.OpenOptions{})
+	s, err := conn.Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	res, err := s.Execute(context.Background(), "DO $$ BEGIN RAISE NOTICE 'hello %', 42; END $$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := res.Messages()
+	res.Close()
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "hello 42") {
+		t.Fatalf("notices %q", msgs)
+	}
+	// drained: the next statement doesn't repeat them
+	res, err = s.Execute(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := res.Messages(); len(m) != 0 {
+		t.Fatalf("notices not drained: %q", m)
+	}
+	res.Close()
+}

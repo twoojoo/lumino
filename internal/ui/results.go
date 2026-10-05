@@ -27,6 +27,7 @@ type resultSet struct {
 	elapsed   time.Duration
 	started   time.Time
 	partial   string // why the cursor was closed before the end
+	notices   []string
 	limitHit  bool
 	gen       int // console run generation (stale guard)
 

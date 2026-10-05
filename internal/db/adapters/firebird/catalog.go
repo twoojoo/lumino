@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/giovanni/lumino/internal/db"
 	"github.com/giovanni/lumino/internal/db/sqlbase"
@@ -15,6 +16,68 @@ type catalog struct {
 	d  *dialect
 }
 
+// recs runs a catalog query in its own read-only transaction, committed
+// right away: an idle pooled attachment that keeps a transaction open holds
+// metadata locks and blocks DDL from other sessions.
+func (c *catalog) recs(ctx context.Context, query string, args ...any) ([]sqlbase.Rec, error) {
+	// not ReadOnly: the driver would keep the connection read-only afterwards
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	recs, err := sqlbase.Recs(ctx, tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return recs, tx.Commit()
+}
+
+func (c *catalog) parallel(ctx context.Context, qs ...sqlbase.Q) ([][]sqlbase.Rec, error) {
+	out := make([][]sqlbase.Rec, len(qs))
+	errs := make([]error, len(qs))
+	var wg sync.WaitGroup
+	for i, q := range qs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i], errs[i] = c.recs(ctx, q.SQL, q.Args...)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (c *catalog) one(ctx context.Context, query string, args ...any) (string, error) {
+	recs, err := c.recs(ctx, query, args...)
+	if err != nil || len(recs) == 0 {
+		return "", err
+	}
+	for _, v := range recs[0] {
+		return v, nil
+	}
+	return "", nil
+}
+
+func (c *catalog) strings(ctx context.Context, query string, args ...any) ([]string, error) {
+	recs, err := c.recs(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(recs))
+	for _, r := range recs {
+		for _, v := range r {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
 func (c *catalog) Catalogs(ctx context.Context) ([]string, error) { return nil, db.ErrNotSupported }
 
 func (c *catalog) Schemas(ctx context.Context, _ string) ([]db.Schema, error) {
@@ -22,7 +85,7 @@ func (c *catalog) Schemas(ctx context.Context, _ string) ([]db.Schema, error) {
 }
 
 func (c *catalog) Objects(ctx context.Context, _ db.ObjectRef, types ...db.ObjectType) ([]db.Object, error) {
-	res, err := sqlbase.RecsParallel(ctx, c.db,
+	res, err := c.parallel(ctx,
 		sqlbase.Q{SQL: `SELECT TRIM(r.RDB$RELATION_NAME) AS name, CASE WHEN r.RDB$VIEW_BLR IS NULL THEN 0 ELSE 1 END AS isview,
        r.RDB$DESCRIPTION AS cmt
 FROM RDB$RELATIONS r WHERE COALESCE(r.RDB$SYSTEM_FLAG, 0) = 0 ORDER BY 1`},
@@ -147,7 +210,7 @@ var fbRule = map[string]string{"RESTRICT": "NO ACTION", "NO ACTION": "NO ACTION"
 
 func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, error) {
 	name := ref.Name
-	res, err := sqlbase.RecsParallel(ctx, c.db,
+	res, err := c.parallel(ctx,
 		sqlbase.Q{SQL: `SELECT TRIM(rf.RDB$FIELD_NAME) AS name, ` + fieldSQL + `,
        COALESCE(rf.RDB$NULL_FLAG, f.RDB$NULL_FLAG, 0) AS notnull,
        COALESCE(rf.RDB$DEFAULT_SOURCE, f.RDB$DEFAULT_SOURCE) AS def,
@@ -291,7 +354,7 @@ func psql(stmts ...string) string {
 }
 
 func (c *catalog) params(ctx context.Context, q string, name string) ([]sqlbase.Rec, error) {
-	recs, err := sqlbase.Recs(ctx, c.db, q, name)
+	recs, err := c.recs(ctx, q, name)
 	return recs, mapError(err)
 }
 
@@ -299,11 +362,11 @@ func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 	q := c.d.Quote
 	switch ref.Type {
 	case db.ObjView:
-		src, err := sqlbase.One(ctx, c.db, "SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ?", ref.Name)
+		src, err := c.one(ctx, "SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ?", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}
-		cols, err := sqlbase.Strings(ctx, c.db, "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME = ? ORDER BY RDB$FIELD_POSITION", ref.Name)
+		cols, err := c.strings(ctx, "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME = ? ORDER BY RDB$FIELD_POSITION", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}
@@ -312,7 +375,7 @@ func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 		}
 		return fmt.Sprintf("CREATE OR ALTER VIEW %s (%s) AS\n%s;\n", q(ref.Name), strings.Join(cols, ", "), strings.TrimSpace(src)), nil
 	case db.ObjSequence:
-		recs, err := sqlbase.Recs(ctx, c.db, "SELECT COALESCE(RDB$INITIAL_VALUE, 0) AS init, COALESCE(RDB$GENERATOR_INCREMENT, 1) AS inc FROM RDB$GENERATORS WHERE RDB$GENERATOR_NAME = ?", ref.Name)
+		recs, err := c.recs(ctx, "SELECT COALESCE(RDB$INITIAL_VALUE, 0) AS init, COALESCE(RDB$GENERATOR_INCREMENT, 1) AS inc FROM RDB$GENERATORS WHERE RDB$GENERATOR_NAME = ?", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}
@@ -321,7 +384,7 @@ func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 		}
 		return fmt.Sprintf("CREATE SEQUENCE %s START WITH %s INCREMENT BY %s;\n", q(ref.Name), recs[0]["init"], recs[0]["inc"]), nil
 	case db.ObjProcedure:
-		src, err := sqlbase.One(ctx, c.db, "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME = ? AND RDB$PACKAGE_NAME IS NULL", ref.Name)
+		src, err := c.one(ctx, "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME = ? AND RDB$PACKAGE_NAME IS NULL", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}
@@ -349,7 +412,7 @@ WHERE p.RDB$PROCEDURE_NAME = ? AND p.RDB$PACKAGE_NAME IS NULL ORDER BY p.RDB$PAR
 		}
 		return psql(head + "\nAS\n" + strings.TrimSpace(src)), nil
 	case db.ObjFunction:
-		src, err := sqlbase.One(ctx, c.db, "SELECT RDB$FUNCTION_SOURCE FROM RDB$FUNCTIONS WHERE RDB$FUNCTION_NAME = ? AND RDB$PACKAGE_NAME IS NULL", ref.Name)
+		src, err := c.one(ctx, "SELECT RDB$FUNCTION_SOURCE FROM RDB$FUNCTIONS WHERE RDB$FUNCTION_NAME = ? AND RDB$PACKAGE_NAME IS NULL", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}
@@ -414,7 +477,7 @@ WHERE a.RDB$FUNCTION_NAME = ? AND a.RDB$PACKAGE_NAME IS NULL ORDER BY a.RDB$ARGU
 	}
 	backing := map[string]bool{}
 	if len(t.PrimaryKey) > 0 {
-		pk, _ := sqlbase.One(ctx, c.db, "SELECT TRIM(RDB$CONSTRAINT_NAME) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$RELATION_NAME = ? AND RDB$CONSTRAINT_TYPE = 'PRIMARY KEY'", ref.Name)
+		pk, _ := c.one(ctx, "SELECT TRIM(RDB$CONSTRAINT_NAME) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$RELATION_NAME = ? AND RDB$CONSTRAINT_TYPE = 'PRIMARY KEY'", ref.Name)
 		defs = append(defs, named(pk)+"PRIMARY KEY ("+list(t.PrimaryKey)+")")
 	}
 	for _, ct := range t.Constraints {
@@ -438,7 +501,7 @@ WHERE a.RDB$FUNCTION_NAME = ? AND a.RDB$PACKAGE_NAME IS NULL ORDER BY a.RDB$ARGU
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n%s\n);\n", q(ref.Name), strings.Join(defs, ",\n"))
 	// indexes created by constraints share the constraint name
-	cons, _ := sqlbase.Strings(ctx, c.db, "SELECT TRIM(RDB$INDEX_NAME) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$RELATION_NAME = ? AND RDB$INDEX_NAME IS NOT NULL", ref.Name)
+	cons, _ := c.strings(ctx, "SELECT TRIM(RDB$INDEX_NAME) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$RELATION_NAME = ? AND RDB$INDEX_NAME IS NOT NULL", ref.Name)
 	for _, n := range cons {
 		backing[n] = true
 	}
@@ -482,7 +545,7 @@ func isIdent(s string) bool {
 }
 
 func (c *catalog) Completion(ctx context.Context, _ db.ObjectRef) (map[string][]string, error) {
-	recs, err := sqlbase.Recs(ctx, c.db, `SELECT TRIM(rf.RDB$RELATION_NAME) AS t, TRIM(rf.RDB$FIELD_NAME) AS c
+	recs, err := c.recs(ctx, `SELECT TRIM(rf.RDB$RELATION_NAME) AS t, TRIM(rf.RDB$FIELD_NAME) AS c
 FROM RDB$RELATION_FIELDS rf JOIN RDB$RELATIONS r ON r.RDB$RELATION_NAME = rf.RDB$RELATION_NAME
 WHERE COALESCE(r.RDB$SYSTEM_FLAG, 0) = 0 ORDER BY 1, rf.RDB$FIELD_POSITION`)
 	if err != nil {

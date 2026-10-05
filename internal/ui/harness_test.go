@@ -417,3 +417,115 @@ func TestUIPostgresTransactions(t *testing.T) {
 	c.run(false)
 	h.waitFor("after cancel", func() bool { return !c.running && len(c.results) == 1 && c.results[0].err == nil })
 }
+
+// TestUIAllDatabases drives the main flows on every development database:
+// console query, table data, cell edit + save, structure and DDL.
+func TestUIAllDatabases(t *testing.T) {
+	for _, name := range []string{"postgres", "cockroach", "mysql", "mariadb", "tidb", "sqlite", "sqlserver", "oracle",
+		"clickhouse", "firebird", "trino", "scylla", "cassandra"} {
+		t.Run(name, func(t *testing.T) {
+			tg := dbtest.Targets()[name]
+			conn := dbtest.Prepare(t, tg)
+			d := conn.Dialect()
+			cfg := tg.Config
+			cfg.ID, cfg.Name, cfg.SavePassword = "db-"+name, name+" dev", true
+			h := newHarness(t, []db.Config{cfg}, Options{Connection: cfg.Name})
+			a := h.a
+			h.waitFor("console", func() bool { return h.console() != nil && a.connState(cfg.ID).status == stReady })
+			c := h.console()
+			cust := tg.Ref("customers")
+			q := "SELECT * FROM " + d.Qualified(cust)
+			if !tg.NoOrderBy {
+				q += " ORDER BY " + d.Quote(tg.ID("id"))
+			}
+			c.ed.SetText(q)
+			c.run(false)
+			h.waitFor("query", func() bool { return !c.running && len(c.results) == 1 })
+			if rs := c.results[0]; rs.err != nil || len(rs.rows) < 3 {
+				t.Fatalf("console: err=%v rows=%d", rs.err, len(rs.rows))
+			}
+			h.shot("all-" + name + "-1-console")
+
+			a.openObject(cfg.ID, cust, "data")
+			tt := a.activeTab().(*TableTab)
+			h.waitFor("table", func() bool { return tt.data != nil && tt.info != nil || tt.loadErr != nil })
+			if tt.loadErr != nil {
+				t.Fatalf("table data: %v", tt.loadErr)
+			}
+			h.shot("all-" + name + "-2-table")
+			if why := tt.readOnlyReason(); why == "" {
+				// edit the name of the customer with id 1
+				row, nameCol := -1, -1
+				for i, col := range tt.data.rs.cols {
+					if strings.EqualFold(col.Name, "name") {
+						nameCol = i
+					}
+				}
+				for r := 0; r < tt.data.Rows(); r++ {
+					for i, col := range tt.data.rs.cols {
+						if strings.EqualFold(col.Name, "id") && db.FormatValue(tt.data.Value(r, i), col.Kind) == "1" {
+							row = r
+						}
+					}
+				}
+				if row < 0 || nameCol < 0 {
+					t.Fatalf("customer 1 not found")
+				}
+				tt.setText(row, nameCol, "Ada (edited in "+name+")", false)
+				if tt.data.pending() != 1 {
+					t.Fatalf("pending %d", tt.data.pending())
+				}
+				tt.review()
+				rev, ok := a.overlay.(*SQLReview)
+				if !ok {
+					t.Fatalf("no review: %T (status %q)", a.overlay, a.status)
+				}
+				h.frame()
+				h.shot("all-" + name + "-3-review")
+				rev.done = true
+				rev.apply()
+				h.waitFor("saved", func() bool { return tt.data != nil && tt.data.pending() == 0 && !tt.running })
+				if tg.Eventual {
+					time.Sleep(1500 * time.Millisecond)
+				}
+				s, err := conn.Session(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, rows, err := dbtest.Query(context.Background(), s, "SELECT "+d.Quote(tg.ID("name"))+" FROM "+d.Qualified(cust)+" WHERE "+d.Quote(tg.ID("id"))+" = 1")
+				s.Close()
+				if err != nil || len(rows) != 1 || rows[0][0] != "Ada (edited in "+name+")" {
+					t.Fatalf("edit not saved: %v %v (status %q)", rows, err, a.status)
+				}
+			} else {
+				t.Logf("read-only table: %s", why)
+			}
+			tt.show("structure")
+			h.waitFor("structure", func() bool { return tt.info != nil })
+			h.shot("all-" + name + "-4-structure")
+			tt.show("ddl")
+			h.waitFor("ddl", func() bool { return tt.ddlState == 2 })
+			if tt.ddlErr != nil || !strings.Contains(strings.ToLower(tt.ddl.Text()), "customers") {
+				t.Fatalf("ddl: %v %q", tt.ddlErr, tt.ddl.Text())
+			}
+			h.shot("all-" + name + "-5-ddl")
+			// navigator: expand down to the tables
+			cs := a.connState(cfg.ID)
+			k := metaKey{catalog: tg.Catalog, schema: tg.Schema}
+			if cs.caps().Catalogs {
+				a.sidebar.expand(catKey(cfg.ID, tg.Catalog), true)
+			}
+			a.sidebar.expand(schemaKey(cfg.ID, k), true)
+			a.sidebar.expand(folderKey(cfg.ID, k, db.ObjTable), true)
+			h.waitFor("tree", func() bool {
+				for _, r := range a.sidebar.rows {
+					if r.kind == nObject && strings.EqualFold(r.ref.Name, "customers") {
+						return true
+					}
+				}
+				return false
+			})
+			h.shot("all-" + name + "-6-tree")
+		})
+	}
+}
