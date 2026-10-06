@@ -48,6 +48,9 @@ type Prefs struct {
 	NotifyAfter  int          `json:"notifyAfter,omitempty"`  // seconds before a finished query notifies (default 10)
 	Expanded     []string     `json:"expanded,omitempty"`     // tree nodes left open
 	SidebarWidth int          `json:"sidebarWidth,omitempty"`
+	// OrderByPK: table data is sorted by primary key unless a column is
+	// sorted (nil = on).
+	OrderByPK *bool `json:"orderByPrimaryKey,omitempty"`
 	// ValuePanelWidth is the width of the value panel drawer (px, 0 = default).
 	ValuePanelWidth int            `json:"valuePanelWidth,omitempty"`
 	FontSize        int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
@@ -176,6 +179,13 @@ func (p *Prefs) MoveConn(id string, to int) {
 
 // UpdatesEnabled reports whether lumino looks for new releases (default on).
 func (p *Prefs) UpdatesEnabled() bool { return p.CheckUpdates == nil || *p.CheckUpdates }
+
+// OrderByPrimaryKey reports whether table data is sorted by primary key
+// when no column is sorted (default on).
+func (p *Prefs) OrderByPrimaryKey() bool { return p.OrderByPK == nil || *p.OrderByPK }
+
+// SetOrderByPrimaryKey turns the default primary key order on or off.
+func (p *Prefs) SetOrderByPrimaryKey(on bool) { p.OrderByPK = &on }
 
 // SetUpdates turns release checks on or off.
 func (p *Prefs) SetUpdates(on bool) { p.CheckUpdates = &on }

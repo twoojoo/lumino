@@ -21,6 +21,7 @@ type PrefsPanel struct {
 	fontBtns              [5]widget.Clickable
 	fetch, maxRows, notif widget.Editor
 	updAutoBtn, updNowBtn widget.Clickable
+	orderPKBtn            widget.Clickable
 	saveBtn, closeBtn     widget.Clickable
 	err                   string
 }
@@ -100,6 +101,10 @@ func (p *PrefsPanel) Layout(gtx C) D {
 			a.checkUpdates(false)
 		}
 	}
+	if p.orderPKBtn.Clicked(gtx) {
+		a.prefs.SetOrderByPrimaryKey(!a.prefs.OrderByPrimaryKey())
+		a.savePrefs()
+	}
 	if p.updNowBtn.Clicked(gtx) {
 		p.done = true
 		a.checkUpdates(true)
@@ -147,6 +152,11 @@ func (p *PrefsPanel) Layout(gtx C) D {
 			}),
 			layout.Rigid(func(gtx C) D {
 				return formRow(gtx, th, "Notify after (s)", lw, func(gtx C) D { return textField(gtx, th, &p.notif, "10", true) })
+			}),
+			layout.Rigid(func(gtx C) D {
+				return layout.Inset{Top: 4}.Layout(gtx, func(gtx C) D {
+					return toggle(gtx, th, &p.orderPKBtn, "Sort table data by primary key unless a column is sorted", a.prefs.OrderByPrimaryKey())
+				})
 			}),
 			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Security") }),
 			layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontSans, 12, pal.Text, keyring) }),

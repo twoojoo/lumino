@@ -103,3 +103,51 @@ INSERT INTO docs VALUES (1, '{"a":1,"b":[1,2]}', 'plain'), (2, 'not json', 'x');
 	}
 	h.shot("41-value-json-wide")
 }
+
+// TestUITableDefaultOrder: table data is sorted by primary key unless a
+// column is sorted or the preference is off.
+func TestUITableDefaultOrder(t *testing.T) {
+	path := sqliteFixture(t, 10)
+	cfg := db.Config{Driver: "sqlite", File: path}
+	conn, err := db.Open(context.Background(), &cfg, db.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbtest.Load(context.Background(), conn, `CREATE TABLE ord (k TEXT PRIMARY KEY, v INT);
+INSERT INTO ord VALUES ('b', 1), ('a', 2), ('c', 3);`); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	h := newHarness(t, []db.Config{{ID: "lite", Name: "local sqlite", Driver: "sqlite", File: path}}, Options{Connection: "local sqlite"})
+	a := h.a
+	h.waitFor("connected", func() bool { return a.connState("lite").status == stReady })
+	keys := func(tt *TableTab) string {
+		s := ""
+		for i := range tt.data.rs.rows {
+			s += tt.data.Value(i, 0).(string)
+		}
+		return s
+	}
+	open := func() *TableTab {
+		a.openObject("lite", db.ObjectRef{Schema: "main", Name: "ord", Type: db.ObjTable}, "data")
+		var tt *TableTab
+		h.waitFor("table", func() bool {
+			tt, _ = a.activeTab().(*TableTab)
+			return tt != nil && tt.data != nil && len(tt.data.rs.rows) == 3
+		})
+		return tt
+	}
+	tt := open()
+	if got := keys(tt); got != "abc" || tt.grid.SortCol != 0 {
+		t.Fatalf("default order %q (sort col %d, query %s)", got, tt.grid.SortCol, tt.query)
+	}
+	tt.sortBy(0) // the key column header: descending
+	h.waitFor("desc", func() bool { return !tt.running && tt.data != nil && keys(tt) == "cba" })
+
+	a.removeTab(tt)
+	a.prefs.SetOrderByPrimaryKey(false)
+	tt = open()
+	if got := keys(tt); got != "bac" || tt.grid.SortCol != -1 {
+		t.Fatalf("natural order %q (sort col %d)", got, tt.grid.SortCol)
+	}
+}

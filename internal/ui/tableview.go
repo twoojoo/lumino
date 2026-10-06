@@ -504,6 +504,25 @@ func (t *TableTab) reload() {
 		return
 	}
 	a := t.a
+	// default order: the primary key (needs the table description)
+	// (not CQL: ORDER BY needs a restricted partition key there)
+	pkOrder := t.sortCol < 0 && t.ref.Type == db.ObjTable && a.prefs.OrderByPrimaryKey() && t.cs().info().DialectName != "cql"
+	if pkOrder && t.info == nil && t.infoErr == nil {
+		t.ensureInfo() // Layout calls reload again once it is loaded
+		return
+	}
+	t.order = nil
+	if t.sortCol >= 0 && t.data != nil && t.sortCol < len(t.data.rs.cols) {
+		dir := " ASC"
+		if t.sortDsc {
+			dir = " DESC"
+		}
+		t.order = []string{t.cs().dialect().Quote(t.data.rs.cols[t.sortCol].Name) + dir}
+	} else if pkOrder && t.info != nil {
+		for _, k := range t.info.PrimaryKey {
+			t.order = append(t.order, t.cs().dialect().Quote(k)+" ASC")
+		}
+	}
 	t.running, t.loadErr, t.count = true, nil, ""
 	t.gen++
 	gen := t.gen
@@ -546,6 +565,9 @@ func (t *TableTab) reload() {
 				t.data = newTableData(rs)
 				t.grid.SetModel(t.data)
 				t.grid.SortCol, t.grid.SortDesc = t.sortCol, t.sortDsc
+				if t.sortCol < 0 && len(t.order) > 0 {
+					t.grid.SortCol = t.pkSortCol() // the default key order shows on its column
+				}
 			})
 		}()
 	}, func(err error) {
@@ -563,7 +585,14 @@ func (t *TableTab) sortBy(c int) {
 		t.a.flash("Save or revert the pending changes before sorting", true)
 		return
 	}
+	if t.cs().info().DialectName == "cql" {
+		t.a.flash("Cassandra sorts only by clustering columns within one partition: use a console query", true)
+		return
+	}
 	switch {
+	case t.sortCol < 0 && c == t.pkSortCol():
+		// already ascending by this key column (default order): descending
+		t.sortCol, t.sortDsc = c, true
 	case t.sortCol != c:
 		t.sortCol, t.sortDsc = c, false
 	case !t.sortDsc:
@@ -571,15 +600,21 @@ func (t *TableTab) sortBy(c int) {
 	default:
 		t.sortCol = -1
 	}
-	t.order = nil
-	if t.sortCol >= 0 {
-		dir := " ASC"
-		if t.sortDsc {
-			dir = " DESC"
-		}
-		t.order = []string{t.cs().dialect().Quote(t.data.rs.cols[t.sortCol].Name) + dir}
+	t.reload() // builds the ORDER BY
+}
+
+// pkSortCol is the result column of a single-column primary key used as
+// the default order (-1 otherwise).
+func (t *TableTab) pkSortCol() int {
+	if t.info == nil || len(t.info.PrimaryKey) != 1 || t.data == nil || !t.a.prefs.OrderByPrimaryKey() || t.cs().info().DialectName == "cql" {
+		return -1
 	}
-	t.reload()
+	for i, c := range t.data.rs.cols {
+		if c.Name == t.info.PrimaryKey[0] {
+			return i
+		}
+	}
+	return -1
 }
 
 // setText applies a grid edit (parsed for the column kind).
