@@ -38,11 +38,16 @@ func mcrRun(t *testing.T, name string) {
 		mysqlExec(t, s, "DROP DATABASE IF EXISTS mcr_other")
 	})
 	expr := ", e int DEFAULT (1+2)"
+	hcol := " h varchar(20) DEFAULT 'CURRENT_TIMESTAMP',"
+	wantI := "-1.50"
 	if name == "tidb" {
-		expr = ""
+		// TiDB: no expression defaults; SHOW CREATE TABLE prints a varchar
+		// default 'CURRENT_TIMESTAMP' unquoted (server bug); decimals are
+		// reported unpadded
+		expr, hcol, wantI = "", "", "-1.5"
 	}
 	mysqlExec(t, s, `CREATE TABLE mcr_cat.t (id int PRIMARY KEY, a varchar(10) DEFAULT 'abc', b varchar(10) NOT NULL DEFAULT '',
-  c timestamp NULL DEFAULT CURRENT_TIMESTAMP, d int DEFAULT 5, h varchar(20) DEFAULT 'CURRENT_TIMESTAMP',
+  c timestamp NULL DEFAULT CURRENT_TIMESTAMP, d int DEFAULT 5,`+hcol+`
   j varchar(9) DEFAULT 'it''s', q varchar(5) DEFAULT 'a\\b', i decimal(5,2) DEFAULT -1.5, k varchar(3) DEFAULT NULL`+expr+`)`)
 	if name != "tidb" {
 		// unqualified, lower case: MariaDB keeps the original text
@@ -61,7 +66,10 @@ func mcrRun(t *testing.T, name string) {
 			t.Errorf("k default = %q", c.Default)
 		}
 	}
-	for col, want := range map[string]string{"a": "'abc'", "b": "''", "d": "5", "h": "'CURRENT_TIMESTAMP'", "j": "'it''s'", "i": "-1.50"} {
+	for col, want := range map[string]string{"a": "'abc'", "b": "''", "d": "5", "h": "'CURRENT_TIMESTAMP'", "j": "'it''s'", "i": wantI} {
+		if hcol == "" && col == "h" {
+			continue
+		}
 		if defs[col] != want {
 			t.Errorf("default of %s = %q, want %q", col, defs[col], want)
 		}
@@ -72,6 +80,9 @@ func mcrRun(t *testing.T, name string) {
 	// every default evaluates to the value a plain INSERT stores
 	mysqlExec(t, s, "INSERT INTO mcr_cat.t (id) VALUES (1)")
 	for _, col := range []string{"a", "b", "h", "j", "q", "i"} {
+		if hcol == "" && col == "h" {
+			continue
+		}
 		if v := fmt.Sprint(mysqlScalar(t, s, "SELECT "+col+" = "+defs[col]+" FROM mcr_cat.t WHERE id = 1")); v != "1" && v != "true" {
 			t.Errorf("stored %s differs from its default expression %s (%s)", col, defs[col], v)
 		}

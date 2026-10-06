@@ -5,6 +5,7 @@ package conformance
 import (
 	"context"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -79,7 +80,9 @@ func TestOracleDDLRegressPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after != before {
+	// DBMS_METADATA doesn't list triggers in a stable order: compare the
+	// blocks as a set
+	if ocrBlocks(after) != ocrBlocks(before) {
 		t.Errorf("DDL changed after round trip:\n%s\n---\n%s", before, after)
 	}
 }
@@ -118,7 +121,20 @@ func TestOracleDDLRegressTriggers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after != before {
+	// DBMS_METADATA doesn't list triggers in a stable order: compare the
+	// blocks as a set
+	if ocrBlocks(after) != ocrBlocks(before) {
 		t.Errorf("DDL changed after round trip:\n%s\n---\n%s", before, after)
 	}
+}
+
+// ocrBlocks splits a DDL script at its CREATE statements and returns the
+// blocks sorted, joined.
+func ocrBlocks(ddl string) string {
+	parts := strings.Split(ddl, "CREATE ")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n|\n")
 }
