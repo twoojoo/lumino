@@ -37,19 +37,21 @@ type TabState struct {
 
 // Prefs is the persisted state.
 type Prefs struct {
-	Theme        string         `json:"theme,omitempty"` // ayu-dark | ayu-light
-	Connections  []db.Config    `json:"connections,omitempty"`
-	SavedQueries []SavedQuery   `json:"savedQueries,omitempty"`
-	Tabs         []TabState     `json:"tabs,omitempty"`
-	ActiveTab    int            `json:"activeTab,omitempty"`
-	CheckUpdates *bool          `json:"checkUpdates,omitempty"` // nil = on
-	FetchSize    int            `json:"fetchSize,omitempty"`    // rows per page (default 500)
-	MaxRows      int            `json:"maxRows,omitempty"`      // rows kept in memory per result (default 1M)
-	NotifyAfter  int            `json:"notifyAfter,omitempty"`  // seconds before a finished query notifies (default 10)
-	Expanded     []string       `json:"expanded,omitempty"`     // tree nodes left open
-	SidebarWidth int            `json:"sidebarWidth,omitempty"`
-	FontSize     int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
-	Extra        map[string]any `json:"extra,omitempty"`
+	Theme        string       `json:"theme,omitempty"` // ayu-dark | ayu-light
+	Connections  []db.Config  `json:"connections,omitempty"`
+	SavedQueries []SavedQuery `json:"savedQueries,omitempty"`
+	Tabs         []TabState   `json:"tabs,omitempty"`
+	ActiveTab    int          `json:"activeTab,omitempty"`
+	CheckUpdates *bool        `json:"checkUpdates,omitempty"` // nil = on
+	FetchSize    int          `json:"fetchSize,omitempty"`    // rows per page (default 500)
+	MaxRows      int          `json:"maxRows,omitempty"`      // rows kept in memory per result (default 1M)
+	NotifyAfter  int          `json:"notifyAfter,omitempty"`  // seconds before a finished query notifies (default 10)
+	Expanded     []string     `json:"expanded,omitempty"`     // tree nodes left open
+	SidebarWidth int          `json:"sidebarWidth,omitempty"`
+	// ValuePanelWidth is the width of the value panel drawer (px, 0 = default).
+	ValuePanelWidth int            `json:"valuePanelWidth,omitempty"`
+	FontSize        int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
+	Extra           map[string]any `json:"extra,omitempty"`
 
 	// LoadError reports a settings file that could not be parsed (moved
 	// aside) or read (left in place, and Save refuses to overwrite it).

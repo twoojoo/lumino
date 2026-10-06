@@ -67,6 +67,7 @@ type CodeEditor struct {
 	types   map[string]bool
 	hl      []lineHL
 	hlValid int // lines [0, hlValid) were lexed with their correct start state
+	json    bool // highlight JSON instead of SQL (value panel)
 
 	focused     bool
 	blinkStart  time.Time
@@ -351,15 +352,47 @@ func (e *CodeEditor) tokens(i int) []sqlx.Token {
 			st = h.end
 			continue
 		}
-		toks, end := sqlx.LexLine(e.buf.lines[k], st, e.lex)
+		var toks []sqlx.Token
+		end := st
+		if e.json {
+			toks = jsonLexLine(e.buf.lines[k])
+		} else {
+			toks, end = sqlx.LexLine(e.buf.lines[k], st, e.lex)
+		}
 		*h = lineHL{start: st, end: end, toks: toks, ok: true}
 		st = end
 	}
 	return e.hl[i].toks
 }
 
+// setJSON switches highlighting to JSON.
+func (e *CodeEditor) setJSON() {
+	e.json = true
+	for i := range e.hl {
+		e.hl[i].dirty = true
+	}
+	e.hlValid = 0
+}
+
 func (e *CodeEditor) tokColor(line string, toks []sqlx.Token, i int) colorNRGBA {
 	t := toks[i]
+	if e.json {
+		switch t.Kind {
+		case sqlx.TQuotedIdent: // object key
+			return pal.Func
+		case sqlx.TString:
+			return pal.String
+		case sqlx.TNumber:
+			return pal.Number
+		case sqlx.TWord:
+			return pal.Constant
+		case sqlx.TPunct:
+			return pal.TextDim
+		case sqlx.TOther:
+			return pal.Err // not valid JSON
+		}
+		return pal.Text
+	}
 	switch t.Kind {
 	case sqlx.TComment:
 		return pal.Comment

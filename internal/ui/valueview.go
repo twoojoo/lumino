@@ -11,7 +11,10 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	"gioui.org/io/event"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
@@ -22,9 +25,16 @@ import (
 type valuePanel struct {
 	app  *App
 	open bool
-	mode int // 0 text, 1 JSON, 2 hex
-	ed   widget.Editor
-	list widget.List
+	mode int           // 0 text, 1 JSON, 2 hex
+	ed   widget.Editor // text and hex (wraps long values)
+	jed  *CodeEditor   // JSON (highlighted)
+	// jsonChanged: the JSON editor changed since the edit state was checked
+	jsonChanged bool
+	jsonBad     bool // JSON mode shows a value that isn't valid JSON
+	// manualCol: column whose mode the user picked (other columns get JSON
+	// mode automatically when their type is JSON)
+	manualCol int
+	list      widget.List
 	// the cell shown in the editor
 	r, c                                 int
 	shown                                string
@@ -35,15 +45,74 @@ type valuePanel struct {
 	cache                                renderCache
 	modeBtn                              [3]widget.Clickable
 	copyBtn, nullBtn, applyBtn, closeBtn widget.Clickable
+	indentBtn, compactBtn                widget.Clickable
+	// width of the drawer (px, 0 = default), resized from its inner edge
+	width    int
+	dragTag  int
+	dragging bool
+	grabX    float32
+	grabW    int
 }
 
 func newValuePanel(a *App) *valuePanel {
-	v := &valuePanel{app: a, r: -1, c: -1}
+	v := &valuePanel{app: a, r: -1, c: -1, manualCol: -1}
 	v.list.Axis = layout.Vertical
+	v.jed = newCodeEditor(a, "")
+	v.jed.setJSON()
+	v.jed.OnChange = func() { v.jsonChanged = true }
 	return v
 }
 
-func (v *valuePanel) focused(gtx C) bool { return v.open && gtx.Focused(&v.ed) }
+func (v *valuePanel) focused(gtx C) bool {
+	return v.open && (gtx.Focused(&v.ed) || v.jed.Focused(gtx))
+}
+
+// editorText is the text of the editor of the current mode.
+func (v *valuePanel) editorText() string {
+	if v.mode == 1 {
+		return v.jed.Text()
+	}
+	return v.ed.Text()
+}
+
+func (v *valuePanel) setEditorText(s string) {
+	if v.mode == 1 {
+		v.jed.SetText(s)
+		v.jed.SetCaretOffset(0)
+		v.jsonChanged = false
+		return
+	}
+	v.ed.SetText(s)
+}
+
+// jsonEditable reports whether a value can be edited as JSON: a JSON or
+// text column holding valid JSON.
+func jsonEditable(col db.Column, shown string) bool {
+	switch col.Kind {
+	case db.KindJSON, db.KindText, db.KindOther:
+	default:
+		return false
+	}
+	return json.Valid([]byte(shown))
+}
+
+// jsonForSave validates edited JSON and formats it like the stored value:
+// compact when the original had no line breaks (the panel indents it for
+// reading only).
+func jsonForSave(edited, original string) (string, error) {
+	if !json.Valid([]byte(edited)) {
+		var x any
+		err := json.Unmarshal([]byte(edited), &x)
+		return "", fmt.Errorf("not valid JSON: %v", err)
+	}
+	if !strings.Contains(original, "\n") {
+		var b bytes.Buffer
+		if err := json.Compact(&b, []byte(edited)); err == nil {
+			return b.String(), nil
+		}
+	}
+	return edited, nil
+}
 
 // Limits of the text shown by the panel (huge values would freeze the
 // editor): the rest is replaced by a note and the value becomes read-only.
@@ -169,8 +238,16 @@ func (v *valuePanel) layoutWith(gtx C, g *DataGrid, get func(r, c int) (any, db.
 		v.edited, v.r, v.c = false, -1, -1
 		return g.Layout(gtx)
 	}
-	w := min(gtx.Dp(380), gtx.Constraints.Max.X/2)
-	return layout.Flex{}.Layout(gtx,
+	if v.width == 0 {
+		v.width = v.app.prefs.ValuePanelWidth
+	}
+	w := v.width
+	if w == 0 {
+		w = gtx.Dp(380)
+	}
+	maxW := max(gtx.Dp(260), gtx.Constraints.Max.X-gtx.Dp(220)) // the grid keeps some room
+	w = max(gtx.Dp(260), min(w, maxW))
+	dims := layout.Flex{}.Layout(gtx,
 		layout.Flexed(1, g.Layout),
 		layout.Rigid(func(gtx C) D { return vline(gtx, pal.Border) }),
 		layout.Rigid(func(gtx C) D {
@@ -180,6 +257,50 @@ func (v *valuePanel) layoutWith(gtx C, g *DataGrid, get func(r, c int) (any, db.
 			return v.layoutPanel(gtx, g, get, edit)
 		}),
 	)
+	v.layoutResize(gtx, dims.Size, w)
+	return dims
+}
+
+// layoutResize lets the inner (left) edge of the drawer be dragged. The
+// grip lives in the parent's coordinates, which don't move with the edge.
+func (v *valuePanel) layoutResize(gtx C, size image.Point, w int) {
+	x := size.X - w
+	grip := image.Rect(x-gtx.Dp(3), 0, x+gtx.Dp(3), size.Y)
+	st := clip.Rect(grip).Push(gtx.Ops)
+	pointer.CursorColResize.Add(gtx.Ops)
+	event.Op(gtx.Ops, &v.dragTag)
+	st.Pop()
+	if v.dragging {
+		fillRect(gtx, withAlpha(pal.Accent, 0x90), image.Rect(x-gtx.Dp(1), 0, x+gtx.Dp(1), size.Y))
+	}
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &v.dragTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel})
+		if !ok {
+			break
+		}
+		pe, ok := ev.(pointer.Event)
+		if !ok {
+			continue
+		}
+		switch pe.Kind {
+		case pointer.Press:
+			v.dragging, v.grabX, v.grabW = true, pe.Position.X, w
+		case pointer.Drag:
+			if v.dragging {
+				v.width = v.grabW - int(pe.Position.X-v.grabX)
+			}
+		case pointer.Release, pointer.Cancel:
+			if v.dragging {
+				v.dragging = false
+				if v.width == 0 {
+					v.width = w
+				}
+				v.width = max(gtx.Dp(260), v.width) // the upper bound depends on the window
+				v.app.prefs.ValuePanelWidth = v.width
+				v.app.scheduleSave()
+			}
+		}
+	}
 }
 
 func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db.Column, bool), edit func(r, c int, text string, null bool)) D {
@@ -201,17 +322,44 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	}
 	// a pending edit is kept as a grid change when the panel moves away
 	// from its cell (they are only buffered until Save)
+	// the text to save (JSON mode: validated, compacted like the original)
+	saveText := func(r, c int) (string, bool) {
+		t := v.editorText()
+		if v.mode != 1 {
+			return t, true
+		}
+		val, col, _ := get(r, c)
+		out, err := jsonForSave(t, db.FormatValue(val, col.Kind))
+		if err != nil {
+			v.app.flash("JSON edit not applied: "+err.Error(), true)
+			return "", false
+		}
+		return out, true
+	}
 	keepEdit := func() {
 		if v.edited && v.wasEditable && edit != nil && v.r >= 0 {
-			edit(v.r, v.c, v.ed.Text(), false)
+			if t, ok := saveText(v.r, v.c); ok {
+				edit(v.r, v.c, t, false)
+			}
 			v.edited = false
 		}
 	}
 	for i := range v.modeBtn {
 		if v.modeBtn[i].Clicked(gtx) {
 			keepEdit()
-			v.mode = i
+			v.mode, v.manualCol = i, c
 			v.r = -1 // re-render
+		}
+	}
+	// JSON columns open in JSON mode unless the user chose a mode there
+	if has && c != v.c && c != v.manualCol && v.mode != 2 {
+		want := 0
+		if col.Kind == db.KindJSON {
+			want = 1
+		}
+		if want != v.mode {
+			keepEdit()
+			v.mode, v.r = want, -1
 		}
 	}
 	text, truncated := v.render(r, c, val, col, model)
@@ -223,31 +371,67 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	if r != v.r || c != v.c || !v.edited && text != v.shown {
 		v.r, v.c, v.shown, v.isNull, v.edited = r, c, text, val == nil, false
 		v.model, v.truncated = model, truncated
-		v.ed.SetText(text)
+		v.jsonBad = v.mode == 1 && val != nil && !truncated && !json.Valid([]byte(text))
+		v.setEditorText(text)
 	}
 	for {
 		ev, ok := v.ed.Update(gtx)
 		if !ok {
 			break
 		}
-		if _, ok := ev.(widget.ChangeEvent); ok {
+		if _, ok := ev.(widget.ChangeEvent); ok && v.mode != 1 {
 			v.edited = v.ed.Text() != v.shown
 		}
 	}
-	editable := edit != nil && has && v.mode == 0 && !v.truncated && g.Editable != nil && g.Editable(r, c)
+	if v.jsonChanged && v.mode == 1 {
+		v.jsonChanged = false
+		v.edited = v.jed.Text() != v.shown
+	}
+	// Indent / Compact reformat the JSON editor (an edit when the cell is
+	// editable, a view change otherwise)
+	for _, b := range []struct {
+		btn    *widget.Clickable
+		indent bool
+	}{{&v.indentBtn, true}, {&v.compactBtn, false}} {
+		if !b.btn.Clicked(gtx) || v.mode != 1 {
+			continue
+		}
+		src := []byte(v.jed.Text())
+		var out bytes.Buffer
+		var err error
+		if b.indent {
+			err = json.Indent(&out, src, "", "  ")
+		} else {
+			err = json.Compact(&out, src)
+		}
+		if err != nil {
+			v.app.flash("Not valid JSON: "+err.Error(), true)
+			continue
+		}
+		v.jed.SetText(out.String())
+		v.jed.SetCaretOffset(0)
+		// a read-only cell: "edited" only pins the reformatted view (it is
+		// never written: wasEditable is false)
+		v.edited = out.String() != v.shown
+	}
+	modeOK := v.mode == 0 || v.mode == 1 && (val == nil || jsonEditable(col, v.shown))
+	editable := edit != nil && has && modeOK && !v.truncated && g.Editable != nil && g.Editable(r, c)
 	v.ed.ReadOnly = !editable
+	v.jed.ReadOnly = !editable
 	v.wasEditable = editable
 	if v.copyBtn.Clicked(gtx) && has {
-		v.app.copyLater(v.ed.Text())
+		v.app.copyLater(v.editorText())
 	}
 	if v.nullBtn.Clicked(gtx) && editable {
 		edit(r, c, "", true)
 		v.r = -1
 	}
 	if v.applyBtn.Clicked(gtx) && editable && v.edited {
-		edit(r, c, v.ed.Text(), false)
-		v.edited = false
-		v.r = -1
+		if t, ok := saveText(r, c); ok {
+			edit(r, c, t, false)
+			v.edited = false
+			v.r = -1
+		}
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D {
@@ -278,11 +462,34 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 			})
 		}),
 		layout.Rigid(func(gtx C) D {
-			return layout.Inset{Left: 8, Bottom: 6}.Layout(gtx, func(gtx C) D {
-				return segmented(gtx, th, v.modeBtn[:], []string{"Text", "JSON", "Hex"}, v.mode)
+			return layout.Inset{Left: 8, Right: 8, Bottom: 6}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D {
+						return segmented(gtx, th, v.modeBtn[:], []string{"Text", "JSON", "Hex"}, v.mode)
+					}),
+					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }),
+					layout.Rigid(func(gtx C) D {
+						if v.mode != 1 || !has || val == nil && !v.edited {
+							return D{}
+						}
+						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx C) D { return pillButton(gtx, th, &v.indentBtn, nil, "Indent", pal.Text, pal.Hover) }),
+							layout.Rigid(func(gtx C) D { return D{Size: image.Pt(gtx.Dp(4), 1)} }),
+							layout.Rigid(func(gtx C) D { return pillButton(gtx, th, &v.compactBtn, nil, "Compact", pal.Text, pal.Hover) }),
+						)
+					}),
+				)
 			})
 		}),
 		layout.Rigid(func(gtx C) D { return hline(gtx, pal.Border) }),
+		layout.Rigid(func(gtx C) D {
+			if !v.jsonBad {
+				return D{}
+			}
+			return layout.Inset{Left: 10, Top: 6, Right: 8}.Layout(gtx, func(gtx C) D {
+				return lbl(gtx, th, fontSans, 11, pal.Warn, "Not valid JSON: shown as stored")
+			})
+		}),
 		layout.Flexed(1, func(gtx C) D {
 			if has && val == nil && !v.edited {
 				return inset(12).Layout(gtx, func(gtx C) D {
@@ -342,6 +549,12 @@ func (v *valuePanel) dropEdit(model uintptr, g *DataGrid, get func(r, c int) (an
 }
 
 func (v *valuePanel) editorBox(gtx C, th *material.Theme, hint string) D {
+	if v.mode == 1 {
+		return rborder(gtx, pal.Border, pal.CodeBg, 6, func(gtx C) D {
+			gtx.Constraints.Min = gtx.Constraints.Max
+			return v.jed.Layout(gtx)
+		})
+	}
 	return rborder(gtx, pal.Border, pal.CodeBg, 6, func(gtx C) D {
 		gtx.Constraints.Min = gtx.Constraints.Max
 		return inset(8).Layout(gtx, func(gtx C) D {
