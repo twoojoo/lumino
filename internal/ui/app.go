@@ -48,6 +48,7 @@ type App struct {
 	status    string
 	statusErr bool
 	statusAt  time.Time
+	statusBtn widget.Clickable
 
 	sidebar *Sidebar
 	title   *TitleBar
@@ -526,13 +527,25 @@ func (a *App) layoutStatus(gtx C) D {
 			})),
 			layout.Rigid(layout.Spacer{Width: 20}.Layout),
 			layout.Flexed(1, center(func(gtx C) D {
-				if a.status == "" || time.Since(a.statusAt) > 8*time.Second && !a.statusErr {
+				// messages fade: errors stay longer; a click dismisses them
+				if a.statusBtn.Clicked(gtx) {
+					a.status = ""
+				}
+				life := 8 * time.Second
+				if a.statusErr {
+					life = 20 * time.Second
+				}
+				end := a.statusAt.Add(life)
+				if a.status == "" || !gtx.Now.Before(end) {
 					return D{}
 				}
-				if a.statusErr {
-					return iconText(gtx, th, icError, 11, pal.Err, a.status)
-				}
-				return iconText(gtx, th, icStatusDone, 11, pal.Text, a.status)
+				gtx.Execute(op.InvalidateCmd{At: end})
+				return a.statusBtn.Layout(gtx, func(gtx C) D {
+					if a.statusErr {
+						return iconText(gtx, th, icError, 11, pal.Err, a.status)
+					}
+					return iconText(gtx, th, icStatusDone, 11, pal.Text, a.status)
+				})
 			})),
 			layout.Rigid(center(func(gtx C) D {
 				if a.upd.rel == nil {
