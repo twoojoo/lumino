@@ -4,6 +4,7 @@ package ui
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +150,31 @@ INSERT INTO ord VALUES ('b', 1), ('a', 2), ('c', 3);`); err != nil {
 	tt = open()
 	if got := keys(tt); got != "bac" || tt.grid.SortCol != -1 {
 		t.Fatalf("natural order %q (sort col %d)", got, tt.grid.SortCol)
+	}
+}
+
+// TestUIExportClipboard: the export dialog can copy instead of writing a
+// file.
+func TestUIExportClipboard(t *testing.T) {
+	path := sqliteFixture(t, 10)
+	h := newHarness(t, []db.Config{{ID: "lite", Name: "local sqlite", Driver: "sqlite", File: path}}, Options{Connection: "local sqlite"})
+	a := h.a
+	h.waitFor("console", func() bool { return h.console() != nil && a.connState("lite").status == stReady })
+	c := h.console()
+	c.ed.SetText("SELECT * FROM customers ORDER BY id")
+	c.run(false)
+	h.waitFor("results", func() bool { return len(c.results) == 1 && !c.running })
+	d := newExportDialog(a, "lite", c.results[0], nil)
+	a.overlay = d
+	d.format, d.toClip = 2, true // JSON to the clipboard
+	h.frame()
+	h.shot("60-export-clipboard")
+	d.start()
+	h.waitFor("copied", func() bool { return d.done })
+	if !strings.Contains(a.status, "Copied 3 rows") {
+		t.Fatalf("status %q", a.status)
+	}
+	if d.result != "" {
+		t.Fatalf("result %q", d.result)
 	}
 }

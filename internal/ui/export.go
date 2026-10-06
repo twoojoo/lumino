@@ -2,10 +2,11 @@ package ui
 
 import (
 	"bufio"
-	"errors"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -227,7 +228,24 @@ func writeRows(w io.Writer, format string, cols []db.Column, rows [][]any, d db.
 	return rw.close()
 }
 
-// ExportDialog exports a result to a file.
+// maxClipboardExport bounds an export to the clipboard (bigger results go
+// to a file).
+const maxClipboardExport = 64 << 20
+
+// capBuffer is a bytes.Buffer refusing to grow past max.
+type capBuffer struct {
+	b   bytes.Buffer
+	max int
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if c.b.Len()+len(p) > c.max {
+		return 0, fmt.Errorf("more than %s: too large for the clipboard, export to a file", db.HumanBytes(int64(c.max)))
+	}
+	return c.b.Write(p)
+}
+
+// ExportDialog exports a result to a file or the clipboard.
 type ExportDialog struct {
 	app    *App
 	connID string
@@ -247,6 +265,8 @@ type ExportDialog struct {
 	result   string
 	fmtBtns  []widget.Clickable
 	scopeBtn [2]widget.Clickable
+	destBtn  [2]widget.Clickable // file, clipboard
+	toClip   bool
 	ok, stop widget.Clickable
 }
 
@@ -295,18 +315,21 @@ func (d *ExportDialog) cancelled() {
 
 func (d *ExportDialog) start() {
 	a := d.app
+	toClip := d.toClip
 	path := strings.TrimSpace(d.path.Text())
-	if path == "" {
-		return
-	}
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, path[2:])
+	if !toClip {
+		if path == "" {
+			return
 		}
-	}
-	if _, err := os.Stat(path); err == nil {
-		d.result = "File exists: choose another name"
-		return
+		if strings.HasPrefix(path, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				path = filepath.Join(home, path[2:])
+			}
+		}
+		if _, err := os.Stat(path); err == nil {
+			d.result = "File exists: choose another name"
+			return
+		}
 	}
 	format := exportFormats[d.format][0]
 	ctx, cancel := context.WithCancel(context.Background())
@@ -325,13 +348,21 @@ func (d *ExportDialog) start() {
 	ro := a.connReadOnly(d.connID)
 	go func() {
 		created := false
+		var clip *capBuffer
 		err := func() error {
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if err != nil {
-				return err
+			var f io.Writer
+			if toClip {
+				clip = &capBuffer{max: maxClipboardExport}
+				f = clip
+			} else {
+				file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+				if err != nil {
+					return err
+				}
+				created = true
+				defer file.Close()
+				f = file
 			}
-			created = true
-			defer f.Close()
 			var dia db.Dialect
 			if conn != nil {
 				dia = conn.Dialect()
@@ -404,7 +435,12 @@ func (d *ExportDialog) start() {
 				d.result = "Export failed: " + err.Error()
 				return
 			}
-			a.flash(fmt.Sprintf("Exported %d rows to %s", d.written.Load(), path), false)
+			if toClip {
+				a.copyLaterMsg(strings.TrimSuffix(clip.b.String(), "\n"),
+					fmt.Sprintf("Copied %d rows to the clipboard (%s)", d.written.Load(), exportFormats[d.format][1]))
+			} else {
+				a.flash(fmt.Sprintf("Exported %d rows to %s", d.written.Load(), path), false)
+			}
 			d.done = true
 		})
 	}()
@@ -416,6 +452,12 @@ func (d *ExportDialog) Layout(gtx C) D {
 		if d.fmtBtns[i].Clicked(gtx) && !d.running {
 			d.format = i
 			d.setPath()
+		}
+	}
+	for i := range d.destBtn {
+		if d.destBtn[i].Clicked(gtx) && !d.running {
+			d.toClip = i == 1
+			d.result = ""
 		}
 	}
 	if d.scopeBtn[0].Clicked(gtx) {
@@ -455,8 +497,22 @@ func (d *ExportDialog) Layout(gtx C) D {
 					layout.Rigid(func(gtx C) D { return radio(gtx, th, &d.scopeBtn[1], allLabel, d.all) }),
 				)
 			}),
-			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "File") }),
-			layout.Rigid(func(gtx C) D { return textField(gtx, th, &d.path, "path", true) }),
+			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Destination") }),
+			layout.Rigid(func(gtx C) D {
+				sel := 0
+				if d.toClip {
+					sel = 1
+				}
+				return segmented(gtx, th, d.destBtn[:], []string{"File", "Clipboard"}, sel)
+			}),
+			layout.Rigid(func(gtx C) D {
+				if d.toClip {
+					return layout.Inset{Top: 8}.Layout(gtx, func(gtx C) D {
+						return lbl(gtx, th, fontSans, 12, pal.TextDim, "Copied as text in the chosen format (up to "+db.HumanBytes(maxClipboardExport)+")")
+					})
+				}
+				return layout.Inset{Top: 8}.Layout(gtx, func(gtx C) D { return textField(gtx, th, &d.path, "path", true) })
+			}),
 			layout.Rigid(func(gtx C) D {
 				msg, c := d.result, pal.Err
 				if d.running {
@@ -481,7 +537,11 @@ func (d *ExportDialog) Layout(gtx C) D {
 			if d.running {
 				c = pal.Border
 			}
-			return button(gtx, th, &d.ok, "Export", c)
+			label := "Export"
+			if d.toClip {
+				label = "Copy"
+			}
+			return button(gtx, th, &d.ok, label, c)
 		},
 	))
 }

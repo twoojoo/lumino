@@ -57,6 +57,7 @@ type App struct {
 	maximized, winFocused  bool
 	rootTag                int
 	pointer                image.Point
+	pendingCopyMsg         string
 	pendingCopy            *string
 	pendingPaste           *CodeEditor
 	tabs                   []Tab
@@ -266,7 +267,13 @@ func (a *App) do(desc string, fn func() error, then func()) {
 
 // copyLater copies text on the next frame (needs a gtx).
 func (a *App) copyLater(s string) {
-	a.pendingCopy = &s
+	a.pendingCopy, a.pendingCopyMsg = &s, ""
+	a.invalidate()
+}
+
+// copyLaterMsg is copyLater with the status message to show.
+func (a *App) copyLaterMsg(s, msg string) {
+	a.pendingCopy, a.pendingCopyMsg = &s, msg
 	a.invalidate()
 }
 
@@ -333,8 +340,12 @@ func (a *App) layout(gtx C) {
 	a.handleKeys(gtx)
 	if a.pendingCopy != nil {
 		copyText(gtx, *a.pendingCopy)
-		a.flash("Copied to clipboard", false)
-		a.pendingCopy = nil
+		msg := a.pendingCopyMsg
+		if msg == "" {
+			msg = "Copied to clipboard"
+		}
+		a.flash(msg, false)
+		a.pendingCopy, a.pendingCopyMsg = nil, ""
 	}
 
 	// root handler: tracks the pointer in window coordinates (context menus)
