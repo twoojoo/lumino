@@ -13,6 +13,9 @@ mkdir -p "$(dirname "$OUT")"
 # shellcheck disable=SC2016 # literal ${…} in the sed pattern
 GIO_VERSION="$(sed -n 's/^GIO_VERSION="\${GIO_VERSION:-\(.*\)}"/\1/p' scripts/vendor-gio.sh)"
 
+# modules whose license go-licenses doesn't recognize: "module|license"
+MANUAL=("github.com/segmentio/asm|MIT-0")
+
 patches() { for p in "$1"/*.patch; do echo "  - $(basename "$p")"; done; }
 
 {
@@ -40,7 +43,19 @@ The source code of the MPL-2.0 libraries listed below is available,
 unmodified, at the URLs given with each of them.
 
 HDR
-  GOFLAGS=-mod=mod go run "$GO_LICENSES" report --ignore github.com/giovanni/lumino \
+  ignore=(--ignore github.com/giovanni/lumino)
+  for m in "${MANUAL[@]}"; do ignore+=(--ignore "${m%%|*}"); done
+  GOFLAGS=-mod=mod go run "$GO_LICENSES" report "${ignore[@]}" \
     --template packaging/notices.tpl ./cmd/lumino 2>/dev/null
+  # licenses go-licenses can't classify, reproduced from the module
+  for m in "${MANUAL[@]}"; do
+    mod="${m%%|*}" lic="${m#*|}"
+    dir="$(GOFLAGS=-mod=mod go list -m -f '{{.Dir}}' "$mod")"
+    ver="$(GOFLAGS=-mod=mod go list -m -f '{{.Version}}' "$mod")"
+    printf '\n================================================================================\n'
+    printf '%s %s\nLicense: %s\n' "$mod" "$ver" "$lic"
+    printf -- '--------------------------------------------------------------------------------\n'
+    cat "$dir/LICENSE"
+  done
 } > "$OUT"
 echo "wrote $OUT ($(grep -c '^License:' "$OUT") components)"

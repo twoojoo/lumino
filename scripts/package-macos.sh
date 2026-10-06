@@ -19,7 +19,7 @@ VERSION="$(lumino_version)"
 DIST="${DIST:-dist}"
 OUT="$DIST/macos"
 APP="$OUT/Lumino.app"
-export MACOSX_DEPLOYMENT_TARGET=12.0 # Go 1.25 needs macOS 12+
+export MACOSX_DEPLOYMENT_TARGET=12.0 # Go 1.26 needs macOS 12+
 
 rm -rf "$OUT"
 mkdir -p "$OUT"

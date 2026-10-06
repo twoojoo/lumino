@@ -3,7 +3,7 @@
 # Wayland, X11, EGL and Vulkan headers for a full Gio build.
 FROM ubuntu:22.04
 
-ARG GO_VERSION=1.25.8
+ARG GO_VERSION=1.26.8
 ARG APPIMAGETOOL_VERSION=1.9.0
 ARG NFPM_VERSION=2.43.0
 
