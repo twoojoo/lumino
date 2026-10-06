@@ -2,7 +2,9 @@ package ai
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -73,6 +75,9 @@ type Config struct {
 	// cleared: providers whose key the user removed (only these are
 	// deleted from the keyring: a key that failed to load is kept)
 	cleared map[string]bool
+	// LoadError: ai.json exists but could not be read (EACCES, EIO…);
+	// Save refuses to replace it with the defaults.
+	LoadError error `json:"-"`
 }
 
 // QueriesAllowed reports whether the model may run read-only queries
@@ -86,11 +91,14 @@ func ConfigPath() string { return filepath.Join(prefs.Dir(), "ai.json") }
 func LoadConfig() *Config {
 	c := Config{Provider: "anthropic", Providers: map[string]ProviderConfig{}, path: ConfigPath()}
 	b, err := os.ReadFile(c.path)
-	if err == nil {
+	switch {
+	case err == nil:
 		if err := json.Unmarshal(b, &c); err != nil {
 			prefs.Quarantine(c.path, err)
 			c = Config{Provider: "anthropic", path: c.path}
 		}
+	case !errors.Is(err, fs.ErrNotExist):
+		c.LoadError = fmt.Errorf("cannot read %s (%v): settings won't be saved until it is readable", c.path, err)
 	}
 	if c.Providers == nil {
 		c.Providers = map[string]ProviderConfig{}
@@ -109,6 +117,9 @@ func LoadConfig() *Config {
 
 // Save writes the config with 0600 permissions (API keys go to the keyring).
 func (c *Config) Save() error {
+	if c.LoadError != nil {
+		return c.LoadError
+	}
 	if c.path == "" {
 		c.path = ConfigPath()
 	}

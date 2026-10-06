@@ -23,12 +23,16 @@ type Picker struct {
 	sel       int
 	allowFree bool
 	onPick    func(string)
-	exact     func(string) bool // free text accepted as-is when true
-	icon      *widget.Icon      // item icon override
-	itemIcons []*widget.Icon    // per item (parallel to items), optional
-	done      bool
-	focused   bool
-	lastQ     string
+	// onPickIndex, when set, receives the index (in items) of the chosen
+	// item instead of its label: items with the same label stay distinct.
+	// Free text (allowFree) still goes to onPick.
+	onPickIndex func(int)
+	exact       func(string) bool // free text accepted as-is when true
+	icon        *widget.Icon      // item icon override
+	itemIcons   []*widget.Icon    // per item (parallel to items), optional
+	done        bool
+	focused     bool
+	lastQ       string
 
 	editor widget.Editor
 	list   widget.List
@@ -78,21 +82,37 @@ func (p *Picker) refilter() {
 }
 
 func (p *Picker) pick(gtx C) {
-	raw := strings.TrimSpace(p.editor.Text())
-	var val string
-	switch {
-	case p.allowFree && raw != "" && p.exact != nil && p.exact(raw):
-		val = raw
-	case p.sel >= 0 && p.sel < len(p.matches):
-		val = p.items[p.matches[p.sel]]
-	case p.allowFree:
-		val = raw
-	default:
+	idx, val, ok := p.resolve()
+	if !ok {
 		return
 	}
 	p.done = true
 	gtx.Execute(key.FocusCmd{})
-	if val != "" {
+	p.deliver(idx, val)
+}
+
+// resolve returns the chosen item index (-1 for free text) and label.
+func (p *Picker) resolve() (idx int, val string, ok bool) {
+	raw := strings.TrimSpace(p.editor.Text())
+	switch {
+	case p.allowFree && raw != "" && p.exact != nil && p.exact(raw):
+		return -1, raw, true
+	case p.sel >= 0 && p.sel < len(p.matches):
+		idx = p.matches[p.sel]
+		return idx, p.items[idx], true
+	case p.allowFree:
+		return -1, raw, true
+	}
+	return -1, "", false
+}
+
+// deliver calls onPickIndex for items (when set), onPick otherwise.
+func (p *Picker) deliver(idx int, val string) {
+	if idx >= 0 && p.onPickIndex != nil {
+		p.onPickIndex(idx)
+		return
+	}
+	if val != "" && p.onPick != nil {
 		p.onPick(val)
 	}
 }

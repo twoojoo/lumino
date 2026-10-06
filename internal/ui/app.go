@@ -152,7 +152,10 @@ func newApp(opts Options, w *app.Window) *App {
 // start restores the workspace and opens the requested connection.
 func (a *App) start() {
 	if err := a.prefs.LoadError; err != nil {
-		a.flash("Settings reset: "+err.Error(), true)
+		a.flash("Settings: "+err.Error(), true)
+	}
+	if err := a.ai.cfg.LoadError; err != nil {
+		a.flash("Assistant settings: "+err.Error(), true)
 	}
 	a.startUpdateChecks()
 	a.restoreTabs()

@@ -128,9 +128,13 @@ func (a *App) tipLbl(gtx C, key string, f font.Font, size unit.Sp, c colorNRGBA,
 		a.tipTags[key] = tag
 	}
 	tag.frame = a.frame
+	// pass-through: the label must not swallow clicks (e.g. right-click
+	// context menus of the tree row under it)
+	pass := pointer.PassOp{}.Push(gtx.Ops)
 	area := clip.Rect{Max: d.Size}.Push(gtx.Ops)
 	event.Op(gtx.Ops, tag)
 	area.Pop()
+	pass.Pop()
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: tag, Kinds: pointer.Enter | pointer.Leave | pointer.Cancel})
 		if !ok {

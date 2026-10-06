@@ -5,7 +5,9 @@ package prefs
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,12 +51,20 @@ type Prefs struct {
 	FontSize     int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
 	Extra        map[string]any `json:"extra,omitempty"`
 
-	// LoadError reports a settings file that could not be parsed.
+	// LoadError reports a settings file that could not be parsed (moved
+	// aside) or read (left in place, and Save refuses to overwrite it).
 	LoadError error `json:"-"`
 
 	mx   sync.Mutex
 	path string
+	// unreadable: the file exists but couldn't be read (EACCES, EIO…):
+	// saving the defaults would replace it and lose the connections.
+	unreadable bool
 }
+
+// ErrUnreadable is returned by Save when the settings file could not be
+// read at startup: it is never overwritten with the defaults.
+var ErrUnreadable = errors.New("the settings file could not be read at startup: not overwriting it (fix its permissions and restart)")
 
 // Dir returns the config directory ($LUMINO_CONFIG_DIR overrides).
 func Dir() string {
@@ -71,12 +81,17 @@ func Dir() string {
 // Load reads the preferences (missing file → defaults).
 func Load() *Prefs {
 	p := Prefs{path: filepath.Join(Dir(), "settings.json")}
-	if b, err := os.ReadFile(p.path); err == nil {
+	b, err := os.ReadFile(p.path)
+	switch {
+	case err == nil:
 		if err := json.Unmarshal(b, &p); err != nil {
 			// keep the broken file (saved connections!) instead of
 			// overwriting it with defaults on the next save
 			p = Prefs{path: p.path, LoadError: fmt.Errorf("%s is invalid (%v); moved to %s", p.path, err, Quarantine(p.path, err))}
 		}
+	case !errors.Is(err, fs.ErrNotExist):
+		p.unreadable = true
+		p.LoadError = fmt.Errorf("cannot read %s (%v): changes won't be saved until it is readable", p.path, err)
 	}
 	if p.Theme != "ayu-light" && p.Theme != "ayu-mirage" {
 		p.Theme = "ayu-dark"
@@ -88,6 +103,9 @@ func Load() *Prefs {
 func (p *Prefs) Save() error {
 	p.mx.Lock()
 	defer p.mx.Unlock()
+	if p.unreadable {
+		return ErrUnreadable
+	}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

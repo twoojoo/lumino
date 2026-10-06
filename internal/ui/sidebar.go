@@ -821,7 +821,7 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		sep()
 		add(icRefresh, "Refresh", "F5", false, func() { s.refresh(r) })
 		if ref.Type == db.ObjTable {
-			add(icClear, "Truncate…", "", true, func() { a.dropObject(r.connID, ref, true) })
+			add(icClear, truncateLabel(a.connState(r.connID).info().DialectName), "", true, func() { a.dropObject(r.connID, ref, true) })
 		}
 		add(icDelete, "Drop…", "", true, func() { a.dropObject(r.connID, ref, false) })
 	case nColumn:

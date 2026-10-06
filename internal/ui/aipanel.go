@@ -118,9 +118,12 @@ func (p *AIPanel) reset() {
 }
 
 // target returns the connection and context the assistant works on.
-func (p *AIPanel) target() (*connState, ai.ContextInfo) {
+func (p *AIPanel) target() (*connState, ai.ContextInfo) { return p.targetFor(p.app.currentConn()) }
+
+// targetFor returns the context of a given connection; the active tab
+// contributes (schema, SQL, error) only when it belongs to it.
+func (p *AIPanel) targetFor(id string) (*connState, ai.ContextInfo) {
 	a := p.app
-	id := a.currentConn()
 	if id == "" {
 		return nil, ai.ContextInfo{}
 	}
@@ -129,7 +132,11 @@ func (p *AIPanel) target() (*connState, ai.ContextInfo) {
 	if cs.conn != nil {
 		ci.Database, ci.Dialect = cs.conn.ServerVersion(), cs.conn.Dialect().Name()
 	}
-	switch t := a.activeTab().(type) {
+	var tab Tab
+	if t := a.activeTab(); t != nil && t.ConnID() == id {
+		tab = t
+	}
+	switch t := tab.(type) {
 	case *ConsoleTab:
 		ci.Schema, ci.View = t.schema, "SQL console"
 		if p.attach {
@@ -154,13 +161,25 @@ func (p *AIPanel) add(it *chatItem) *chatItem {
 	return it
 }
 
-func (p *AIPanel) send(text string) {
+// send asks the assistant about the current connection.
+func (p *AIPanel) send(text string) { p.sendTo(p.app.currentConn(), text) }
+
+// sendTo asks the assistant about a given connection ("" = none). The
+// connection is fixed here: a message queued while it connects goes to it
+// even if the user selects another one meanwhile.
+func (p *AIPanel) sendTo(connID, text string) {
 	a := p.app
 	text = strings.TrimSpace(text)
-	if text == "" || p.running {
+	if text == "" {
 		return
 	}
-	cs, ci := p.target()
+	if p.running {
+		// the input is locked while running; requests from elsewhere
+		// (context menus, console) must not vanish silently
+		a.flash("The assistant is still answering: stop it or wait, then ask again", true)
+		return
+	}
+	cs, ci := p.targetFor(connID)
 	if cs == nil {
 		p.add(&chatItem{kind: chatNotice, text: "Select or open a connection first."})
 		return
@@ -170,7 +189,8 @@ func (p *AIPanel) send(text string) {
 		return
 	}
 	if cs.status != stReady {
-		a.connect(cs.id, func(*connState) { p.send(text) })
+		id := cs.id
+		a.connect(id, func(*connState) { p.sendTo(id, text) })
 		return
 	}
 	prov, model, err := p.cfg.Build()
@@ -999,14 +1019,14 @@ func (a *App) askAboutSQL(connID, sql string, failed *resultSet) {
 	p.open, p.attach = true, true
 	switch {
 	case failed != nil:
-		p.send("Why does this statement fail and how do I fix it?\n\n```sql\n" + failed.sql + "\n```\nError: " + failed.err.Error())
+		p.sendTo(connID, "Why does this statement fail and how do I fix it?\n\n```sql\n"+failed.sql+"\n```\nError: "+failed.err.Error())
 	case strings.TrimSpace(sql) != "":
-		p.send("Explain this SQL and suggest improvements:\n\n```sql\n" + sql + "\n```")
+		p.sendTo(connID, "Explain this SQL and suggest improvements:\n\n```sql\n"+sql+"\n```")
 	}
 }
 
 // askAboutObject opens the assistant on a table or routine.
 func (a *App) askAboutObject(connID string, ref db.ObjectRef) {
 	a.ai.open = true
-	a.ai.send(fmt.Sprintf("Describe the %s %s: its purpose, columns and relations, and anything worth fixing.", ref.Type, ref.String()))
+	a.ai.sendTo(connID, fmt.Sprintf("Describe the %s %s: its purpose, columns and relations, and anything worth fixing.", ref.Type, ref.String()))
 }

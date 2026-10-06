@@ -100,25 +100,12 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 	if d == nil {
 		return
 	}
-	var stmt string
-	switch {
-	case truncate:
-		stmt = "TRUNCATE TABLE " + d.Qualified(ref)
-	case ref.Type == db.ObjMatView:
-		stmt = "DROP MATERIALIZED VIEW " + d.Qualified(ref)
-	case ref.Type == db.ObjFunction || ref.Type == db.ObjProcedure:
-		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
-		if ref.Signature != "" && d.Name() == "postgres" {
-			stmt += ref.Signature
-		}
-	default:
-		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
-	}
-	verb := "Drop"
+	stmt, verb := dropStatement(d, ref, truncate)
+	title := verb + " " + string(ref.Type)
 	if truncate {
-		verb = "Truncate"
+		title = verb + " of " + string(ref.Type)
 	}
-	c := newConfirm(a, verb+" "+string(ref.Type), "This runs:\n\n"+stmt+"\n\nIt can't be undone.", true, func(bool) {
+	c := newConfirm(a, title, "This runs:\n\n"+stmt+"\n\nIt can't be undone.", true, func(bool) {
 		a.releaseCursors(connID)
 		conn := cs.conn
 		if conn == nil {
@@ -153,6 +140,42 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 	a.overlay = c
 }
 
+// truncateUnsupported lists the dialects without TRUNCATE TABLE: emptying
+// a table there is a DELETE without WHERE.
+var truncateUnsupported = map[string]bool{"sqlite": true, "firebird": true}
+
+// truncateLabel is the context menu label of "empty this table" for a
+// dialect name ("Truncate…" or "Delete all rows…").
+func truncateLabel(dialect string) string {
+	if truncateUnsupported[dialect] {
+		return "Delete all rows…"
+	}
+	return "Truncate…"
+}
+
+// dropStatement builds the DROP (or TRUNCATE / DELETE-all) statement of an
+// object and the verb shown in the confirmation.
+func dropStatement(d db.Dialect, ref db.ObjectRef, truncate bool) (stmt, verb string) {
+	switch {
+	case truncate && truncateUnsupported[d.Name()]:
+		return "DELETE FROM " + d.Qualified(ref), "Delete all rows"
+	case truncate:
+		return "TRUNCATE TABLE " + d.Qualified(ref), "Truncate"
+	case ref.Type == db.ObjMatView:
+		stmt = "DROP MATERIALIZED VIEW " + d.Qualified(ref)
+	case ref.Type == db.ObjFunction || ref.Type == db.ObjProcedure:
+		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
+		// the signature picks the overload (PostgreSQL, CockroachDB,
+		// Cassandra UDFs); adapters without overloads leave it empty
+		if ref.Signature != "" {
+			stmt += ref.Signature
+		}
+	default:
+		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
+	}
+	return stmt, "Drop"
+}
+
 // generateDML opens a console with INSERT/UPDATE/DELETE templates.
 func (a *App) generateDML(connID string, ref db.ObjectRef) {
 	cs := a.connState(connID)
@@ -161,36 +184,47 @@ func (a *App) generateDML(connID string, ref db.ObjectRef) {
 			a.flash(err.Error(), true)
 			return
 		}
-		d := cs.dialect()
-		var cols, params, sets []string
-		for i, c := range info.Columns {
-			if c.Generated != "" {
-				continue
-			}
-			cols = append(cols, d.Quote(c.Name))
-			params = append(params, d.Placeholder(i+1))
-			if c.PrimaryKeyNo == 0 {
-				sets = append(sets, d.Quote(c.Name)+" = "+d.Placeholder(i+1))
-			}
-		}
-		var keys []string
-		for i, k := range info.PrimaryKey {
-			keys = append(keys, d.Quote(k)+" = "+d.Placeholder(len(info.Columns)+i+1))
-		}
-		where := strings.Join(keys, " AND ")
-		if where == "" {
-			where = "/* no primary key: add a condition */"
-		}
-		name := d.Qualified(ref)
-		var b strings.Builder
-		fmt.Fprintf(&b, "SELECT %s\nFROM %s;\n\n", strings.Join(cols, ", "), name)
-		fmt.Fprintf(&b, "INSERT INTO %s (%s)\nVALUES (%s);\n\n", name, strings.Join(cols, ", "), strings.Join(params, ", "))
-		if len(sets) > 0 {
-			fmt.Fprintf(&b, "UPDATE %s\nSET %s\nWHERE %s;\n\n", name, strings.Join(sets, ",\n    "), where)
-		}
-		fmt.Fprintf(&b, "DELETE FROM %s\nWHERE %s;\n", name, where)
-		a.newConsole(connID, ref.Schema, b.String())
+		b := dmlTemplates(cs.dialect(), ref, info)
+		a.newConsole(connID, ref.Schema, b)
 	})
+}
+
+// dmlTemplates renders SELECT/INSERT/UPDATE/DELETE templates of a table.
+// Placeholders are numbered sequentially per statement (skipped generated
+// columns must not leave gaps: PostgreSQL rejects $1, $3).
+func dmlTemplates(d db.Dialect, ref db.ObjectRef, info *db.TableInfo) string {
+	var cols, params, sets []string
+	for _, c := range info.Columns {
+		if c.Generated != "" {
+			continue
+		}
+		cols = append(cols, d.Quote(c.Name))
+		params = append(params, d.Placeholder(len(params)+1))
+		if c.PrimaryKeyNo == 0 {
+			sets = append(sets, d.Quote(c.Name)+" = "+d.Placeholder(len(sets)+1))
+		}
+	}
+	next := len(sets) // UPDATE: the key placeholders follow the SET ones
+	var keys, delKeys []string
+	for i, k := range info.PrimaryKey {
+		keys = append(keys, d.Quote(k)+" = "+d.Placeholder(next+i+1))
+		delKeys = append(delKeys, d.Quote(k)+" = "+d.Placeholder(i+1))
+	}
+	where := strings.Join(keys, " AND ")
+	delWhere := strings.Join(delKeys, " AND ")
+	if where == "" {
+		where = "/* no primary key: add a condition */"
+		delWhere = where
+	}
+	name := d.Qualified(ref)
+	var b strings.Builder
+	fmt.Fprintf(&b, "SELECT %s\nFROM %s;\n\n", strings.Join(cols, ", "), name)
+	fmt.Fprintf(&b, "INSERT INTO %s (%s)\nVALUES (%s);\n\n", name, strings.Join(cols, ", "), strings.Join(params, ", "))
+	if len(sets) > 0 {
+		fmt.Fprintf(&b, "UPDATE %s\nSET %s\nWHERE %s;\n\n", name, strings.Join(sets, ",\n    "), where)
+	}
+	fmt.Fprintf(&b, "DELETE FROM %s\nWHERE %s;\n", name, delWhere)
+	return b.String()
 }
 
 // ---- SQL review (grid edits) ----
@@ -310,14 +344,8 @@ func (a *App) openHistory(connID string) {
 		}
 		items[i] = sql + "  ·  " + info
 	}
-	p := newPicker(a, "History of "+a.connState(connID).name()+" (Enter opens the statement in the console)", items, false, func(item string) {
-		for i, it := range items {
-			if it == item {
-				a.insertInConsole(connID, entries[i].SQL, entries[i].Schema)
-				return
-			}
-		}
-	})
+	p := newPicker(a, "History of "+a.connState(connID).name()+" (Enter opens the statement in the console)", items, false, nil)
+	p.onPickIndex = func(i int) { a.insertInConsole(connID, entries[i].SQL, entries[i].Schema) }
 	p.icon = icHistory
 	a.overlay = p
 }
@@ -333,10 +361,28 @@ func (a *App) insertInConsole(connID, sql, schema string) {
 		if strings.TrimSpace(ed.Text()) != "" {
 			prefix = "\n\n"
 		}
-		ed.Insert(prefix + strings.TrimSpace(sql) + ";")
+		ed.Insert(prefix + withTerminator(sql))
 		return
 	}
-	a.newConsole(connID, schema, strings.TrimSpace(sql)+";\n")
+	a.newConsole(connID, schema, withTerminator(sql)+"\n")
+}
+
+// withTerminator trims a statement and appends ";" unless it already ends
+// with one (PL/SQL "END;" must not become "END;;") or with a block
+// terminator line ("/" in Oracle scripts, "GO" in SQL Server ones).
+func withTerminator(sql string) string {
+	sql = strings.TrimSpace(sql)
+	if sql == "" || strings.HasSuffix(sql, ";") {
+		return sql
+	}
+	last := sql
+	if i := strings.LastIndexByte(sql, '\n'); i >= 0 {
+		last = sql[i+1:]
+	}
+	if last = strings.TrimSpace(last); last == "/" || strings.EqualFold(last, "go") {
+		return sql
+	}
+	return sql + ";"
 }
 
 // SaveQueryDialog names a saved query.
@@ -430,18 +476,14 @@ func (a *App) openSavedQueries() {
 	for i, q := range qs {
 		items[i] = q.Name + "  ·  " + strings.Join(strings.Fields(q.SQL), " ")
 	}
-	p := newPicker(a, "Saved queries", items, false, func(item string) {
-		for i, it := range items {
-			if it == item {
-				if id == "" {
-					a.flash("Select a connection first", true)
-					return
-				}
-				a.insertInConsole(id, qs[i].SQL, "")
-				return
-			}
+	p := newPicker(a, "Saved queries", items, false, nil)
+	p.onPickIndex = func(i int) {
+		if id == "" {
+			a.flash("Select a connection first", true)
+			return
 		}
-	})
+		a.insertInConsole(id, qs[i].SQL, "")
+	}
 	p.icon = icBookmark
 	a.overlay = p
 }
@@ -505,14 +547,8 @@ func (a *App) openPalette() {
 	for i, c := range cmds {
 		items[i], icons[i] = c.label, c.icon
 	}
-	p := newPicker(a, "Commands, connections and objects", items, false, func(item string) {
-		for _, c := range cmds {
-			if c.label == item {
-				c.run()
-				return
-			}
-		}
-	})
+	p := newPicker(a, "Commands, connections and objects", items, false, nil)
+	p.onPickIndex = func(i int) { cmds[i].run() }
 	p.itemIcons = icons
 	a.overlay = p
 }

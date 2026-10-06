@@ -91,7 +91,7 @@ var ayuMirage = Palette{
 	Info:       rgb(0x73d0ff),
 	OnAccent:   rgb(0x1f2430),
 	CodeBg:     rgb(0x1a1f29),
-	LineHL:     rgb(0x1a1f29),
+	LineHL:     rgb(0x232834),
 	Backdrop:   color.NRGBA{A: 0x90},
 	Keyword:    rgb(0xffad66),
 	String:     rgb(0xd5ff80),
@@ -292,19 +292,29 @@ func insetHV(h, v unit.Dp) layout.Inset {
 	return layout.Inset{Left: h, Right: h, Top: v, Bottom: v}
 }
 
-// button draws a flat Lens-like button.
+// button draws a flat Lens-like button. Callers pass pal.Border as the
+// color of a disabled button: it gets dim text (OnAccent is unreadable on
+// it) and no hover effect.
 func button(gtx C, th *material.Theme, cl *widget.Clickable, txt string, c color.NRGBA) D {
 	return cl.Layout(gtx, func(gtx C) D {
-		bgc := c
-		if cl.Hovered() {
+		bgc, fg := c, buttonText(c)
+		if cl.Hovered() && c != pal.Border {
 			bgc = lighten(c, 0.12)
 		}
 		return rbg(gtx, bgc, 6, func(gtx C) D {
 			return insetHV(12, 6).Layout(gtx, func(gtx C) D {
-				return lbl(gtx, th, fontSans, 13, pal.OnAccent, txt)
+				return lbl(gtx, th, fontSans, 13, fg, txt)
 			})
 		})
 	})
+}
+
+// buttonText is the label color of a button of background c.
+func buttonText(c color.NRGBA) color.NRGBA {
+	if c == pal.Border {
+		return pal.TextDim
+	}
+	return pal.OnAccent
 }
 
 // flatButton is a text-only button.

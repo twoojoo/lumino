@@ -327,7 +327,7 @@ func (p *SecretPrompt) Layout(gtx C) D {
 		}
 		ch = append(ch, layout.Rigid(func(gtx C) D {
 			if !p.cfg.SavePassword {
-				return lbl(gtx, th, fontSans, 11.5, pal.TextDim, "Not saved: asked at every connect (edit the connection to save it).")
+				return lbl(gtx, th, fontSans, 11.5, pal.TextDim, "Not saved to disk: kept in memory until "+AppName+" is closed (edit the connection to save it).")
 			}
 			label := "Save in the system keyring"
 			if !secretsAvailable() {

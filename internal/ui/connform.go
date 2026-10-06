@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ type ConnDialog struct {
 	savePwBtn, sshBtn, roBtn, createBtn, showPw             widget.Clickable
 	testBtn, saveBtn, connectBtn, cancelBtn, urlBtn, advBtn widget.Clickable
 	advanced, pwVisible                                     bool
+	pwKnown                                                 bool // a password was stored when the form opened
 	testing                                                 bool
 	testMsg                                                 string
 	testOK                                                  bool
@@ -95,6 +97,7 @@ func (d *ConnDialog) load(c *db.Config) {
 	d.file.SetText(c.File)
 	if pw, ok := secrets.Get(c.ID, secrets.Password); ok {
 		d.password.SetText(pw)
+		d.pwKnown = true
 	}
 	d.savePw = c.SavePassword
 	for i, m := range tlsModes {
@@ -124,10 +127,15 @@ func (d *ConnDialog) load(c *db.Config) {
 		}
 	}
 	d.initSQL.SetText(c.InitSQL)
+	fileDrv := d.info().Has(db.FieldFile)
 	var ps []string
 	for k, v := range c.Params {
+		if fileDrv && k == "create" {
+			continue // shown as the "Create the file" toggle only
+		}
 		ps = append(ps, k+"="+v)
 	}
+	sort.Strings(ps)
 	d.params.SetText(strings.Join(ps, "\n"))
 	d.readOnly = c.ReadOnly
 	switch {
@@ -144,13 +152,25 @@ func (d *ConnDialog) load(c *db.Config) {
 		}
 	}
 	d.createFile = c.Param("create") == "true"
-	d.advanced = c.InitSQL != "" || len(c.Params) > 0
+	d.advanced = c.InitSQL != "" || len(ps) > 0
 }
 
 // config builds the connection from the form (secrets included).
 func (d *ConnDialog) config() (db.Config, error) {
 	info := d.info()
-	c := db.Config{ID: d.editing, Driver: info.ID, Name: strings.TrimSpace(d.name.Text())}
+	// editing starts from the stored connection so that fields the form
+	// doesn't show (Group, future ones) survive; every form field is reset
+	// below and set only when the driver uses it.
+	var c db.Config
+	if d.editing != "" && d.app != nil && d.app.prefs != nil {
+		if old, ok := d.app.prefs.Conn(d.editing); ok {
+			c = *old
+		}
+	}
+	c.ID, c.Driver, c.Name = d.editing, info.ID, strings.TrimSpace(d.name.Text())
+	c.Host, c.Port, c.Database, c.User, c.File = "", 0, "", "", ""
+	c.Password, c.SavePassword = "", false
+	c.TLS, c.SSH, c.Params, c.Protected = db.TLSConfig{}, nil, nil, nil
 	if c.ID == "" {
 		c.ID = newID()
 	}
@@ -216,11 +236,19 @@ func (d *ConnDialog) config() (db.Config, error) {
 		}
 		c.Params[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
-	if d.createFile {
-		if c.Params == nil {
-			c.Params = map[string]string{}
+	if info.Has(db.FieldFile) {
+		// the toggle is the only source of "create" (load() keeps it out
+		// of the Parameters text), so unchecking it really turns it off
+		delete(c.Params, "create")
+		if d.createFile {
+			if c.Params == nil {
+				c.Params = map[string]string{}
+			}
+			c.Params["create"] = "true"
 		}
-		c.Params["create"] = "true"
+		if len(c.Params) == 0 {
+			c.Params = nil
+		}
 	}
 	c.ReadOnly = d.readOnly
 	switch d.protected {
@@ -319,15 +347,9 @@ func (d *ConnDialog) save(connect bool) {
 		d.err = err.Error()
 		return
 	}
-	if d.info().Has(db.FieldPassword) {
-		// saved even when empty: an empty password is a valid one
-		if err := secrets.Set(c.ID, secrets.Password, c.Password, c.SavePassword); err != nil {
-			d.err = "Keyring: " + err.Error()
-			return
-		}
-	}
-	if c.SSH != nil && c.SSH.Secret != "" {
-		_ = secrets.Set(c.ID, secrets.SSH, c.SSH.Secret, c.SavePassword || !d.info().Has(db.FieldPassword))
+	if err := d.storeSecrets(&c); err != nil {
+		d.err = "Keyring: " + err.Error()
+		return
 	}
 	old, existed := a.prefs.Conn(c.ID)
 	changed := existed && connChanged(old, &c)
@@ -352,6 +374,43 @@ func (d *ConnDialog) save(connect bool) {
 		return
 	}
 	open()
+}
+
+// storeSecrets writes the password / SSH secret of the form.
+//
+// An empty password field is ambiguous: in a new session a "don't save"
+// password is not known, so the field opens empty. Storing "" then would
+// make connect use an empty password without asking. So:
+//   - saved password: stored (even empty: a valid password) unless the
+//     field is empty and no password was known when the form opened
+//     (keyring cleared/unavailable): connect will ask;
+//   - not saved: a typed password is kept for the session; an empty field
+//     forgets it, so connect asks. Either way the keyring copy is removed.
+func (d *ConnDialog) storeSecrets(c *db.Config) error {
+	if d.info().Has(db.FieldPassword) {
+		switch {
+		case c.SavePassword && (c.Password != "" || d.pwKnown || d.editing == ""):
+			if err := secrets.Set(c.ID, secrets.Password, c.Password, true); err != nil {
+				return err
+			}
+		case c.SavePassword:
+			// unknown and empty: leave it unset, connect asks
+		case c.Password != "":
+			if err := secrets.Set(c.ID, secrets.Password, c.Password, false); err != nil {
+				return err
+			}
+		default:
+			secrets.Delete(c.ID, secrets.Password)
+		}
+	}
+	persistSSH := c.SavePassword || !d.info().Has(db.FieldPassword)
+	switch {
+	case c.SSH != nil && c.SSH.Secret != "":
+		_ = secrets.Set(c.ID, secrets.SSH, c.SSH.Secret, persistSSH)
+	case !persistSSH:
+		secrets.Delete(c.ID, secrets.SSH) // "don't save" removes the keyring copy
+	}
+	return nil
 }
 
 func connChanged(a, b *db.Config) bool {

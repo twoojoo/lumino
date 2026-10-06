@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strconv"
+	"strings"
 
 	"gioui.org/layout"
 	"gioui.org/widget"
@@ -41,23 +42,42 @@ func (p *PrefsPanel) Done() bool { return p.done }
 
 func (p *PrefsPanel) apply() {
 	a := p.app
-	num := func(e *widget.Editor, lo, hi int, name string) (int, bool) {
-		n, err := strconv.Atoi(e.Text())
-		if err != nil || n < lo || n > hi {
-			p.err = name + ": enter a number between " + strconv.Itoa(lo) + " and " + strconv.Itoa(hi)
-			return 0, false
-		}
-		return n, true
-	}
-	f, ok1 := num(&p.fetch, 50, 100000, "Rows per page")
-	m, ok2 := num(&p.maxRows, 1000, 50_000_000, "Rows kept in memory")
-	n, ok3 := num(&p.notif, 1, 3600, "Notify after")
-	if !ok1 || !ok2 || !ok3 {
+	f, m, n, err := parsePrefNumbers(p.fetch.Text(), p.maxRows.Text(), p.notif.Text())
+	if err != "" {
+		p.err = err
 		return
 	}
+	p.err = ""
 	a.prefs.FetchSize, a.prefs.MaxRows, a.prefs.NotifyAfter = f, m, n
 	a.savePrefs()
 	p.done = true
+}
+
+// parsePrefNumbers validates the numeric preferences (surrounding spaces
+// and "_" digit separators are tolerated); err is "" when they are valid.
+func parsePrefNumbers(fetch, maxRows, notify string) (f, m, n int, err string) {
+	num := func(s string, lo, hi int, name string) (int, bool) {
+		s = strings.TrimSpace(s)
+		s = strings.ReplaceAll(s, "_", "")
+		v, e := strconv.Atoi(s)
+		if e != nil || v < lo || v > hi {
+			if err == "" {
+				err = name + ": enter a number between " + strconv.Itoa(lo) + " and " + strconv.Itoa(hi)
+			}
+			return 0, false
+		}
+		return v, true
+	}
+	f, ok1 := num(fetch, 50, 100000, "Rows per page")
+	m, ok2 := num(maxRows, 1000, 50_000_000, "Rows kept in memory")
+	n, ok3 := num(notify, 1, 3600, "Notify after")
+	if !ok1 || !ok2 || !ok3 {
+		return 0, 0, 0, err
+	}
+	if f > m {
+		return 0, 0, 0, "Rows per page can't exceed the rows kept in memory"
+	}
+	return f, m, n, ""
 }
 
 func (p *PrefsPanel) Layout(gtx C) D {
