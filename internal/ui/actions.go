@@ -398,19 +398,37 @@ type SaveQueryDialog struct {
 	done    bool
 	focused bool
 	d       dialog
+	// close-tab flow: after saving / when dismissed
+	onSaved, onCancel func()
 }
 
 func (a *App) saveQueryDialog(connID, sql string) {
+	a.saveQueryDialogThen(connID, sql, "", nil, nil)
+}
+
+// saveQueryDialogThen asks a name for sql (prefilled with name); saved
+// runs after saving, cancelled when the dialog is dismissed.
+func (a *App) saveQueryDialogThen(connID, sql, name string, saved, cancelled func()) {
 	if strings.TrimSpace(sql) == "" {
 		a.flash("Nothing to save", false)
 		return
 	}
-	d := &SaveQueryDialog{app: a, connID: connID, sql: sql}
+	d := &SaveQueryDialog{app: a, connID: connID, sql: sql, onSaved: saved, onCancel: cancelled}
 	d.name.SingleLine, d.name.Submit = true, true
+	d.name.SetText(name)
+	d.name.SetCaret(len(name), 0)
 	a.overlay = d
 }
 
 func (d *SaveQueryDialog) Done() bool { return d.done }
+
+// cancelled implements canceler (Esc, click outside).
+func (d *SaveQueryDialog) cancelled() {
+	if f := d.onCancel; f != nil {
+		d.onCancel = nil
+		f()
+	}
+}
 
 func (d *SaveQueryDialog) save() {
 	name := strings.TrimSpace(d.name.Text())
@@ -425,6 +443,10 @@ func (d *SaveQueryDialog) save() {
 	d.app.savePrefs()
 	d.app.flash("Saved query "+name, false)
 	d.done = true
+	d.onCancel = nil
+	if d.onSaved != nil {
+		d.onSaved()
+	}
 }
 
 func (d *SaveQueryDialog) Layout(gtx C) D {
@@ -447,6 +469,7 @@ func (d *SaveQueryDialog) Layout(gtx C) D {
 	}
 	if d.cancel.Clicked(gtx) || d.d.close.Clicked(gtx) {
 		d.done = true
+		d.cancelled()
 	}
 	if d.anyBtn.Clicked(gtx) {
 		d.anyConn = !d.anyConn

@@ -266,6 +266,10 @@ type Confirm struct {
 	okLabel    string
 	done       bool
 	ok, cancel widget.Clickable
+	// optional third button (between Cancel and OK): "Don't save"
+	altLabel string
+	onAlt    func()
+	alt      widget.Clickable
 
 	// protected contexts: the user must type typeName to enable OK
 	typeName string
@@ -337,6 +341,10 @@ func (c *Confirm) Layout(gtx C) D {
 	}
 	if c.ok.Clicked(gtx) {
 		c.accept()
+	}
+	if c.alt.Clicked(gtx) && c.onAlt != nil {
+		c.done, c.onCancel = true, nil
+		c.onAlt()
 	}
 	if c.cancel.Clicked(gtx) {
 		c.done = true
@@ -434,6 +442,14 @@ func (c *Confirm) Layout(gtx C) D {
 								layout.Flexed(1, layout.Spacer{}.Layout),
 								layout.Rigid(func(gtx C) D { return pillButton(gtx, th, &c.cancel, nil, "Cancel", pal.Text, pal.Hover) }),
 								layout.Rigid(layout.Spacer{Width: 8}.Layout),
+								layout.Rigid(func(gtx C) D {
+									if c.altLabel == "" {
+										return D{}
+									}
+									return layout.Inset{Right: 8}.Layout(gtx, func(gtx C) D {
+										return pillButton(gtx, th, &c.alt, nil, c.altLabel, pal.Text, pal.Hover)
+									})
+								}),
 								layout.Rigid(func(gtx C) D {
 									col := pal.Accent
 									if c.danger {

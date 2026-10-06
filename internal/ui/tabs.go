@@ -63,14 +63,102 @@ func (a *App) closeTab(i int) {
 	if i < 0 || i >= len(a.tabs) {
 		return
 	}
-	t := a.tabs[i]
-	if why := t.Dirty(); why != "" {
-		c := newConfirm(a, "Close tab?", why+"\n\nClose "+t.Title()+" anyway?", true, func(bool) { a.removeTab(t) })
-		c.okLabel = "Discard and close"
-		a.overlay = c
+	a.closeTabs([]Tab{a.tabs[i]})
+}
+
+// closeTabs closes tabs one after the other. For each one it asks before
+// discarding open transactions or unsaved edits, and offers to save an
+// unsaved console query; Cancel stops the whole sequence.
+func (a *App) closeTabs(ts []Tab) {
+	for len(ts) > 0 {
+		t, rest := ts[0], ts[1:]
+		if a.findTab(func(x Tab) bool { return x == t }) < 0 {
+			ts = rest
+			continue
+		}
+		if why := t.Dirty(); why != "" {
+			c := newConfirm(a, "Close tab?", why+"\n\nClose "+t.Title()+" anyway?", true, func(bool) {
+				if !a.askSaveQuery(t, rest) {
+					a.removeTab(t)
+					a.closeTabs(rest)
+				}
+			})
+			c.okLabel = "Discard and close"
+			a.overlay = c
+			return
+		}
+		if a.askSaveQuery(t, rest) {
+			return
+		}
+		a.removeTab(t)
+		ts = rest
+	}
+}
+
+// askSaveQuery offers to save the query of a console being closed (then
+// closes it and continues with rest). It reports whether it asked.
+func (a *App) askSaveQuery(t Tab, rest []Tab) bool {
+	ct, ok := t.(*ConsoleTab)
+	if !ok {
+		return false
+	}
+	sql, unsaved := ct.unsavedQuery()
+	if !unsaved {
+		return false
+	}
+	closeAndGo := func() {
+		a.removeTab(t)
+		a.closeTabs(rest)
+	}
+	if i := a.findTab(func(x Tab) bool { return x == t }); i >= 0 {
+		a.tabIdx = i // show the query being asked about
+	}
+	c := newConfirm(a, "Save the query?", "The query in "+ct.Title()+" isn't saved.\nSave it before closing the tab?", false, func(bool) {
+		a.saveQueryDialogThen(ct.connID, sql, ct.queryName(), closeAndGo, nil)
+	})
+	c.okLabel = "Save…"
+	c.altLabel = "Don't save"
+	c.onAlt = closeAndGo
+	a.overlay = c
+	return true
+}
+
+// tabMenu is the context menu of tab i.
+func (a *App) tabMenu(i int) {
+	if i < 0 || i >= len(a.tabs) {
 		return
 	}
-	a.removeTab(t)
+	t := a.tabs[i]
+	all := append([]Tab(nil), a.tabs...)
+	var others []Tab
+	for j, x := range all {
+		if j != i {
+			others = append(others, x)
+		}
+	}
+	right := append([]Tab(nil), all[i+1:]...)
+	items := []*menuItem{
+		{icon: icClose, label: "Close", hint: shortcutLabel("W"), action: func() { a.closeTabs([]Tab{t}) }},
+		{icon: icClose, label: "Close others", action: func() { a.closeTabs(others) }},
+		{icon: icClose, label: "Close tabs to the right", action: func() { a.closeTabs(right) }},
+		{icon: icClose, label: "Close all", action: func() { a.closeTabs(all) }},
+	}
+	switch x := t.(type) {
+	case *ConsoleTab:
+		items = append(items, &menuItem{sep: true},
+			&menuItem{icon: icBookmark, label: "Save query…", action: func() {
+				a.saveQueryDialogThen(x.connID, x.ed.Text(), x.queryName(), nil, nil)
+			}},
+			&menuItem{icon: icAdd, label: "Duplicate console", action: func() {
+				a.newConsole(x.connID, x.schema, x.ed.Text())
+			}},
+		)
+	case *TableTab:
+		items = append(items, &menuItem{sep: true},
+			&menuItem{icon: icRefresh, label: "Refresh", action: func() { x.refresh(nil) }},
+		)
+	}
+	a.overlay = &ContextMenu{app: a, at: a.pointer, title: t.Title(), items: items, sel: -1}
 }
 
 func (a *App) removeTab(t Tab) {
@@ -272,6 +360,10 @@ func (a *App) middleClickTabs(gtx C) {
 			}
 			if pe, ok := ev.(pointer.Event); ok && pe.Buttons == pointer.ButtonTertiary {
 				a.closeTab(i)
+				return
+			}
+			if pe, ok := ev.(pointer.Event); ok && pe.Buttons == pointer.ButtonSecondary {
+				a.tabMenu(i)
 				return
 			}
 		}

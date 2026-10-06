@@ -143,3 +143,90 @@ func TestUIRegressions2(t *testing.T) {
 		}
 	}
 }
+
+// TestUITabCloseAndMenu: closing a console with an unsaved query offers to
+// save it (Save / Don't save / Cancel), also for "Close all" from the tab
+// context menu, opened with a right click on the tab.
+func TestUITabCloseAndMenu(t *testing.T) {
+	path := sqliteFixture(t, 10)
+	h := newHarness(t, []db.Config{{ID: "lite", Name: "local sqlite", Driver: "sqlite", File: path}}, Options{Connection: "local sqlite"})
+	a := h.a
+	h.waitFor("console", func() bool { return h.console() != nil && a.connState("lite").status == stReady })
+	c1 := h.console()
+	c1.ed.SetText("SELECT 1")
+	confirm := func() *Confirm {
+		t.Helper()
+		h.settle(50 * time.Millisecond)
+		c, ok := a.overlay.(*Confirm)
+		if !ok || c.altLabel == "" {
+			t.Fatalf("no save prompt (%T)", a.overlay)
+		}
+		return c
+	}
+
+	// Cancel (Esc): the tab stays
+	a.closeTab(0)
+	confirm()
+	h.press(key.NameEscape)
+	h.settle(50 * time.Millisecond)
+	if len(a.tabs) != 1 {
+		t.Fatal("cancel closed the tab")
+	}
+
+	// Save…: named, saved, then closed
+	a.closeTab(0)
+	confirm().accept()
+	h.settle(50 * time.Millisecond)
+	d, ok := a.overlay.(*SaveQueryDialog)
+	if !ok {
+		t.Fatalf("no save dialog (%T)", a.overlay)
+	}
+	d.name.SetText("one")
+	d.save()
+	h.settle(50 * time.Millisecond)
+	if len(a.tabs) != 0 || len(a.prefs.QueriesFor("lite")) != 1 {
+		t.Fatalf("tabs %d saved %d", len(a.tabs), len(a.prefs.QueriesFor("lite")))
+	}
+
+	// a console holding a saved query closes without asking
+	a.newConsole("lite", "", "SELECT 1")
+	h.settle(50 * time.Millisecond)
+	a.closeTab(0)
+	h.settle(50 * time.Millisecond)
+	if len(a.tabs) != 0 {
+		t.Fatal("saved query asked again")
+	}
+
+	// right click on a tab: menu; Close all asks for each unsaved console
+	a.newConsole("lite", "", "SELECT 2")
+	a.newConsole("lite", "", "SELECT 3")
+	h.settle(50 * time.Millisecond)
+	opened := false
+	for x := float32(150); x < 700 && !opened; x += 20 {
+		for _, y := range []float32{45, 57} {
+			h.click(x, y, pointer.ButtonSecondary)
+			if m, ok := a.overlay.(*ContextMenu); ok {
+				opened = true
+				h.shot("50-tab-menu")
+				for _, it := range m.items {
+					if it.label == "Close all" {
+						a.overlay = nil
+						it.action()
+					}
+				}
+				break
+			}
+		}
+	}
+	if !opened {
+		t.Fatal("no tab context menu on right click")
+	}
+	first := confirm()
+	h.shot("51-save-prompt")
+	first.onAlt() // don't save the first
+	confirm().onAlt() // nor the second
+	h.settle(50 * time.Millisecond)
+	if len(a.tabs) != 0 {
+		t.Fatalf("Close all left %d tabs", len(a.tabs))
+	}
+}

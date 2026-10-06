@@ -127,6 +127,31 @@ func prefsProtected(c *db.Config) bool { return prefs.Protected(c) }
 
 func (t *ConsoleTab) cs() *connState { return t.a.connState(t.connID) }
 
+// unsavedQuery returns the console text when it holds a query that isn't
+// one of the saved queries (an empty console has nothing to save).
+func (t *ConsoleTab) unsavedQuery() (string, bool) {
+	text := t.ed.Text()
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", false
+	}
+	for _, q := range t.a.prefs.QueriesFor(t.connID) {
+		if strings.TrimSpace(q.SQL) == trimmed {
+			return "", false
+		}
+	}
+	return text, true
+}
+
+// queryName suggests a saved query name: the console title unless it is
+// the default "console N".
+func (t *ConsoleTab) queryName() string {
+	if strings.HasPrefix(t.title, "console") {
+		return ""
+	}
+	return t.title
+}
+
 func (t *ConsoleTab) Title() string {
 	return t.cs().name() + " · " + t.title
 }
