@@ -26,7 +26,9 @@ services:
 
   cockroach:
     image: cockroachdb/cockroach:latest-v25.3
-    command: start-single-node --insecure --cache=256MiB --max-sql-memory=256MiB
+    # in-memory store: disposable, and no "insufficient capacity" refusals
+    # on nearly full disks (CI runners)
+    command: start-single-node --insecure --store=type=mem,size=1GiB --cache=256MiB --max-sql-memory=256MiB
     ports: ["127.0.0.1:55257:26257"]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health?ready=1"]
