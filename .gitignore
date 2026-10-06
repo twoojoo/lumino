@@ -2,3 +2,4 @@
 /lumino
 dist/
 *.syso
+.claude/scheduled_tasks.lock
