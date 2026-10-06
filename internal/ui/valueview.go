@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"reflect"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"gioui.org/layout"
 	"gioui.org/widget"
@@ -28,6 +30,9 @@ type valuePanel struct {
 	shown                                string
 	isNull                               bool
 	edited, wasEditable                  bool
+	truncated                            bool    // shown text is cut (never editable)
+	model                                uintptr // identity of the grid model the cell belongs to
+	cache                                renderCache
 	modeBtn                              [3]widget.Clickable
 	copyBtn, nullBtn, applyBtn, closeBtn widget.Clickable
 }
@@ -40,19 +45,35 @@ func newValuePanel(a *App) *valuePanel {
 
 func (v *valuePanel) focused(gtx C) bool { return v.open && gtx.Focused(&v.ed) }
 
+// Limits of the text shown by the panel (huge values would freeze the
+// editor): the rest is replaced by a note and the value becomes read-only.
+const (
+	maxPanelText = 1 << 20
+	maxPanelHex  = 64 * 1024 // bytes dumped in hex mode
+)
+
 // renderValue formats a value for the panel.
 func renderValue(val any, col db.Column, mode int) string {
+	s, _ := renderValueCapped(val, col, mode)
+	return s
+}
+
+// renderValueCapped formats a value for the panel, reporting whether the
+// text was truncated.
+func renderValueCapped(val any, col db.Column, mode int) (string, bool) {
 	if val == nil {
-		return ""
+		return "", false
 	}
 	switch mode {
 	case 1:
 		s := db.FormatValue(val, col.Kind)
-		var out bytes.Buffer
-		if json.Indent(&out, []byte(s), "", "  ") == nil {
-			return out.String()
+		if len(s) <= maxPanelText {
+			var out bytes.Buffer
+			if json.Indent(&out, []byte(s), "", "  ") == nil {
+				s = out.String()
+			}
 		}
-		return s
+		return capText(s)
 	case 2:
 		var b []byte
 		switch x := val.(type) {
@@ -61,21 +82,91 @@ func renderValue(val any, col db.Column, mode int) string {
 		default:
 			b = []byte(db.FormatValue(val, col.Kind))
 		}
-		if len(b) > 64*1024 {
-			b = b[:64*1024]
+		if len(b) > maxPanelHex {
+			return hex.Dump(b[:maxPanelHex]) + truncNote(maxPanelHex, len(b)), true
 		}
-		return hex.Dump(b)
+		return hex.Dump(b), false
 	}
 	if b, ok := val.([]byte); ok && (col.Kind == db.KindBytes || !utf8.Valid(b)) {
-		return "0x" + hex.EncodeToString(b)
+		if n := maxPanelText/2 - 1; len(b) > n {
+			return "0x" + hex.EncodeToString(b[:n]) + truncNote(n, len(b)), true
+		}
+		return "0x" + hex.EncodeToString(b), false
 	}
-	return db.FormatValue(val, col.Kind)
+	return capText(db.FormatValue(val, col.Kind))
+}
+
+func capText(s string) (string, bool) {
+	if len(s) <= maxPanelText {
+		return s, false
+	}
+	n := maxPanelText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + truncNote(n, len(s)), true
+}
+
+func truncNote(shown, total int) string {
+	return "\n\n… truncated: showing " + db.HumanBytes(int64(shown)) + " of " + db.HumanBytes(int64(total)) + " (copy the cell to get the full value)"
+}
+
+// renderCache keeps the rendered text of the shown cell: rendering (JSON
+// indent, hex dumps) is too slow for every frame on big values.
+type renderCache struct {
+	ok        bool
+	r, c      int
+	mode      int
+	model     uintptr
+	ptr       uintptr // data pointer and length of the string/[]byte value
+	n         int
+	text      string
+	truncated bool
+}
+
+// valueRef identifies a string or []byte value without comparing contents
+// (other values are cheap to render and are not cached).
+func valueRef(val any) (uintptr, int, bool) {
+	switch x := val.(type) {
+	case string:
+		return uintptr(unsafe.Pointer(unsafe.StringData(x))), len(x), true
+	case []byte:
+		return uintptr(unsafe.Pointer(unsafe.SliceData(x))), len(x), true
+	}
+	return 0, 0, false
+}
+
+func (v *valuePanel) render(r, c int, val any, col db.Column, model uintptr) (string, bool) {
+	ptr, n, cacheable := valueRef(val)
+	k := &v.cache
+	if cacheable && k.ok && k.r == r && k.c == c && k.mode == v.mode && k.model == model && k.ptr == ptr && k.n == n {
+		return k.text, k.truncated
+	}
+	text, trunc := renderValueCapped(val, col, v.mode)
+	*k = renderCache{ok: cacheable, r: r, c: c, mode: v.mode, model: model, ptr: ptr, n: n, text: text, truncated: trunc}
+	return text, trunc
+}
+
+// modelID identifies the grid's model: a reload, a new result or a sort
+// done by replacing the model invalidates row/column indexes.
+func modelID(g *DataGrid) uintptr {
+	if g == nil || g.model == nil {
+		return 0
+	}
+	rv := reflect.ValueOf(g.model)
+	if rv.Kind() == reflect.Pointer {
+		return rv.Pointer()
+	}
+	return 0
 }
 
 // layoutWith draws the grid with the panel on its right. get returns the
 // value of a cell; edit (nil = read-only) applies a new value.
 func (v *valuePanel) layoutWith(gtx C, g *DataGrid, get func(r, c int) (any, db.Column, bool), edit func(r, c int, text string, null bool)) D {
 	if !v.open {
+		// closed (button, toggle…): an abandoned edit must not be written
+		// when the panel reopens
+		v.edited, v.r, v.c = false, -1, -1
 		return g.Layout(gtx)
 	}
 	w := min(gtx.Dp(380), gtx.Constraints.Max.X/2)
@@ -101,6 +192,12 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	val, col, has := get(r, c)
 	if v.closeBtn.Clicked(gtx) {
 		v.open = false
+		v.edited = false
+	}
+	model := modelID(g)
+	if v.edited && v.r >= 0 && v.dropEdit(model, g, get) {
+		// the cell the edit belongs to is gone or now holds another record
+		v.edited, v.r, v.c = false, -1, -1
 	}
 	// a pending edit is kept as a grid change when the panel moves away
 	// from its cell (they are only buffered until Save)
@@ -117,7 +214,7 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 			v.r = -1 // re-render
 		}
 	}
-	text := renderValue(val, col, v.mode)
+	text, truncated := v.render(r, c, val, col, model)
 	// load the cell into the editor when the selection moves (or the value
 	// changed under an unedited editor)
 	if r != v.r || c != v.c {
@@ -125,6 +222,7 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 	}
 	if r != v.r || c != v.c || !v.edited && text != v.shown {
 		v.r, v.c, v.shown, v.isNull, v.edited = r, c, text, val == nil, false
+		v.model, v.truncated = model, truncated
 		v.ed.SetText(text)
 	}
 	for {
@@ -136,7 +234,7 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 			v.edited = v.ed.Text() != v.shown
 		}
 	}
-	editable := edit != nil && has && v.mode == 0 && g.Editable != nil && g.Editable(r, c)
+	editable := edit != nil && has && v.mode == 0 && !v.truncated && g.Editable != nil && g.Editable(r, c)
 	v.ed.ReadOnly = !editable
 	v.wasEditable = editable
 	if v.copyBtn.Clicked(gtx) && has {
@@ -223,6 +321,24 @@ func (v *valuePanel) layoutPanel(gtx C, g *DataGrid, get func(r, c int) (any, db
 			})
 		}),
 	)
+}
+
+// dropEdit reports whether the pending edit no longer belongs to the cell
+// at (v.r, v.c): the model was replaced, shrank below the row, or the cell
+// now renders differently from what the edit started from.
+func (v *valuePanel) dropEdit(model uintptr, g *DataGrid, get func(r, c int) (any, db.Column, bool)) bool {
+	if model != v.model {
+		return true
+	}
+	if g != nil && g.model != nil && v.r >= g.model.Rows() {
+		return true
+	}
+	val, col, has := get(v.r, v.c)
+	if !has {
+		return true
+	}
+	text, _ := v.render(v.r, v.c, val, col, model)
+	return text != v.shown
 }
 
 func (v *valuePanel) editorBox(gtx C, th *material.Theme, hint string) D {

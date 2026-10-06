@@ -4,6 +4,7 @@ import (
 	"image"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"gioui.org/io/event"
@@ -39,6 +40,7 @@ type completion struct {
 	top     int
 	start   tpos // start of the replaced prefix
 	stale   bool // buffer changed under the popup
+	fuzzy   bool // opened explicitly (Ctrl+Space): subsequence matches too
 	hovered bool
 	tag     int
 	rowH    int
@@ -92,6 +94,11 @@ func analyzeSQL(stmt string, caret int, lex *sqlx.Options, kw map[string]bool) s
 	}
 	ctx.prefix = stmt[i:caret]
 	j := i
+	// an identifier being typed after an opening quote: u."na, "public"."us,
+	// [dbo].[us — the qualifier chain starts before the quote
+	if i >= 2 && stmt[i-2] == '.' && (stmt[i-1] == '"' || stmt[i-1] == '`' || stmt[i-1] == '[') {
+		j = i - 1
+	}
 	for j > 0 && stmt[j-1] == '.' {
 		k := j - 1
 		// quoted part
@@ -219,8 +226,15 @@ func analyzeSQL(stmt string, caret int, lex *sqlx.Options, kw map[string]bool) s
 	return ctx
 }
 
-// filterItems keeps the items matching prefix, best first.
+// filterItems keeps the items matching prefix, best first (fuzzy).
 func filterItems(all []compItem, prefix string) []compItem {
+	return filterItemsMode(all, prefix, true)
+}
+
+// filterItemsMode keeps the items matching prefix. Without fuzzy (popups
+// opened while typing) only the label start or the start of one of its
+// words (after "_" or ".") may match: "8" must not become int8.
+func filterItemsMode(all []compItem, prefix string, fuzzy bool) []compItem {
 	p := strings.ToLower(prefix)
 	out := make([]compItem, 0, 64)
 	for _, it := range all {
@@ -232,6 +246,11 @@ func filterItems(all []compItem, prefix string) []compItem {
 			it.score = 5
 		case strings.HasPrefix(l, p):
 			it.score = 4
+		case !fuzzy:
+			if !wordStartMatch(l, p) {
+				continue
+			}
+			it.score = 3
 		case strings.Contains(l, p):
 			it.score = 2
 		case subsequence(l, p):
@@ -260,6 +279,17 @@ func filterItems(all []compItem, prefix string) []compItem {
 
 var kindRank = map[string]int{"column": 6, "alias": 5, "table": 4, "view": 4, "schema": 3, "function": 2, "keyword": 1, "type": 1}
 
+// wordStartMatch reports whether p starts one of the words of l after
+// the first ("_" and "." separate words).
+func wordStartMatch(l, p string) bool {
+	for i := 0; i < len(l); i++ {
+		if (l[i] == '_' || l[i] == '.') && strings.HasPrefix(l[i+1:], p) {
+			return true
+		}
+	}
+	return false
+}
+
 func subsequence(s, sub string) bool {
 	i := 0
 	for j := 0; j < len(s) && i < len(sub); j++ {
@@ -270,8 +300,14 @@ func subsequence(s, sub string) bool {
 	return i == len(sub)
 }
 
-// triggerCompletion opens (or refreshes) the popup at the caret.
+// triggerCompletion opens (or refreshes) the popup at the caret. Explicit
+// requests (Ctrl+Space) match fuzzily; automatic ones (typing) only by
+// prefix, never on numbers, comments or string literals.
 func (e *CodeEditor) triggerCompletion(explicit bool) {
+	e.openCompletion(explicit, explicit)
+}
+
+func (e *CodeEditor) openCompletion(explicit, fuzzy bool) {
 	if e.Completer == nil || e.ReadOnly {
 		return
 	}
@@ -280,10 +316,17 @@ func (e *CodeEditor) triggerCompletion(explicit bool) {
 	start.col = min(start.col, e.caret.col)
 	prefix := line[start.col:e.caret.col]
 	afterDot := start.col > 0 && line[start.col-1] == '.'
+	if e.comp != nil && e.comp.fuzzy && e.comp.start == start {
+		fuzzy = true // keep the mode of a popup opened explicitly
+	}
 	if !explicit && prefix == "" && !afterDot && e.comp == nil {
 		return
 	}
 	if !explicit && !afterDot && len(prefix) < 1 {
+		e.comp = nil
+		return
+	}
+	if !explicit && !e.completableAt(start, prefix) {
 		e.comp = nil
 		return
 	}
@@ -292,7 +335,7 @@ func (e *CodeEditor) triggerCompletion(explicit bool) {
 		e.comp = nil
 		return
 	}
-	items := filterItems(req.items, prefix)
+	items := filterItemsMode(req.items, prefix, fuzzy)
 	if len(items) == 0 {
 		e.comp = nil
 		return
@@ -310,12 +353,35 @@ func (e *CodeEditor) triggerCompletion(explicit bool) {
 			}
 		}
 	}
-	nc := &completion{all: req.items, items: items, sel: sel, start: start}
+	nc := &completion{all: req.items, items: items, sel: sel, start: start, fuzzy: fuzzy}
 	if e.comp != nil && e.comp.start == start {
 		nc.top, nc.hovered = e.comp.top, e.comp.hovered
 		nc.move(0)
 	}
 	e.comp = nc
+}
+
+// completableAt reports whether typing may open the popup: not on a
+// number (LIMIT 8) and not inside a comment or a string literal (quoted
+// identifiers do complete).
+func (e *CodeEditor) completableAt(start tpos, prefix string) bool {
+	if r, _ := utf8.DecodeRuneInString(prefix); prefix != "" && unicode.IsDigit(r) {
+		return false
+	}
+	col := e.caret.col
+	if col == 0 {
+		return true
+	}
+	for _, t := range e.tokens(e.caret.line) {
+		if t.Start < col && col <= t.End {
+			switch t.Kind {
+			case sqlx.TComment, sqlx.TString, sqlx.TNumber:
+				return false
+			}
+			break
+		}
+	}
+	return true
 }
 
 func (e *CodeEditor) refreshCompletion() {
@@ -324,7 +390,7 @@ func (e *CodeEditor) refreshCompletion() {
 			e.comp = nil
 			return
 		}
-		e.triggerCompletion(true)
+		e.openCompletion(true, e.comp.fuzzy)
 	}
 }
 
@@ -359,12 +425,23 @@ func (c *completion) onKey(k key.Event) bool {
 	return true
 }
 
-// accept inserts the selected item.
-func (e *CodeEditor) acceptCompletion() {
+// acceptCompletion inserts the selected item; false when there was
+// nothing to accept (the popup is closed).
+func (e *CodeEditor) acceptCompletion() bool {
 	c := e.comp
+	if c != nil && c.stale {
+		// the buffer changed under the popup (undo in the same frame…)
+		c.stale = false
+		e.refreshCompletion()
+		c = e.comp
+	}
 	if c == nil || c.sel >= len(c.items) {
 		e.comp = nil
-		return
+		return false
+	}
+	if c.start.line != e.caret.line || c.start.line >= e.buf.lineCount() || c.start.col > e.caret.col || c.start.col > len(e.buf.lines[c.start.line]) {
+		e.comp = nil
+		return false
 	}
 	it := c.items[c.sel]
 	ins := it.insert
@@ -378,16 +455,17 @@ func (e *CodeEditor) acceptCompletion() {
 	_, end := e.buf.wordAt(e.caret)
 	end.col = max(end.col, e.caret.col)
 	start := c.start
-	// an identifier typed after an opening quote: replace the quote too and
-	// close it
-	if line := e.buf.lines[start.line]; it.insert == "" && start.col > 0 && (it.kind == "table" || it.kind == "view" || it.kind == "column" || it.kind == "schema") {
-		if open := line[start.col-1]; open == '"' || open == '`' || open == '[' {
-			cl := map[byte]string{'"': `"`, '`': "`", '[': "]"}[open]
+	// an identifier typed after an opening quote: the quote is replaced too
+	// (closed around identifiers, dropped for function calls)
+	if line := e.buf.lines[start.line]; openQuoteBefore(line, start.col) {
+		open := line[start.col-1]
+		cl := map[byte]string{'"': `"`, '`': "`", '[': "]"}[open]
+		if it.insert == "" {
 			ins = string(open) + strings.ReplaceAll(it.label, cl, cl+cl) + cl
-			start.col--
-			if end.col < len(line) && line[end.col] == cl[0] {
-				end.col++
-			}
+		}
+		start.col--
+		if end.col < len(line) && line[end.col] == cl[0] {
+			end.col++
 		}
 	}
 	e.replaceRange(start, end, ins, true)
@@ -395,6 +473,22 @@ func (e *CodeEditor) acceptCompletion() {
 		e.caret.col--
 		e.anchor = e.caret
 	}
+	return true
+}
+
+// openQuoteBefore reports whether line[col-1] opens a quoted identifier
+// (an odd number of " or ` before it: a closing quote doesn't count).
+func openQuoteBefore(line string, col int) bool {
+	if col <= 0 || col > len(line) {
+		return false
+	}
+	switch q := line[col-1]; q {
+	case '[':
+		return true
+	case '"', '`':
+		return strings.Count(line[:col-1], string(q))%2 == 0
+	}
+	return false
 }
 
 // layoutCompletion draws the popup under the caret (above other content).

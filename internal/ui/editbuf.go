@@ -170,6 +170,13 @@ func (b *textBuf) replace(a, z tpos, s string, caret, anchor tpos, brk bool) tpo
 	e := bufEdit{at: a, removed: removed, inserted: s, before: [2]tpos{caret, anchor}, after: [2]tpos{end, end}}
 	now := time.Now()
 	group := len(b.undo)
+	if n := len(b.undo); n > 0 && !brk && b.groupOpen {
+		// an IME composition replaces its own previous text (each preedit
+		// update): one undo step whatever the typing speed
+		if prev := b.undo[n-1]; removed != "" && prev.at == a && prev.inserted == removed && !strings.Contains(s, "\n") {
+			group = prev.group
+		}
+	}
 	if n := len(b.undo); n > 0 && !brk && b.groupOpen && now.Sub(b.lastEdit) < 1200*time.Millisecond {
 		prev := b.undo[n-1]
 		// typing continues where the previous edit ended

@@ -80,6 +80,9 @@ type CodeEditor struct {
 	// IME: the snippet is the caret line, offsets are runes in it
 	imeLine int
 	imeText string
+	// skipNL: a Return key press just inserted a newline; an EditEvent "\n"
+	// for the same keystroke (platforms sending both) is ignored
+	skipNL bool
 
 	comp *completion
 	find *findBar
@@ -200,7 +203,11 @@ func (e *CodeEditor) SelectRange(a, z int) {
 
 // Insert replaces the selection with s (undoable).
 func (e *CodeEditor) Insert(s string) {
-	e.replaceSel(s, true)
+	e.replaceSel(normalizeNewlines(s), true)
+}
+
+func normalizeNewlines(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
 }
 
 func (e *CodeEditor) Focus(gtx C) { gtx.Execute(key.FocusCmd{Tag: e}) }
@@ -420,8 +427,10 @@ func (e *CodeEditor) update(gtx C) {
 		key.Filter{Focus: e, Name: key.NameDeleteBackward, Optional: key.ModShortcutAlt | key.ModShift | key.ModCtrl},
 		key.Filter{Focus: e, Name: key.NameDeleteForward, Optional: key.ModShortcutAlt | key.ModShift | key.ModCtrl},
 		key.Filter{Focus: e, Name: key.NameTab, Optional: key.ModShift},
-		key.Filter{Focus: e, Name: key.NameReturn, Required: key.ModShortcut, Optional: key.ModShift},
-		key.Filter{Focus: e, Name: key.NameEnter, Required: key.ModShortcut, Optional: key.ModShift},
+		// plain Return inserts a newline (most platforms send no EditEvent
+		// for it), Ctrl/Cmd(+Shift)+Return run statements
+		key.Filter{Focus: e, Name: key.NameReturn, Optional: key.ModShortcut | key.ModShift},
+		key.Filter{Focus: e, Name: key.NameEnter, Optional: key.ModShortcut | key.ModShift},
 		key.Filter{Focus: e, Name: "A", Required: key.ModShortcut},
 		key.Filter{Focus: e, Name: "C", Required: key.ModShortcut},
 		key.Filter{Focus: e, Name: "X", Required: key.ModShortcut},
@@ -440,9 +449,6 @@ func (e *CodeEditor) update(gtx C) {
 	if e.comp != nil || e.find.open {
 		filters = append(filters, key.Filter{Focus: e, Name: key.NameEscape})
 	}
-	if e.comp != nil {
-		filters = append(filters, key.Filter{Focus: e, Name: key.NameReturn}, key.Filter{Focus: e, Name: key.NameEnter})
-	}
 	for {
 		ev, ok := gtx.Event(filters...)
 		if !ok {
@@ -456,9 +462,15 @@ func (e *CodeEditor) update(gtx C) {
 			}
 		case key.Event:
 			if ev.State == key.Press {
+				e.skipNL = false
 				e.onKey(gtx, ev)
 			}
 		case key.EditEvent:
+			if e.skipNL && ev.Text == "\n" {
+				e.skipNL = false
+				continue
+			}
+			e.skipNL = false
 			e.onEdit(ev)
 		case key.SnippetEvent:
 			// snippets always cover the caret line
@@ -470,8 +482,7 @@ func (e *CodeEditor) update(gtx C) {
 			}
 		case transfer.DataEvent:
 			if b, err := io.ReadAll(ev.Open()); err == nil {
-				s := strings.ReplaceAll(strings.ReplaceAll(string(b), "\r\n", "\n"), "\r", "\n")
-				e.replaceSel(s, true)
+				e.replaceSel(normalizeNewlines(string(b)), true)
 			}
 		}
 	}
@@ -527,7 +538,7 @@ func (e *CodeEditor) onEdit(ev key.EditEvent) {
 		}
 	}
 	e.replaceSel(s, strings.ContainsAny(s, " \n\t,;"))
-	if len(s) == 1 && (isWordRune(rune(s[0])) || s == ".") {
+	if r, n := utf8.DecodeRuneInString(s); n > 0 && n == len(s) && (isWordRune(r) || r == '.') {
 		e.triggerCompletion(false)
 	} else if e.comp != nil {
 		e.comp = nil
@@ -536,6 +547,9 @@ func (e *CodeEditor) onEdit(ev key.EditEvent) {
 
 // newline inserts a line break keeping the indentation.
 func (e *CodeEditor) newline() {
+	if e.ReadOnly {
+		return
+	}
 	l := e.buf.lines[e.caret.line]
 	ind := indentOf(l[:min(len(l), e.caret.col)])
 	trimmed := strings.TrimRight(l[:e.caret.col], " \t")
@@ -588,8 +602,10 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 		return
 	}
 	if e.comp != nil && !short && (k.Name == key.NameReturn || k.Name == key.NameEnter || k.Name == key.NameTab) {
-		e.acceptCompletion()
-		return
+		if e.acceptCompletion() {
+			return
+		}
+		// the popup went away (stale after an undo…): the key acts normally
 	}
 	resetX := true
 	switch k.Name {
@@ -608,6 +624,9 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 			if e.OnCommand != nil {
 				e.OnCommand(cmd)
 			}
+		} else {
+			e.newline()
+			e.skipNL = true
 		}
 	case key.NameLeftArrow:
 		switch {
@@ -757,6 +776,9 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 			gtx.Execute(clipboard.ReadCmd{Tag: e})
 		}
 	case "Z":
+		if e.ReadOnly {
+			return
+		}
 		var c, an tpos
 		var ok bool
 		if shift {
@@ -769,6 +791,9 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 			e.changed()
 		}
 	case "Y":
+		if e.ReadOnly {
+			return
+		}
 		if c, an, ok := e.buf.redoStep(); ok {
 			e.caret, e.anchor = c, an
 			e.changed()
@@ -778,7 +803,7 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 	case "K":
 		e.deleteLines()
 	case "U":
-		if s := e.Selected(); s != "" {
+		if s := e.Selected(); s != "" && !e.ReadOnly {
 			up := strings.ToUpper(s)
 			if up == s {
 				up = strings.ToLower(s)
@@ -807,6 +832,9 @@ func (e *CodeEditor) selLines() (int, int) {
 
 // indent shifts the selected lines by 4 spaces.
 func (e *CodeEditor) indent(in bool) {
+	if e.ReadOnly {
+		return
+	}
 	from, to := e.selLines()
 	lines := make([]string, 0, to-from+1)
 	for l := from; l <= to; l++ {
@@ -830,16 +858,45 @@ func (e *CodeEditor) indent(in bool) {
 	e.replaceLines(from, to, lines)
 }
 
-// replaceLines replaces whole lines [from, to] and selects them.
+// replaceLines replaces whole lines [from, to] and selects them. Without
+// a selection the caret stays a caret, shifted by the edit of its line.
 func (e *CodeEditor) replaceLines(from, to int, lines []string) {
+	if e.ReadOnly {
+		return
+	}
+	single := e.caret == e.anchor
+	caret := e.caret
+	oldLine := e.buf.lines[caret.line]
 	a := tpos{from, 0}
 	z := tpos{to, len(e.buf.lines[to])}
 	e.replaceRange(a, z, strings.Join(lines, "\n"), true)
+	if single && len(lines) == to-from+1 && caret.line >= from && caret.line <= to {
+		e.caret = e.buf.clamp(tpos{caret.line, shiftCol(oldLine, e.buf.lines[caret.line], caret.col)})
+		e.anchor = e.caret
+		return
+	}
 	e.anchor = tpos{from, 0}
 	e.caret = tpos{from + len(lines) - 1, len(e.buf.lines[from+len(lines)-1])}
 }
 
+// shiftCol maps a column of old to new when a prefix was inserted or
+// removed (indent, comment toggle): columns before the change stay, the
+// others move by the length difference.
+func shiftCol(old, new string, col int) int {
+	p := 0
+	for p < len(old) && p < len(new) && old[p] == new[p] {
+		p++
+	}
+	if col < p {
+		return col
+	}
+	return max(p, col+len(new)-len(old))
+}
+
 func (e *CodeEditor) toggleComment() {
+	if e.ReadOnly {
+		return
+	}
 	from, to := e.selLines()
 	all := true
 	for l := from; l <= to; l++ {
@@ -868,6 +925,9 @@ func (e *CodeEditor) toggleComment() {
 }
 
 func (e *CodeEditor) duplicate() {
+	if e.ReadOnly {
+		return
+	}
 	if s := e.Selected(); s != "" {
 		z := maxPos(e.caret, e.anchor)
 		e.replaceRange(z, z, s, true)
@@ -882,6 +942,9 @@ func (e *CodeEditor) duplicate() {
 }
 
 func (e *CodeEditor) deleteLines() {
+	if e.ReadOnly {
+		return
+	}
 	from, to := e.selLines()
 	a := tpos{from, 0}
 	z := tpos{to + 1, 0}
@@ -896,6 +959,9 @@ func (e *CodeEditor) deleteLines() {
 
 // moveLines moves the selected lines up or down.
 func (e *CodeEditor) moveLines(d int) {
+	if e.ReadOnly {
+		return
+	}
 	from, to := e.selLines()
 	if d < 0 && from == 0 || d > 0 && to >= e.buf.lineCount()-1 {
 		return
@@ -1234,6 +1300,8 @@ func (e *CodeEditor) updateIME(gtx C, textX int) {
 	}
 	x := float32(textX) + float32(visCol(l, e.caret.col))*e.charW
 	y := float32(e.caret.line*e.lineH - e.scrollY + e.lineH)
-	gtx.Execute(key.SelectionCmd{Tag: e, Range: key.Range{Start: a, End: c},
+	// Gio convention (widget.Editor, SelectionEvent): Start is the caret,
+	// End the other end of the selection
+	gtx.Execute(key.SelectionCmd{Tag: e, Range: key.Range{Start: c, End: a},
 		Caret: key.Caret{Pos: f32.Pt(x, y), Ascent: float32(e.lineH), Descent: 0}})
 }

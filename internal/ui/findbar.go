@@ -177,6 +177,9 @@ func (f *findBar) next(forward bool) {
 }
 
 func (f *findBar) replaceOne() {
+	if f.e.ReadOnly {
+		return
+	}
 	f.search()
 	if f.cur < 0 || f.cur >= len(f.matches) {
 		return
@@ -192,6 +195,9 @@ func (f *findBar) replaceOne() {
 }
 
 func (f *findBar) replaceAll() {
+	if f.e.ReadOnly {
+		return
+	}
 	f.search()
 	if len(f.matches) == 0 {
 		return
@@ -248,6 +254,26 @@ func (f *findBar) update(gtx C) {
 	if !f.open {
 		return
 	}
+	// before the query editor's Update: it would consume Shift+Return as a
+	// plain submit (next match)
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Focus: &f.query, Name: key.NameEscape},
+			key.Filter{Focus: &f.repl, Name: key.NameEscape},
+			key.Filter{Focus: &f.query, Name: key.NameReturn, Required: key.ModShift},
+			key.Filter{Focus: &f.query, Name: key.NameEnter, Required: key.ModShift},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(key.Event); ok && e.State == key.Press {
+			if e.Name == key.NameEscape {
+				f.close(gtx)
+				return
+			}
+			f.next(false)
+		}
+	}
 	for {
 		ev, ok := f.query.Update(gtx)
 		if !ok {
@@ -273,23 +299,6 @@ func (f *findBar) update(gtx C) {
 		}
 		if _, ok := ev.(widget.SubmitEvent); ok {
 			f.replaceOne()
-		}
-	}
-	for {
-		ev, ok := gtx.Event(
-			key.Filter{Focus: &f.query, Name: key.NameEscape},
-			key.Filter{Focus: &f.repl, Name: key.NameEscape},
-			key.Filter{Focus: &f.query, Name: key.NameReturn, Required: key.ModShift},
-		)
-		if !ok {
-			break
-		}
-		if e, ok := ev.(key.Event); ok && e.State == key.Press {
-			if e.Name == key.NameEscape {
-				f.close(gtx)
-			} else {
-				f.next(false)
-			}
 		}
 	}
 	if f.caseBtn.Clicked(gtx) {
