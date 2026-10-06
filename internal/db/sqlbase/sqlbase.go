@@ -661,7 +661,8 @@ func (r *Result) loadColumns() error {
 			f(&r.cols[i])
 		}
 	}
-	r.done = len(r.cols) == 0
+	// zero columns can still mean rows (PostgreSQL: SELECT FROM t): they
+	// are counted, the cursor ends by itself otherwise
 	return nil
 }
 

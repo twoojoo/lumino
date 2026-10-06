@@ -76,6 +76,9 @@ func (r *resultSet) summary() string {
 		return "OK · " + fmtDur(r.elapsed)
 	}
 	s := fmt.Sprintf("%d row(s)", len(r.rows))
+	if len(r.cols) == 0 && len(r.rows) > 0 {
+		s += " without columns (empty select list?)"
+	}
 	if r.more {
 		s += "+ (scroll to fetch more)"
 	}

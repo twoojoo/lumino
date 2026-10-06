@@ -107,3 +107,22 @@ func TestSessionLifecycle(t *testing.T) {
 		}
 	})
 }
+
+// TestZeroColumnRows: PostgreSQL accepts an empty select list (SELECT FROM
+// t): the rows must be reported, not swallowed.
+func TestZeroColumnRows(t *testing.T) {
+	ctx := context.Background()
+	_, s := pgrOpen(t, "postgres", nil)
+	r, err := s.Execute(ctx, "SELECT FROM generate_series(1, 3)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if cols := r.Columns(); cols == nil || len(cols) != 0 {
+		t.Fatalf("columns %v", cols)
+	}
+	rows, more, err := r.Fetch(ctx, 100)
+	if err != nil || more || len(rows) != 3 {
+		t.Fatalf("rows=%d more=%v err=%v", len(rows), more, err)
+	}
+}
