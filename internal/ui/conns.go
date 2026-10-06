@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/giovanni/lumino/internal/db"
+	"github.com/giovanni/lumino/internal/db/sshtunnel"
 	"github.com/giovanni/lumino/internal/knownhosts"
 	"github.com/giovanni/lumino/internal/prefs"
 	"github.com/giovanni/lumino/internal/safety"
@@ -39,7 +40,9 @@ type connState struct {
 	conn   db.Conn
 	status connStatus
 	err    error
-	gen    int // bumped on every connect/disconnect: drops stale results
+	// askPassphrase: the SSH key is encrypted and no passphrase is stored
+	askPassphrase bool
+	gen           int // bumped on every connect/disconnect: drops stale results
 
 	catalogs   []string
 	schemas    map[string][]db.Schema // by catalog
@@ -47,6 +50,8 @@ type connState struct {
 	tables     map[db.ObjectRef]*db.TableInfo
 	completion map[metaKey]map[string][]string
 	loading    map[string]bool
+	loadSeq    map[string]int // load number per key: invalidation drops loads in flight
+	seq        int
 	errs       map[string]error
 	waiters    []connWaiter
 }
@@ -97,7 +102,26 @@ func (cs *connState) resetMeta() {
 	cs.tables = map[db.ObjectRef]*db.TableInfo{}
 	cs.completion = map[metaKey]map[string][]string{}
 	cs.loading = map[string]bool{}
+	cs.loadSeq = map[string]int{}
 	cs.errs = map[string]error{}
+}
+
+// forget drops the load state of a key (exact) or of the keys with a
+// prefix: a load in flight then can't store stale metadata after a
+// refresh, and a failed one is retried.
+func (cs *connState) forget(key string, exact bool) {
+	match := func(k string) bool { return k == key || !exact && strings.HasPrefix(k, key) }
+	for k := range cs.loadSeq {
+		if match(k) {
+			delete(cs.loadSeq, k)
+			delete(cs.loading, k)
+		}
+	}
+	for k := range cs.errs {
+		if match(k) {
+			delete(cs.errs, k)
+		}
+	}
 }
 
 // conn returns the runtime state of a connection id.
@@ -169,12 +193,14 @@ func (a *App) connectOr(id string, then func(*connState), failed func(error)) {
 		}
 	}
 	needSSH := false
-	if c.SSH != nil && c.SSH.Host != "" && (c.SSH.Auth == "password" || c.SSH.Auth == "") {
+	if c.SSH != nil && c.SSH.Host != "" && (c.SSH.Auth == "password" || c.SSH.Auth == "" || c.SSH.Auth == "key") {
+		// password, or the passphrase of an encrypted key (asked only
+		// once the key turned out to be encrypted)
 		s := *c.SSH
 		if v, ok := secrets.Get(id, secrets.SSH); ok {
 			s.Secret = v
 		} else {
-			needSSH = true
+			needSSH = s.Auth != "key" || cs.askPassphrase
 		}
 		c.SSH = &s
 	}
@@ -183,7 +209,7 @@ func (a *App) connectOr(id string, then func(*connState), failed func(error)) {
 		cs.status, cs.err = stConnecting, nil
 		cs.gen++
 		gen := cs.gen
-		a.overlay = newSecretPrompt(a, &c, needPw, needSSH, func(pw, sshSecret string, save bool) {
+		a.pushOverlay(newSecretPrompt(a, &c, needPw, needSSH, func(pw, sshSecret string, save bool) {
 			if cs.gen != gen {
 				return
 			}
@@ -206,7 +232,7 @@ func (a *App) connectOr(id string, then func(*connState), failed func(error)) {
 			if cs.gen == gen {
 				cs.fail(errConnectCancelled)
 			}
-		})
+		}))
 		return
 	}
 	a.openConn(cs, c, nil)
@@ -228,7 +254,7 @@ func (a *App) openConn(cs *connState, c db.Config, onOK func()) {
 		a.post(func() {
 			cf := newConfirm(a, "Trust SSH host?", fmt.Sprintf("The SSH host %s is not known yet.\n\nKey fingerprint:\n%s\n\nTrust it and remember it?", host, fp), false, func(bool) { answer <- true })
 			cf.onCancel = func() { answer <- false }
-			a.overlay = cf
+			a.pushOverlay(cf)
 		})
 		select {
 		case ok := <-answer:
@@ -248,9 +274,16 @@ func (a *App) openConn(cs *connState, c db.Config, onOK func()) {
 				return
 			}
 			if err != nil {
+				if errors.Is(err, sshtunnel.ErrPassphrase) && !cs.askPassphrase {
+					// ask for the key passphrase and retry (waiters kept)
+					cs.askPassphrase, cs.status = true, stIdle
+					a.connectOr(cs.id, nil, nil)
+					return
+				}
 				cs.fail(err)
 				return
 			}
+			cs.askPassphrase = false
 			cs.conn, cs.status = conn, stReady
 			cs.resetMeta()
 			if onOK != nil {
@@ -275,7 +308,7 @@ func (cs *connState) fail(err error) {
 	cs.dropWaiters(err)
 	var ce *knownhosts.ErrChanged
 	if errors.As(err, &ce) {
-		cs.a.overlay = newMessage(cs.a, "SSH host key changed", ce.Error(), true)
+		cs.a.pushOverlay(newMessage(cs.a, "SSH host key changed", ce.Error(), true))
 	}
 	if err != errConnectCancelled {
 		cs.a.flash(fmt.Sprintf("%s: %v", cs.name(), err), true)
@@ -308,6 +341,8 @@ func (a *App) disconnect(id string) {
 	}
 	cs.conn, cs.status, cs.err = nil, stIdle, nil
 	cs.dropWaiters(errors.New("disconnected"))
+	// collapsed: an expanded idle connection reconnects on the next frame
+	a.sidebar.expand(connKey(id), false)
 	cs.resetMeta()
 }
 
@@ -321,15 +356,18 @@ func (cs *connState) load(key string, fetch func(ctx context.Context, c db.Conn)
 	}
 	cs.loading[key] = true
 	delete(cs.errs, key)
-	gen, c := cs.gen, cs.conn
+	cs.seq++
+	cs.loadSeq[key] = cs.seq
+	gen, c, seq := cs.gen, cs.conn, cs.seq
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), db.MetaTimeout)
 		v, err := fetch(ctx, c)
 		cancel()
 		cs.a.post(func() {
-			if cs.gen != gen {
-				return
+			if cs.gen != gen || cs.loadSeq[key] != seq {
+				return // reconnected or refreshed meanwhile
 			}
+			delete(cs.loadSeq, key)
 			delete(cs.loading, key)
 			if err != nil {
 				cs.errs[key] = err
@@ -342,7 +380,12 @@ func (cs *connState) load(key string, fetch func(ctx context.Context, c db.Conn)
 
 func (cs *connState) loadCatalogs() {
 	cs.load("catalogs", func(ctx context.Context, c db.Conn) (any, error) { return c.Catalog().Catalogs(ctx) },
-		func(v any) { cs.catalogs = v.([]string) })
+		func(v any) {
+			cs.catalogs = v.([]string)
+			if cs.catalogs == nil {
+				cs.catalogs = []string{} // loaded, empty (nil means not loaded)
+			}
+		})
 }
 
 func (cs *connState) loadSchemas(cat string) {
@@ -356,7 +399,9 @@ func (cs *connState) loadObjects(k metaKey) {
 	}, func(v any) { cs.objects[k] = v.([]db.Object) })
 }
 
-func tableKey(r db.ObjectRef) string { return "table:" + r.Catalog + "\x00" + r.Schema + "\x00" + r.Name }
+func tableKey(r db.ObjectRef) string {
+	return "table:" + r.Catalog + "\x00" + r.Schema + "\x00" + r.Name
+}
 
 // loadTable describes a table; then runs with the result (also cached).
 func (cs *connState) loadTable(ref db.ObjectRef, then func(*db.TableInfo, error)) {
@@ -373,6 +418,9 @@ func (cs *connState) loadTable(ref db.ObjectRef, then func(*db.TableInfo, error)
 			then(nil, errors.New("not connected"))
 			return
 		}
+		cs.seq++
+		cs.loadSeq[k] = cs.seq
+		seq := cs.seq
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), db.MetaTimeout)
 			t, err := c.Catalog().Table(ctx, ref)
@@ -382,8 +430,8 @@ func (cs *connState) loadTable(ref db.ObjectRef, then func(*db.TableInfo, error)
 					then(nil, errors.New("connection was reset"))
 					return
 				}
-				if err == nil {
-					cs.tables[ref] = t
+				if err == nil && cs.loadSeq[k] == seq {
+					cs.tables[ref] = t // cached unless refreshed meanwhile
 				}
 				then(t, err)
 			})
@@ -398,7 +446,7 @@ func (cs *connState) loadCompletion(k metaKey) {
 	if _, ok := cs.completion[k]; ok {
 		return
 	}
-	cs.load("completion:"+k.catalog+"."+k.schema, func(ctx context.Context, c db.Conn) (any, error) {
+	cs.load("completion:"+k.catalog+"\x00"+k.schema, func(ctx context.Context, c db.Conn) (any, error) {
 		return c.Catalog().Completion(ctx, db.ObjectRef{Catalog: k.catalog, Schema: k.schema})
 	}, func(v any) { cs.completion[k] = v.(map[string][]string) })
 }
@@ -407,9 +455,25 @@ func (cs *connState) loadCompletion(k metaKey) {
 func (cs *connState) refreshSchema(k metaKey) {
 	delete(cs.objects, k)
 	delete(cs.completion, k)
+	// failed loads are retried, loads in flight dropped
+	sk := k.catalog + "\x00" + k.schema
+	cs.forget("objects:"+sk, true)
+	cs.forget("completion:"+sk, true)
+	cs.forget("table:"+sk+"\x00", false)
 	for r := range cs.tables {
 		if keyOf(r) == k {
 			delete(cs.tables, r)
+		}
+	}
+}
+
+// refreshCatalog forgets the schemas of a catalog and their objects.
+func (cs *connState) refreshCatalog(cat string) {
+	delete(cs.schemas, cat)
+	cs.forget("schemas:"+cat, true)
+	for k := range cs.objects {
+		if k.catalog == cat {
+			cs.refreshSchema(k)
 		}
 	}
 }

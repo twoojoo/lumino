@@ -15,6 +15,7 @@ import (
 // cursor, or an update count, or an error.
 type resultSet struct {
 	sql       string
+	bufVer    int // editor version when the statement ran (error marks)
 	stmtStart int // byte offset of the statement in the console text
 	cols      []db.Column
 	rows      []db.Row

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/giovanni/lumino/internal/db/sqlx"
@@ -39,10 +40,25 @@ func (k StmtKind) Modifies() bool { return k >= StmtWrite }
 
 // Classify inspects a statement for the safety policies. It is
 // deliberately conservative: unknown statements count as writes, and a
-// read statement mentioning a data-changing verb anywhere (SQL Server runs
-// "SELECT 1 DELETE FROM t" as two statements) is a write.
+// read statement using a data-changing verb anywhere (SQL Server runs
+// "SELECT 1 DELETE FROM t" as two statements) is a write. Words used as
+// names (t.update, AS load, a column "lock" in a select list) are not verbs.
 func Classify(stmt string, o *sqlx.Options) StmtKind {
-	ws := classifyWords(stmt, o, 0)
+	toks := classifyTokens(stmt, o, 0)
+	var ws []cword
+	for i, t := range toks {
+		if t.kind != sqlx.TWord {
+			continue
+		}
+		w := cword{text: t.text, depth: t.depth}
+		if i > 0 {
+			w.prev = toks[i-1].text
+		}
+		if i+1 < len(toks) {
+			w.next, w.nextKind = toks[i+1].text, toks[i+1].kind
+		}
+		ws = append(ws, w)
+	}
 	if len(ws) == 0 {
 		return StmtRead // comments only
 	}
@@ -51,25 +67,62 @@ func Classify(stmt string, o *sqlx.Options) StmtKind {
 		words[i] = w.text
 	}
 	k := classifyFirst(words, ws, stmt)
+	switch words[0] {
+	case "SHOW", "LIST", "HELP":
+		return k // SHOW CREATE TABLE … only reports
+	case "EXPLAIN", "DESCRIBE", "DESC":
+		if !slices.Contains(words, "ANALYZE") && !slices.Contains(words, "ANALYSE") {
+			return k // a plain plan doesn't run the statement
+		}
+	}
+	definer := words[0] == "CREATE" || words[0] == "ALTER" || words[0] == "GRANT" || words[0] == "REVOKE" || words[0] == "DENY"
 	// any further verb raises the class (batches without separators,
 	// verbs hidden in subqueries or CTEs)
-	for _, w := range words[1:] {
+	for _, w := range ws[1:] {
 		switch {
-		case w == "DROP" || w == "TRUNCATE":
-			if words[0] != "CREATE" && words[0] != "ALTER" && words[0] != "GRANT" && words[0] != "REVOKE" && words[0] != "DENY" {
-				k = max(k, StmtDestructive)
-			}
-		case dmlVerbs[w]:
-			if words[0] != "CREATE" && words[0] != "ALTER" && words[0] != "GRANT" && words[0] != "REVOKE" && words[0] != "DENY" {
+		case w.prev == "." || w.next == "." || w.prev == "AS":
+			continue // a qualified name or an alias
+		case w.text == "UPDATE" && w.prev == "FOR":
+			k = max(k, StmtWrite) // SELECT … FOR UPDATE takes row locks
+		case sideEffectFuncs[w.text]:
+			if w.next == "(" {
 				k = max(k, StmtWrite)
 			}
-		case ddlVerbs[w]:
-			k = max(k, StmtWrite)
-		case sideEffectFuncs[w]:
+		case !w.verbLike():
+		case w.text == "DROP" || w.text == "TRUNCATE":
+			if !definer {
+				k = max(k, StmtDestructive)
+			}
+		case dmlVerbs[w.text]:
+			if !definer {
+				k = max(k, StmtWrite)
+			}
+		case ddlVerbs[w.text]:
 			k = max(k, StmtWrite)
 		}
 	}
 	return k
+}
+
+// verbLike reports whether a word is used as a statement verb: followed by
+// a name or keyword that continues a statement, not by a comma, an
+// operator or a clause keyword (SELECT lock, load FROM t).
+func (w cword) verbLike() bool {
+	if w.nextKind == sqlx.TQuotedIdent || w.nextKind == sqlx.TString && w.text == "COPY" {
+		return true
+	}
+	if w.nextKind != sqlx.TWord {
+		return false
+	}
+	switch w.next {
+	case "FROM":
+		return w.text == "DELETE" // DELETE FROM t
+	case "AS", "WHERE", "AND", "OR", "ORDER", "GROUP", "LIMIT", "IS", "IN", "NOT", "LIKE", "BETWEEN", "THEN",
+		"ELSE", "END", "WHEN", "ON", "JOIN", "UNION", "HAVING", "DESC", "ASC", "NULLS", "OFFSET", "FETCH",
+		"LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "USING", "INTERSECT", "EXCEPT", "WINDOW", "OVER":
+		return false
+	}
+	return true
 }
 
 // dmlVerbs change data wherever they appear in a statement.
@@ -98,21 +151,34 @@ var readPragmas = map[string]bool{"TABLE_INFO": true, "TABLE_XINFO": true, "INDE
 	"QUICK_CHECK": true, "TABLE_LIST": true}
 
 type cword struct {
-	text  string
-	depth int // parenthesis depth
+	text       string
+	depth      int    // parenthesis depth
+	prev, next string // neighbor tokens (words upper-cased)
+	nextKind   sqlx.TokKind
 }
 
-// classifyWords returns the upper-cased words of stmt with their
-// parenthesis depth. MySQL executable comments (/*! … */, /*M! … */) are
-// code: their content is included.
-func classifyWords(stmt string, o *sqlx.Options, level int) []cword {
-	var out []cword
+// ctok is a significant token (no spaces or comments).
+type ctok struct {
+	text  string
+	kind  sqlx.TokKind
+	depth int
+}
+
+// classifyTokens returns the significant tokens of stmt, words
+// upper-cased, with their parenthesis depth. MySQL executable comments
+// (/*! … */, /*M! … */) are code there: their content is included.
+func classifyTokens(stmt string, o *sqlx.Options, level int) []ctok {
+	var out []ctok
 	depth := 0
+	mysql := o != nil && o.DashSpace // MySQL rules
 	for _, t := range sqlx.Tokens(stmt, o) {
 		txt := stmt[t.Start:t.End]
 		switch t.Kind {
+		case sqlx.TSpace:
+			continue
 		case sqlx.TWord:
-			out = append(out, cword{strings.ToUpper(txt), depth})
+			out = append(out, ctok{strings.ToUpper(txt), t.Kind, depth})
+			continue
 		case sqlx.TPunct:
 			switch txt {
 			case "(":
@@ -125,19 +191,23 @@ func classifyWords(stmt string, o *sqlx.Options, level int) []cword {
 			if !ok {
 				inner, ok = strings.CutPrefix(txt, "/*M!")
 			}
-			if ok && level < 4 {
+			if ok && mysql && level < 4 {
 				inner = strings.TrimSuffix(inner, "*/")
 				inner = strings.TrimLeft(inner, "0123456789") // version
-				for _, w := range classifyWords(inner, o, level+1) {
-					out = append(out, cword{w.text, w.depth + depth})
+				for _, x := range classifyTokens(inner, o, level+1) {
+					x.depth += depth
+					out = append(out, x)
 				}
 			}
+			continue
 		case sqlx.TParam:
 			// MySQL system variables: @@global.x
 			if u := strings.ToUpper(txt); strings.HasPrefix(u, "@@GLOBAL") || strings.HasPrefix(u, "@@PERSIST") {
-				out = append(out, cword{"GLOBAL", depth})
+				out = append(out, ctok{"GLOBAL", sqlx.TWord, depth})
+				continue
 			}
 		}
+		out = append(out, ctok{txt, t.Kind, depth})
 	}
 	return out
 }

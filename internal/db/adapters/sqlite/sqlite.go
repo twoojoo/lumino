@@ -3,7 +3,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -253,8 +255,16 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		q.Set("mode", "ro")
 	}
 	q.Set("_time_format", "sqlite")
-	dsn := "file::memory:?" + q.Encode()
-	if !memory {
+	var dsn string
+	if memory {
+		// a named memdb database is shared by every connection of the pool
+		// (plain :memory: would give each connection its own database) and
+		// uses normal locking, so busy_timeout applies
+		var rnd [8]byte
+		_, _ = rand.Read(rnd[:])
+		q.Set("vfs", "memdb")
+		dsn = "file:/lumino-mem-" + hex.EncodeToString(rnd[:]) + "?" + q.Encode()
+	} else {
 		if dsn, err = fileURI(path, q); err != nil {
 			return nil, err
 		}
@@ -263,11 +273,21 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	var keep *sql.Conn
 	if memory {
-		sdb.SetMaxOpenConns(1) // each connection would be a separate database
+		// the database lives while one connection is open: hold one for the
+		// Conn's lifetime (idle connections are never expired)
+		if keep, err = sdb.Conn(ctx); err != nil {
+			sdb.Close()
+			return nil, mapError(err)
+		}
+	} else {
+		sdb.SetConnMaxIdleTime(10 * time.Minute)
 	}
-	sdb.SetConnMaxIdleTime(10 * time.Minute)
 	if err := sdb.PingContext(ctx); err != nil {
+		if keep != nil {
+			keep.Close()
+		}
 		sdb.Close()
 		return nil, mapError(err)
 	}
@@ -298,6 +318,9 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	}
 	c := &sqlbase.Conn{DB: sdb, Inf: d.Info(), Cap: caps, D: dia, Version: "SQLite " + ver, H: h, InitSQL: cfg.InitSQL}
 	c.Cat = &catalog{db: sdb, d: dia}
+	if keep != nil {
+		c.OnClose = append(c.OnClose, func() { keep.Close() })
+	}
 	return c, nil
 }
 
@@ -358,8 +381,15 @@ func schemaOr(s string) string {
 }
 
 func (c *catalog) Objects(ctx context.Context, schema db.ObjectRef, types ...db.ObjectType) ([]db.Object, error) {
+	// FTS5/R-Tree shadow tables (docs_content, docs_idx…) are internal: hide them.
 	recs, err := sqlbase.Recs(ctx, c.db, "SELECT type, name FROM "+c.master(schema.Schema)+
-		" WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")
+		" m WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"+
+		" AND NOT EXISTS (SELECT 1 FROM pragma_table_list p WHERE p.schema = ? AND p.name = m.name AND p.type = 'shadow')"+
+		" ORDER BY name", schemaOr(schema.Schema))
+	if err != nil { // pragma_table_list needs SQLite 3.37
+		recs, err = sqlbase.Recs(ctx, c.db, "SELECT type, name FROM "+c.master(schema.Schema)+
+			" WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")
+	}
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -390,7 +420,7 @@ func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("%s not found", ref)
 	}
-	sqlText, _ := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE name = ? AND type IN ('table','view')", ref.Name)
+	sqlText, _ := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE name = ? COLLATE NOCASE AND type IN ('table','view')", ref.Name)
 	t := &db.TableInfo{Ref: ref, RowEstimate: -1}
 	pk := map[int64]string{}
 	for _, r := range cols {
@@ -407,23 +437,32 @@ func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 		if n := r.Int("pk"); n > 0 {
 			pk[n] = tc.Name
 			tc.PrimaryKeyNo = int(n)
-			if strings.EqualFold(tc.Type, "INTEGER") {
-				tc.AutoIncr = true // rowid alias
-			}
+			// rowid alias candidate; confirmed below (no WITHOUT ROWID, no
+			// "INTEGER PRIMARY KEY DESC" quirk)
+			tc.AutoIncr = strings.EqualFold(tc.Type, "INTEGER")
 		}
 		t.Columns = append(t.Columns, tc)
 	}
 	for i := int64(1); i <= int64(len(pk)); i++ {
 		t.PrimaryKey = append(t.PrimaryKey, pk[i])
 	}
-	if len(pk) > 1 { // only a single INTEGER PRIMARY KEY aliases the rowid
-		for i := range t.Columns {
-			t.Columns[i].AutoIncr = false
-		}
-	}
 	idx, err := c.pragma(ctx, "index_list", ref.Schema, ref.Name)
 	if err != nil {
 		return nil, err
+	}
+	// Only a single INTEGER PRIMARY KEY aliases the rowid, and only when
+	// SQLite did not build a separate primary key index for it (it does for
+	// WITHOUT ROWID tables and for column-level INTEGER PRIMARY KEY DESC).
+	rowidAlias := len(pk) == 1
+	for _, r := range idx {
+		if r["origin"] == "pk" {
+			rowidAlias = false
+		}
+	}
+	if !rowidAlias {
+		for i := range t.Columns {
+			t.Columns[i].AutoIncr = false
+		}
 	}
 	for _, r := range idx {
 		ix := db.Index{Name: r["name"], Unique: r.Bool("unique"), Primary: r["origin"] == "pk"}
@@ -442,10 +481,8 @@ func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 			ix.Columns = append(ix.Columns, name)
 		}
 		if r.Bool("partial") {
-			isql, _ := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE type = 'index' AND name = ?", ix.Name)
-			if i := strings.LastIndex(strings.ToUpper(isql), " WHERE "); i >= 0 {
-				ix.Where = strings.TrimSpace(isql[i+7:])
-			}
+			isql, _ := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE type = 'index' AND name = ? COLLATE NOCASE", ix.Name)
+			ix.Where = indexWhere(isql)
 		}
 		if r["origin"] == "u" {
 			t.Constraints = append(t.Constraints, db.Constraint{Name: ix.Name, Type: "UNIQUE", Columns: ix.Columns})
@@ -458,6 +495,7 @@ func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 	}
 	var cur *db.ForeignKey
 	curID := ""
+	parentPK := map[string][]string{}
 	for _, r := range fks {
 		if cur == nil || r["id"] != curID {
 			curID = r["id"]
@@ -467,36 +505,117 @@ func (c *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 		}
 		cur.Columns = append(cur.Columns, r["from"])
 		to := r["to"]
-		if to == "" && len(t.PrimaryKey) > 0 {
-			to = "(primary key)"
+		if to == "" { // REFERENCES parent: the parent's primary key, in order
+			ppk, ok := parentPK[r["table"]]
+			if !ok {
+				ppk = c.primaryKey(ctx, ref.Schema, r["table"])
+				parentPK[r["table"]] = ppk
+			}
+			if n := int(r.Int("seq")); n < len(ppk) {
+				to = ppk[n]
+			}
 		}
 		cur.RefColumns = append(cur.RefColumns, to)
 	}
 	for _, chk := range checkClauses(sqlText) {
 		t.Constraints = append(t.Constraints, db.Constraint{Type: "CHECK", Definition: chk})
 	}
-	trg, err := sqlbase.Recs(ctx, c.db, "SELECT name, sql FROM "+c.master(ref.Schema)+" WHERE type = 'trigger' AND tbl_name = ? ORDER BY name", ref.Name)
+	trg, err := sqlbase.Recs(ctx, c.db, "SELECT name, sql FROM "+c.master(ref.Schema)+" WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE ORDER BY name", ref.Name)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	for _, r := range trg {
 		tr := db.Trigger{Name: r["name"], Definition: r["sql"]}
-		up := strings.ToUpper(r["sql"])
-		for _, tm := range []string{"BEFORE", "AFTER", "INSTEAD OF"} {
-			if strings.Contains(up, " "+tm+" ") {
-				tr.Timing = tm
-				break
-			}
-		}
-		for _, e := range []string{"INSERT", "UPDATE", "DELETE"} {
-			if strings.Contains(up, " "+e+" ") {
-				tr.Events = e
-				break
-			}
-		}
+		tr.Timing, tr.Events = triggerTimingEvent(r["sql"])
 		t.Triggers = append(t.Triggers, tr)
 	}
 	return t, nil
+}
+
+// primaryKey returns the primary key columns of a table, in key order.
+func (c *catalog) primaryKey(ctx context.Context, schema, table string) []string {
+	cols, err := c.pragma(ctx, "table_info", schema, table)
+	if err != nil {
+		return nil
+	}
+	pk := map[int64]string{}
+	for _, r := range cols {
+		if n := r.Int("pk"); n > 0 {
+			pk[n] = r["name"]
+		}
+	}
+	var out []string
+	for i := int64(1); i <= int64(len(pk)); i++ {
+		out = append(out, pk[i])
+	}
+	return out
+}
+
+// sigToks returns the tokens that are neither spaces nor comments.
+func sigToks(sqlText string) []sqlx.Token {
+	var out []sqlx.Token
+	for _, t := range sqlx.Tokens(sqlText, &lexOptions) {
+		if t.Kind != sqlx.TSpace && t.Kind != sqlx.TComment {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// indexWhere returns the WHERE predicate of a partial CREATE INDEX.
+func indexWhere(sqlText string) string {
+	depth := 0
+	for _, t := range sigToks(sqlText) {
+		s := sqlText[t.Start:t.End]
+		switch {
+		case t.Kind == sqlx.TPunct && s == "(":
+			depth++
+		case t.Kind == sqlx.TPunct && s == ")":
+			depth--
+		case t.Kind == sqlx.TWord && depth == 0 && strings.EqualFold(s, "WHERE"):
+			return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(sqlText[t.End:]), ";"))
+		}
+	}
+	return ""
+}
+
+// triggerTimingEvent reads "CREATE [TEMP] TRIGGER [IF NOT EXISTS] name
+// [BEFORE|AFTER|INSTEAD OF] INSERT|UPDATE|DELETE …".
+func triggerTimingEvent(sqlText string) (timing, event string) {
+	toks := sigToks(sqlText)
+	word := func(i int) string {
+		if i < len(toks) && toks[i].Kind == sqlx.TWord {
+			return strings.ToUpper(sqlText[toks[i].Start:toks[i].End])
+		}
+		return ""
+	}
+	i := 0
+	for i < len(toks) && word(i) != "TRIGGER" {
+		i++
+	}
+	i++
+	if word(i) == "IF" && word(i+1) == "NOT" && word(i+2) == "EXISTS" {
+		i += 3
+	}
+	i++ // name
+	for i+1 < len(toks) && toks[i].Kind == sqlx.TPunct && sqlText[toks[i].Start:toks[i].End] == "." {
+		i += 2 // schema.name
+	}
+	switch word(i) {
+	case "BEFORE", "AFTER":
+		timing = word(i)
+		i++
+	case "INSTEAD":
+		timing = "INSTEAD OF"
+		i += 2
+	default:
+		timing = "BEFORE" // SQLite's default
+	}
+	switch w := word(i); w {
+	case "INSERT", "UPDATE", "DELETE":
+		event = w
+	}
+	return timing, event
 }
 
 // checkClauses extracts CHECK (…) clauses from a CREATE TABLE statement.
@@ -580,7 +699,7 @@ func generatedExpr(sqlText, col string) string {
 }
 
 func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
-	main, err := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE name = ? AND type IN ('table','view','index','trigger')", ref.Name)
+	main, err := sqlbase.One(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE name = ? COLLATE NOCASE AND type IN ('table','view','index','trigger')", ref.Name)
 	if err != nil {
 		return "", mapError(err)
 	}
@@ -590,7 +709,7 @@ func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 	var b strings.Builder
 	b.WriteString(main + ";\n")
 	if ref.Type == db.ObjTable || ref.Type == "" {
-		recs, err := sqlbase.Recs(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE tbl_name = ? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type, name", ref.Name)
+		recs, err := sqlbase.Recs(ctx, c.db, "SELECT sql FROM "+c.master(ref.Schema)+" WHERE tbl_name = ? COLLATE NOCASE AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type, name", ref.Name)
 		if err != nil {
 			return "", mapError(err)
 		}

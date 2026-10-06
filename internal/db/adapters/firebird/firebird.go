@@ -272,6 +272,7 @@ func mapError(err error) error {
 		if m := lineColRx.FindStringSubmatch(msg); m != nil {
 			e.Line, _ = strconv.Atoi(m[1])
 			col, _ := strconv.Atoi(m[2])
+			e.Column = col
 			if e.Line == 1 {
 				e.Position = col
 			}

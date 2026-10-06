@@ -101,9 +101,7 @@ FROM system.tables WHERE database = ? AND name = ?`, Args: []any{ref.Schema, ref
 		if b := m.Int("total_bytes"); b > 0 {
 			t.Extra = append(t.Extra, [2]string{"Size", db.HumanBytes(b)})
 		}
-		for _, k := range sqlbase.SplitList(m["primary_key"]) {
-			t.PrimaryKey = append(t.PrimaryKey, strings.Trim(k, "`"))
-		}
+		t.PrimaryKey = keyColumns(m["primary_key"], t.Columns)
 	}
 	for i, pk := range t.PrimaryKey {
 		for j := range t.Columns {
@@ -117,6 +115,129 @@ FROM system.tables WHERE database = ? AND name = ?`, Args: []any{ref.Schema, ref
 			Method: fmt.Sprintf("%s GRANULARITY %s", r["type"], r["granularity"])})
 	}
 	return t, nil
+}
+
+// keyColumns returns the columns identifying a row for a primary key
+// expression such as "a, cityHash64(b, a), `we,ird`": plain columns in
+// order, and for expressions the columns they reference (a superset that
+// still identifies the same rows). An expression referencing no column
+// makes the key unusable for row identification: nil.
+func keyColumns(key string, cols []db.TableColumn) []string {
+	isCol := map[string]bool{}
+	for _, c := range cols {
+		isCol[c.Name] = true
+	}
+	toks := keyTokens(key)
+	punct := func(i int, p string) bool { return i < len(toks) && toks[i].kind == 'p' && toks[i].s == p }
+	ident := func(i int) bool { return i < len(toks) && toks[i].kind == 'i' }
+	var out []string
+	seen := map[string]bool{}
+	// elements separated by top-level commas
+	for start := 0; start < len(toks); {
+		end, depth := start, 0
+		for ; end < len(toks); end++ {
+			if punct(end, "(") || punct(end, "[") {
+				depth++
+			} else if punct(end, ")") || punct(end, "]") {
+				depth--
+			} else if depth == 0 && punct(end, ",") {
+				break
+			}
+		}
+		refs := 0
+		for i := start; i < end; {
+			if !ident(i) {
+				i++
+				continue
+			}
+			parts := []string{toks[i].s}
+			for punct(i+1, ".") && ident(i+2) {
+				parts = append(parts, toks[i+2].s)
+				i += 2
+			}
+			i++
+			if punct(i, "(") { // function call
+				continue
+			}
+			if name := strings.Join(parts, "."); isCol[name] {
+				refs++
+				if !seen[name] {
+					seen[name] = true
+					out = append(out, name)
+				}
+			}
+		}
+		if refs == 0 && end > start {
+			return nil
+		}
+		start = end + 1
+	}
+	return out
+}
+
+type keyTok struct {
+	kind byte // 'i' identifier (unquoted), 'p' punctuation, 'o' other
+	s    string
+}
+
+// keyTokens tokenizes a ClickHouse key expression as system.tables shows it
+// (`a\`b` quoting, 'strings', numbers, operators).
+func keyTokens(s string) []keyTok {
+	var out []keyTok
+	isWord := func(c byte) bool {
+		return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 0x80
+	}
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '`' || c == '"' || c == '\'':
+			var b strings.Builder
+			j := i + 1
+			for j < len(s) {
+				if s[j] == '\\' && j+1 < len(s) {
+					b.WriteByte(s[j+1])
+					j += 2
+					continue
+				}
+				if s[j] == c {
+					if j+1 < len(s) && s[j+1] == c {
+						b.WriteByte(c)
+						j += 2
+						continue
+					}
+					break
+				}
+				b.WriteByte(s[j])
+				j++
+			}
+			kind := byte('i')
+			if c == '\'' {
+				kind = 'o'
+			}
+			out = append(out, keyTok{kind, b.String()})
+			i = j + 1
+		case strings.IndexByte("(),.[]", c) >= 0:
+			out = append(out, keyTok{'p', string(c)})
+			i++
+		case isWord(c):
+			j := i
+			for j < len(s) && isWord(s[j]) {
+				j++
+			}
+			kind := byte('i')
+			if c >= '0' && c <= '9' {
+				kind = 'o'
+			}
+			out = append(out, keyTok{kind, s[i:j]})
+			i = j
+		default:
+			out = append(out, keyTok{'o', string(c)})
+			i++
+		}
+	}
+	return out
 }
 
 // unwrapLC strips LowCardinality(…) only.

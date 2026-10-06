@@ -272,11 +272,31 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 	// columns can be renamed (SELECT password AS x): a query reading a
 	// sensitive column gets all its values redacted
 	all := false
+	// only names used as columns count: not tables (FROM auth_user) nor
+	// qualifiers (auth_user.id)
+	var sig []string
 	for _, tk := range sqlx.Tokens(sql, lex) {
-		if (tk.Kind == sqlx.TWord || tk.Kind == sqlx.TQuotedIdent) && SensitiveColumn(strings.Trim(sql[tk.Start:tk.End], "\"`[]")) {
-			all = true
-			break
+		if tk.Kind != sqlx.TSpace && tk.Kind != sqlx.TComment {
+			sig = append(sig, sql[tk.Start:tk.End])
 		}
+	}
+	for i, w := range sig {
+		name := strings.Trim(w, "\"`[]")
+		if !SensitiveColumn(name) {
+			continue
+		}
+		prev, next := "", ""
+		if i > 0 {
+			prev = strings.ToUpper(sig[i-1])
+		}
+		if i+1 < len(sig) {
+			next = sig[i+1]
+		}
+		if prev == "FROM" || prev == "JOIN" || prev == "INTO" || prev == "UPDATE" || prev == "TABLE" || next == "." {
+			continue
+		}
+		all = true
+		break
 	}
 	var b strings.Builder
 	names := make([]string, len(cols))

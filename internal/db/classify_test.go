@@ -35,8 +35,6 @@ func TestClassify(t *testing.T) {
 		// bypasses found in review
 		"SELECT 1 DELETE FROM t":                                 StmtWrite,
 		"SELECT 1\nDROP TABLE t":                                 StmtDestructive,
-		"/*!50000 DROP TABLE users */":                           StmtDestructive,
-		"/*!SET SESSION TRANSACTION READ WRITE*/":                StmtWrite,
 		"WITH a AS (SELECT 1) SELECT * INTO t2 FROM a":           StmtWrite,
 		"SELECT * FROM t INTO OUTFILE '/tmp/x'":                  StmtWrite,
 		"EXPLAIN ANALYSE DELETE FROM t WHERE id = 1":             StmtWrite,
@@ -66,6 +64,40 @@ func TestClassify(t *testing.T) {
 	for s, want := range cases {
 		if got := Classify(s, o); got != want {
 			t.Errorf("%q: got %v want %v", s, got, want)
+		}
+	}
+}
+
+func TestClassifyDialects(t *testing.T) {
+	my := &sqlx.Options{Backticks: true, HashComments: true, BackslashEscape: true, DashSpace: true}
+	for q, want := range map[string]StmtKind{
+		"/*!50000 DROP TABLE users */":            StmtDestructive,
+		"/*!SET SESSION TRANSACTION READ WRITE*/": StmtWrite,
+		"SHOW CREATE TABLE t":                     StmtRead,
+	} {
+		if got := Classify(q, my); got != want {
+			t.Errorf("mysql %q: got %v want %v", q, got, want)
+		}
+	}
+	pg := &sqlx.Options{DollarQuotes: true}
+	for q, want := range map[string]StmtKind{
+		"SELECT 1 /*! DELETE FROM t */":                   StmtRead, // a plain comment outside MySQL
+		"SHOW CREATE TABLE t":                             StmtRead,
+		"EXPLAIN UPDATE t SET a = 1 WHERE id = 2":         StmtRead,
+		"EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 2": StmtWrite,
+		"SELECT lock, load, copy, handler FROM t":         StmtRead,
+		"SELECT * FROM t WHERE handler = 'x'":             StmtRead,
+		"SELECT t.update, t.delete FROM t":                StmtRead,
+		"SELECT c AS execute, rename FROM my.load":        StmtRead,
+		"SELECT merge FROM t ORDER BY copy":               StmtRead,
+		"SELECT 1 DELETE FROM t":                          StmtWrite,
+		"SELECT 1 LOCK TABLE t":                           StmtWrite,
+		"SELECT setval FROM t":                            StmtRead,
+		"SELECT setval('s', 1)":                           StmtWrite,
+		"SELECT 1; COPY t TO '/tmp/x'":                    StmtWrite,
+	} {
+		if got := Classify(q, pg); got != want {
+			t.Errorf("pg %q: got %v want %v", q, got, want)
 		}
 	}
 }

@@ -274,6 +274,7 @@ type TableTab struct {
 
 	ddl      *CodeEditor
 	ddlState int // 0 none, 1 loading, 2 loaded
+	ddlGen   int
 	ddlErr   error
 
 	structGrids [6]*DataGrid
@@ -348,14 +349,19 @@ func (t *TableTab) State() prefs.TabState {
 }
 
 func (t *TableTab) Disconnected() {
+	t.gen++ // results of loads in flight are dropped (and their cursors closed)
 	if s := t.sess; s != nil {
 		t.sess = nil
-		go s.Close()
+		go s.Close() // stops a running statement first
 	}
 	if t.data != nil {
 		t.data.rs.detach()
 	}
-	t.running = false
+	if t.running && t.data == nil {
+		// don't reconnect by itself from Layout: Reload does
+		t.loadErr = errors.New("disconnected")
+	}
+	t.running, t.count = false, ""
 }
 
 func (t *TableTab) Dispose() {
@@ -782,8 +788,10 @@ func (t *TableTab) loadDDL() {
 		return
 	}
 	t.ddlState = 1
+	t.ddlGen++
+	gen := t.ddlGen
 	a := t.a
-	a.connect(t.connID, func(cs *connState) {
+	a.connectOr(t.connID, func(cs *connState) {
 		conn, ref := cs.conn, t.ref
 		t.ddl.setDialect(conn.Dialect())
 		go func() {
@@ -791,6 +799,9 @@ func (t *TableTab) loadDDL() {
 			defer cancel()
 			s, err := conn.Catalog().DDL(ctx, ref)
 			a.post(func() {
+				if gen != t.ddlGen {
+					return // reloaded meanwhile
+				}
 				t.ddlState, t.ddlErr = 2, err
 				if err == nil {
 					t.ddl.SetText(s)
@@ -798,6 +809,10 @@ func (t *TableTab) loadDDL() {
 				}
 			})
 		}()
+	}, func(err error) {
+		if gen == t.ddlGen {
+			t.ddlState, t.ddlErr = 2, err
+		}
 	})
 }
 

@@ -305,6 +305,9 @@ func (c *conn) sessionFor(ks string) (*gocql.Session, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.byKS == nil {
+		return nil, errors.New("the connection is closed")
+	}
 	if s := c.byKS[ks]; s != nil {
 		return s, nil
 	}
@@ -625,6 +628,7 @@ func mapError(err error) error {
 		if m := lineColRx.FindStringSubmatch(re.Message()); m != nil {
 			e.Line, _ = strconv.Atoi(m[1])
 			col, _ := strconv.Atoi(m[2])
+			e.Column = col + 1
 			if e.Line == 1 {
 				e.Position = col + 1
 			}

@@ -8,7 +8,7 @@ import (
 
 const redacted = "<redacted>"
 
-var sensitiveName = regexp.MustCompile(`(?i)(pass(word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|ssh[_-]?key|credential|(^|_)auth($|_)|auth[_-]?(code|key)|cookie|session[_-]?(key|token|data)|signature|dsn|connection[_-]?string|(^|_)pem$|salt|otp|totp|mfa)`)
+var sensitiveName = regexp.MustCompile(`(?i)(passw(or)?d|passphrase|(^|_)pass($|_)|(^|_)pwd($|_)|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|ssh[_-]?key|credential|(^|_)auth($|_)|auth[_-]?(code|key|token)|cookie|session[_-]?(key|token|data)|signature|(^|_)dsn($|_)|connection[_-]?string|(^|_)pem($|_)|(^|_)salt($|_)|(^|_)(otp|totp|mfa)(_|$))`)
 
 var textRules = []struct {
 	rx   *regexp.Regexp

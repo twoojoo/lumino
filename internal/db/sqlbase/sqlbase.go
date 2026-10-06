@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,10 @@ import (
 
 // Hooks customize the generic implementation.
 type Hooks struct {
+	// KeepConnOnClose: Session.Close returns the connection to the pool
+	// (resetting read-only mode) instead of discarding it, for databases
+	// living in the connection (SQLite :memory:).
+	KeepConnOnClose bool
 	// Kind maps a database type name (as reported by ColumnTypes, upper
 	// case) to a value kind. Unknown types fall back to the scan type.
 	Kind func(dbType string) db.Kind
@@ -127,6 +132,11 @@ type Session struct {
 	readOnly bool
 
 	notices func() []string
+
+	// op serializes the session operations with Close (which may run on
+	// another goroutine: closing a tab while a statement runs)
+	op     sync.Mutex
+	closed bool // under mu
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc // of the running statement / open cursor
@@ -259,7 +269,11 @@ func txVerb(stmt string, o *sqlx.Options) string {
 }
 
 // Execute runs one statement.
-func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Result, error) {
+func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (_ db.Result, err error) {
+	if err := s.enter(); err != nil {
+		return nil, err
+	}
+	defer s.op.Unlock()
 	s.closeCursor()
 	if s.conn == nil {
 		if err := s.connect(ctx); err != nil {
@@ -269,27 +283,43 @@ func (s *Session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	start := time.Now()
 	if len(args) == 0 {
 		ok := &Result{exec: true, affected: -1}
-		switch txVerb(stmt, s.c.D.Lex()) {
+		conn0 := s.conn
+		// the raw transaction state changes only when the statement ran on
+		// the same connection without error
+		ranOK := func() bool { return err == nil && s.conn != nil && s.conn == conn0 }
+		switch verb := txVerb(stmt, s.c.D.Lex()); verb {
 		case "BEGIN":
-			return ok, s.Begin(ctx)
-		case "COMMIT":
+			return ok, s.begin(ctx)
+		case "COMMIT", "ROLLBACK":
 			if s.tx != nil || !s.rawTx && !s.c.H.NoTx {
-				return ok, s.Commit(ctx)
+				if verb == "COMMIT" {
+					return ok, s.commit(ctx)
+				}
+				return ok, s.rollback(ctx)
 			}
-			defer func() { s.rawTx = false }()
-		case "ROLLBACK":
-			if s.tx != nil || !s.rawTx && !s.c.H.NoTx {
-				return ok, s.Rollback(ctx)
-			}
-			defer func() { s.rawTx = false }()
+			defer func() {
+				if ranOK() || err != nil && s.conn != conn0 {
+					s.rawTx = false
+				}
+			}()
 		case "RAWBEGIN":
 			if s.tx != nil || s.rawTx {
 				return nil, fmt.Errorf("a transaction is already open")
 			}
 			if !s.c.H.NoTx {
 				defer func() {
-					if s.conn != nil {
+					if ranOK() {
 						s.rawTx = true
+					}
+				}()
+			}
+		case "":
+			// named T-SQL transactions (COMMIT TRAN t1, ROLLBACK TRANSACTION
+			// t1) and COMMIT AND NO CHAIN end a raw transaction too
+			if w := sqlx.Words(stmt, s.c.D.Lex(), 8); s.rawTx && len(w) > 0 && (w[0] == "COMMIT" || w[0] == "ROLLBACK") && !slices.Contains(w, "TO") {
+				defer func() {
+					if ranOK() {
+						s.rawTx = false
 					}
 				}()
 			}
@@ -382,7 +412,7 @@ func (s *Session) Cancel() {
 	}
 }
 
-func (s *Session) Begin(ctx context.Context) error {
+func (s *Session) begin(ctx context.Context) error {
 	if s.c.H.NoTx {
 		return db.ErrNotSupported
 	}
@@ -417,7 +447,7 @@ func (s *Session) Begin(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) Commit(ctx context.Context) error {
+func (s *Session) commit(ctx context.Context) error {
 	if s.tx == nil {
 		if s.rawTx {
 			return s.rawEnd(ctx, "COMMIT")
@@ -430,7 +460,7 @@ func (s *Session) Commit(ctx context.Context) error {
 	return s.c.mapErr(s.recover(ctx, err))
 }
 
-func (s *Session) Rollback(ctx context.Context) error {
+func (s *Session) rollback(ctx context.Context) error {
 	if s.tx == nil {
 		if s.rawTx {
 			return s.rawEnd(ctx, "ROLLBACK")
@@ -457,9 +487,54 @@ func (s *Session) rawEnd(ctx context.Context, verb string) error {
 	return s.c.mapErr(s.recover(ctx, err))
 }
 
+// ErrSessionClosed is returned by operations on a closed session (it never
+// reconnects silently: a half-applied batch must not continue in autocommit).
+var ErrSessionClosed = errors.New("the session is closed")
+
+// enter takes the operation lock of an open session.
+func (s *Session) enter() error {
+	s.op.Lock()
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		s.op.Unlock()
+		return ErrSessionClosed
+	}
+	return nil
+}
+
+func (s *Session) Begin(ctx context.Context) error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.op.Unlock()
+	return s.begin(ctx)
+}
+
+func (s *Session) Commit(ctx context.Context) error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.op.Unlock()
+	return s.commit(ctx)
+}
+
+func (s *Session) Rollback(ctx context.Context) error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.op.Unlock()
+	return s.rollback(ctx)
+}
+
 func (s *Session) TxActive() bool { return s.tx != nil || s.rawTx }
 
 func (s *Session) SetReadOnly(ctx context.Context, on bool) error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.op.Unlock()
 	s.readOnly = on
 	if s.c.H.SetReadOnly == nil {
 		return db.ErrNotSupported
@@ -471,6 +546,10 @@ func (s *Session) SetReadOnly(ctx context.Context, on bool) error {
 }
 
 func (s *Session) CurrentSchema(ctx context.Context) (string, error) {
+	if err := s.enter(); err != nil {
+		return "", err
+	}
+	defer s.op.Unlock()
 	if s.c.H.CurrentSchema == nil {
 		return "", db.ErrNotSupported
 	}
@@ -484,6 +563,10 @@ func (s *Session) CurrentSchema(ctx context.Context) (string, error) {
 }
 
 func (s *Session) SetCurrentSchema(ctx context.Context, schema string) error {
+	if err := s.enter(); err != nil {
+		return err
+	}
+	defer s.op.Unlock()
 	if s.c.H.SetCurrentSchema == nil {
 		return db.ErrNotSupported
 	}
@@ -501,6 +584,19 @@ func (s *Session) SetCurrentSchema(ctx context.Context, schema string) error {
 // temporary tables, a raw transaction) must not leak into other sessions
 // or metadata queries.
 func (s *Session) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	running := s.running
+	s.mu.Unlock()
+	if running {
+		s.Cancel() // a statement on another goroutine: stop it first
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
 	s.closeCursor()
 	if s.tx != nil {
 		_ = s.tx.Rollback()
@@ -515,7 +611,16 @@ func (s *Session) Close() error {
 		cancel()
 		s.rawTx = false
 	}
-	_ = s.conn.Raw(func(any) error { return driver.ErrBadConn })
+	if s.c.H.KeepConnOnClose {
+		// the pool is the database (SQLite :memory:): reset instead
+		if s.readOnly && s.c.H.SetReadOnly != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.c.H.SetReadOnly(ctx, s.conn, false)
+			cancel()
+		}
+	} else {
+		_ = s.conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
 	err := s.conn.Close()
 	s.conn = nil
 	if errors.Is(err, sql.ErrConnDone) {
@@ -725,18 +830,32 @@ func (r *Result) Close() error {
 	r.mu.Unlock()
 	var err error
 	if r.rows != nil {
-		if !done && r.s != nil && r.s.c.H.Cancel != nil {
+		if !done && r.s != nil && r.s.c.H.Cancel != nil && !r.s.TxActive() {
 			// closing a partly read cursor makes drivers read the rest of
-			// the result: stop the statement on the server first
+			// the result: stop the statement on the server first. Never
+			// inside a transaction (PostgreSQL aborts it on cancel), and
+			// only through the server hook (cancelling the context drops
+			// the connection of several drivers).
 			r.s.mu.Lock()
-			r.s.running = true
+			id := r.s.id
+			if r.s.runID != "" {
+				id = r.s.runID
+			}
 			r.s.mu.Unlock()
-			r.s.Cancel()
-			r.s.mu.Lock()
-			r.s.running = false
-			r.s.mu.Unlock()
+			if id != "" {
+				ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+				r.s.c.H.Cancel(ctx, r.s.c.DB, id)
+				c()
+			}
 		}
-		err = r.rows.Close()
+		func() {
+			defer func() {
+				if p := recover(); p != nil { // broken driver rows (see Fetch)
+					err = fmt.Errorf("closing the result: %v", p)
+				}
+			}()
+			err = r.rows.Close()
+		}()
 	}
 	if r.cancel != nil {
 		r.cancel()

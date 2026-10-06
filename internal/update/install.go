@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -371,7 +372,7 @@ func unzipAll(archive, dir string) error {
 			// links must stay inside the archive: a link to an outside
 			// directory followed by a file under it would write there
 			t := string(target)
-			if filepath.IsAbs(t) {
+			if filepath.IsAbs(t) || slices.Contains(strings.Split(filepath.ToSlash(t), "/"), "..") {
 				return fmt.Errorf("invalid link in archive: %s -> %s", f.Name, t)
 			}
 			if r := filepath.Join(filepath.Dir(p), t); r != root && !strings.HasPrefix(r, root+string(filepath.Separator)) {

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/giovanni/lumino/internal/db"
 	"github.com/giovanni/lumino/internal/db/sqlbase"
+	"github.com/giovanni/lumino/internal/db/sqlx"
 )
 
 // Catalog reads information_schema.
@@ -116,6 +118,10 @@ FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER 
 		}
 		if c.Flavor == MariaDB && tc.Default == "NULL" {
 			tc.Default, tc.HasDefault = "", false
+		}
+		if c.Flavor != MariaDB && tc.HasDefault && tc.Generated == "" {
+			// MariaDB reports SQL expressions; MySQL/TiDB report literals raw
+			tc.Default = c.defaultExpr(tc.Default, strings.ToLower(r["dtype"]), extra)
 		}
 		t.Columns = append(t.Columns, tc)
 	}
@@ -235,6 +241,41 @@ FROM information_schema.triggers WHERE event_object_schema = ? AND event_object_
 	return t, nil
 }
 
+var nowRx = regexp.MustCompile(`(?i)^(current_timestamp|now|localtime|localtimestamp)(\(\d*\))?$`)
+
+// defaultExpr turns information_schema.columns.column_default of MySQL/TiDB
+// into an SQL expression: string literals are reported without quotes
+// (DEFAULT ” is an empty string), expressions (extra DEFAULT_GENERATED,
+// MySQL 8.0.13+) as text with escaped quotes.
+func (c *Catalog) defaultExpr(def, dtype, extra string) string {
+	if strings.Contains(extra, "default_generated") {
+		def = strings.ReplaceAll(def, `\'`, "'")
+		if nowRx.MatchString(def) || strings.HasPrefix(def, "(") {
+			return def
+		}
+		return "(" + def + ")"
+	}
+	switch dtype {
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric", "float", "double", "real", "year":
+		if _, err := strconv.ParseFloat(def, 64); err == nil {
+			return def
+		}
+	case "bit":
+		if strings.HasPrefix(def, "b'") {
+			return def
+		}
+	case "binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob":
+		if strings.HasPrefix(def, "0x") {
+			return def
+		}
+	case "timestamp", "datetime":
+		if nowRx.MatchString(def) { // MySQL 5.7, TiDB: no DEFAULT_GENERATED
+			return def
+		}
+	}
+	return c.D.QuoteString(def)
+}
+
 var jsonValidRx = regexp.MustCompile("^json_valid\\(`([^`]+)`\\)$")
 
 // qualify rewrites the object name of a SHOW CREATE statement (and
@@ -248,6 +289,53 @@ func (c *Catalog) qualify(ddl string, ref db.ObjectRef, kind string) string {
 	}
 	if kind == "TABLE" {
 		ddl = refRx.ReplaceAllString(ddl, "REFERENCES "+c.D.QuoteAlways(ref.Schema)+".$1 (")
+	}
+	return ddl
+}
+
+// qualifyTrigger qualifies the trigger name and its ON table in SHOW CREATE
+// TRIGGER output (MySQL quotes them, MariaDB keeps the original text).
+func (c *Catalog) qualifyTrigger(ddl, schema string) string {
+	var toks []sqlx.Token
+	for _, t := range sqlx.Tokens(ddl, &lexOptions) {
+		if t.Kind != sqlx.TSpace && t.Kind != sqlx.TComment {
+			toks = append(toks, t)
+		}
+	}
+	text := func(i int) string { return ddl[toks[i].Start:toks[i].End] }
+	isWord := func(i int, w string) bool {
+		return i < len(toks) && toks[i].Kind == sqlx.TWord && strings.EqualFold(text(i), w)
+	}
+	isName := func(i int) bool {
+		return i < len(toks) && (toks[i].Kind == sqlx.TWord || toks[i].Kind == sqlx.TQuotedIdent)
+	}
+	var at []int // tokens to prefix with the schema
+	i := 0
+	for i < len(toks) && !isWord(i, "TRIGGER") {
+		i++
+	}
+	i++
+	if isWord(i, "IF") && isWord(i+1, "NOT") && isWord(i+2, "EXISTS") {
+		i += 3
+	}
+	if !isName(i) {
+		return ddl
+	}
+	if i+1 < len(toks) && text(i+1) == "." {
+		i += 2
+	} else {
+		at = append(at, i)
+	}
+	for i++; i < len(toks) && !isWord(i, "ON"); i++ {
+	}
+	i++
+	if isName(i) && !(i+1 < len(toks) && text(i+1) == ".") {
+		at = append(at, i)
+	}
+	prefix := c.D.QuoteAlways(schema) + "."
+	for k := len(at) - 1; k >= 0; k-- {
+		p := toks[at[k]].Start
+		ddl = ddl[:p] + prefix + ddl[p:]
 	}
 	return ddl
 }
@@ -302,7 +390,7 @@ func (c *Catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 			for _, n := range names {
 				tr, err := c.showCreate(ctx, "TRIGGER", db.ObjectRef{Schema: ref.Schema, Name: n})
 				if err == nil {
-					tr = c.qualify(tr, db.ObjectRef{Schema: ref.Schema, Name: n}, "TRIGGER")
+					tr = c.qualifyTrigger(tr, ref.Schema)
 					b.WriteString("\n" + tr + ";\n")
 				}
 			}

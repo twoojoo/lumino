@@ -20,7 +20,7 @@ func TestNormalizeReviewCases(t *testing.T) {
 	if v := Normalize([]*nilStringer{nil, {3}}); FormatValue(v, KindArray) == "" {
 		t.Errorf("array of nil pointers: %v", v)
 	}
-	for _, bad := range []string{"1/3", "0x1p-2", "NaN", "inf", ""} {
+	for _, bad := range []string{"1/3", "0x1p-2", "nanx", ""} {
 		if _, err := ParseValue(bad, KindDecimal); err == nil {
 			t.Errorf("decimal %q accepted", bad)
 		}

@@ -349,6 +349,7 @@ func mapError(err error) error {
 		e := &db.Error{Msg: msg, Code: strconv.Itoa(int(ex.Code)), Err: err}
 		if m := posRx.FindStringSubmatch(msg); m != nil {
 			e.Position, _ = strconv.Atoi(m[1])
+			e.PositionBytes = true
 		}
 		return e
 	}

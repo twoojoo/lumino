@@ -87,3 +87,59 @@ func TestUIRegressions(t *testing.T) {
 	h.press(key.NameEscape)
 	h.waitFor("not running", func() bool { return !c.running })
 }
+
+// TestUIRegressions2 covers the second review round: Disconnect stays
+// disconnected, background prompts queue instead of replacing each other,
+// and a modal takes the keyboard from the editor behind it.
+func TestUIRegressions2(t *testing.T) {
+	path := sqliteFixture(t, 10)
+	h := newHarness(t, []db.Config{
+		{ID: "lite", Name: "local sqlite", Driver: "sqlite", File: path},
+		{ID: "pg1", Name: "pg one", Driver: "postgres", Host: "127.0.0.1", Port: 55432, User: "lumino", Database: "lumino"},
+		{ID: "pg2", Name: "pg two", Driver: "postgres", Host: "127.0.0.1", Port: 55432, User: "lumino", Database: "lumino"},
+	}, Options{Connection: "local sqlite"})
+	a := h.a
+	h.waitFor("console", func() bool { return h.console() != nil && a.connState("lite").status == stReady })
+
+	// keys typed while a confirm is open don't reach the editor
+	c := h.console()
+	h.focusEditor(c)
+	h.typeText("abc")
+	a.overlay = newConfirm(a, "Test", "body", false, func(bool) {})
+	h.settle(50 * time.Millisecond)
+	h.typeText("x")
+	if got := c.ed.Text(); got != "abc" {
+		t.Fatalf("typed behind the modal: %q", got)
+	}
+	h.press(key.NameEscape)
+	h.settle(50 * time.Millisecond)
+
+	// Disconnect: the node collapses and stays disconnected
+	a.requestDisconnect("lite", nil)
+	h.settle(300 * time.Millisecond)
+	if st := a.connState("lite").status; st != stIdle {
+		t.Fatalf("status after disconnect: %v", st)
+	}
+
+	// two connections asking for a password: prompts queue
+	a.sidebar.expand(connKey("pg1"), true)
+	a.sidebar.expand(connKey("pg2"), true)
+	h.settle(100 * time.Millisecond)
+	p1, ok := a.overlay.(*SecretPrompt)
+	if !ok {
+		t.Fatalf("no prompt (%T)", a.overlay)
+	}
+	h.press(key.NameEscape)
+	h.settle(100 * time.Millisecond)
+	p2, ok := a.overlay.(*SecretPrompt)
+	if !ok || p2 == p1 {
+		t.Fatalf("second prompt not shown after the first (%T)", a.overlay)
+	}
+	h.press(key.NameEscape)
+	h.settle(100 * time.Millisecond)
+	for _, id := range []string{"pg1", "pg2"} {
+		if st := a.connState(id).status; st != stFailed {
+			t.Fatalf("%s stuck in %v", id, st)
+		}
+	}
+}

@@ -48,12 +48,13 @@ func authMethods(c Config) ([]ssh.AuthMethod, func(), error) {
 	switch c.Auth {
 	case "password", "":
 		return []ssh.AuthMethod{ssh.Password(c.Secret),
-			ssh.KeyboardInteractive(func(_, _ string, qs []string, _ []bool) ([]string, error) {
-				// answer only password prompts: never send the password to
-				// an OTP / verification code question
+			ssh.KeyboardInteractive(func(_, _ string, qs []string, echos []bool) ([]string, error) {
+				// one hidden prompt is the password (in any language);
+				// never send it to a verification code / OTP question
 				ans := make([]string, len(qs))
 				for i, q := range qs {
-					if !strings.Contains(strings.ToLower(q), "password") {
+					l := strings.ToLower(q)
+					if len(qs) > 1 || echos[i] || strings.Contains(l, "code") || strings.Contains(l, "otp") || strings.Contains(l, "token") || strings.Contains(l, "verification") {
 						return nil, fmt.Errorf("SSH server asks %q: only password authentication is supported", strings.TrimSpace(q))
 					}
 					ans[i] = c.Secret

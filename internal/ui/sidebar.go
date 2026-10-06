@@ -378,6 +378,8 @@ func (s *Sidebar) activate(r treeRow) {
 		cs := a.connState(r.connID)
 		if cs.status == stFailed {
 			cs.status = stIdle
+			s.expand(r.key, true) // retry (the node shows the error: it is expanded)
+			return
 		}
 		s.expand(r.key, !s.expanded[r.key])
 	default:
@@ -745,7 +747,7 @@ func (s *Sidebar) refresh(r treeRow) {
 		}
 		cs.refreshAll()
 	case nCatalog:
-		delete(cs.schemas, r.ref.Catalog)
+		cs.refreshCatalog(r.ref.Catalog)
 	case nSchema, nFolder:
 		cs.refreshSchema(keyOf(r.ref))
 	case nObject, nColumn:

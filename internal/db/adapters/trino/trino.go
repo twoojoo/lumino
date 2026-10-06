@@ -241,7 +241,7 @@ func mapError(err error) error {
 			}
 		}
 		return &db.Error{Msg: msg, Code: te.ErrorName, Line: te.ErrorLocation.LineNumber,
-			Position: positionOnFirstLine(te.ErrorLocation), Err: err}
+			Column: te.ErrorLocation.ColumnNumber, Position: positionOnFirstLine(te.ErrorLocation), Err: err}
 	}
 	return err
 }

@@ -186,6 +186,8 @@ func (t *ConsoleTab) closeSession() {
 	if t.cancelRun != nil {
 		t.cancelRun()
 	}
+	t.runGen++ // the run in flight must not report a transaction state
+	t.running = false
 	if s := t.sess; s != nil {
 		t.sess = nil
 		go func() {
@@ -233,6 +235,7 @@ func (t *ConsoleTab) withSession(then func(db.Session), failed func(error)) {
 		ro := a.connReadOnly(t.connID)
 		t.dialect = conn.Dialect()
 		t.ed.setDialect(t.dialect)
+		t.stmts = nil // split again with the dialect's rules
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), db.ConnectTimeout)
 			defer cancel()
@@ -384,6 +387,23 @@ func (t *ConsoleTab) run(all bool) {
 		a.flash("A statement is already running (Esc / Stop to cancel it)", true)
 		return
 	}
+	if t.dialect == nil {
+		// split with the database's rules ($$ bodies, DELIMITER, GO…):
+		// connect first
+		a.connectOr(t.connID, func(cs *connState) {
+			if t.dialect == nil {
+				t.dialect = cs.conn.Dialect()
+				t.ed.setDialect(t.dialect)
+				t.stmts = nil
+			}
+			t.run(all)
+		}, func(err error) {
+			if err != errConnectCancelled {
+				t.log(true, "%v", err)
+			}
+		})
+		return
+	}
 	stmts := t.targets(all)
 	if len(stmts) == 0 {
 		a.flash("Nothing to run", false)
@@ -445,6 +465,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 	t.running, t.runStart = true, time.Now()
 	t.runGen++
 	gen := t.runGen
+	bufVer := t.ed.buf.version
 	t.ed.ErrLine = -1
 	for _, rs := range t.results {
 		rs.detach()
@@ -475,7 +496,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 					break
 				}
 				last := i == len(stmts)-1
-				rs := &resultSet{sql: st.Text, stmtStart: st.Start, sortCol: -1, affected: -1, started: time.Now(), gen: gen}
+				rs := &resultSet{sql: st.Text, stmtStart: st.Start, bufVer: bufVer, sortCol: -1, affected: -1, started: time.Now(), gen: gen}
 				a.post(func() {
 					if gen == t.runGen {
 						t.runStmt = st.Text
@@ -590,11 +611,18 @@ func (t *ConsoleTab) addResult(gen int, rs *resultSet) {
 	}
 }
 
-// markError moves the editor to the error position.
+// markError moves the editor to the error position (not when the text
+// changed since the statement ran: the offsets would point elsewhere).
 func (t *ConsoleTab) markError(rs *resultSet) {
+	if rs.bufVer != t.ed.buf.version {
+		return
+	}
 	e := db.AsError(rs.err)
 	off := rs.stmtStart
+	exact := true
 	switch {
+	case e.Position > 0 && e.PositionBytes:
+		off += min(e.Position-1, len(rs.sql))
 	case e.Position > 0:
 		// position counts characters in the statement
 		off += runeOffset(rs.sql, e.Position-1)
@@ -603,10 +631,17 @@ func (t *ConsoleTab) markError(rs *resultSet) {
 		for _, l := range lines[:min(len(lines), e.Line)-1] {
 			off += len(l) + 1
 		}
+		if e.Column > 0 && e.Line <= len(lines) {
+			off += runeOffset(lines[e.Line-1], e.Column-1)
+		} else {
+			exact = false
+		}
+	default:
+		exact = false
 	}
 	p := t.ed.buf.posAt(off)
 	t.ed.ErrLine = p.line
-	if e.Position > 0 {
+	if exact {
 		t.ed.SetCaretOffset(off)
 	}
 }
@@ -717,6 +752,14 @@ func (t *ConsoleTab) pickSchema() {
 
 // Layout draws the console.
 func (t *ConsoleTab) Layout(gtx C) D {
+	if t.dialect == nil {
+		// highlighting and completion follow the database once connected
+		if cs := t.cs(); cs.status == stReady && cs.conn != nil {
+			t.dialect = cs.conn.Dialect()
+			t.ed.setDialect(t.dialect)
+			t.stmts = nil
+		}
+	}
 	t.handleButtons(gtx)
 	// current statement marker
 	if stmts := t.statementsLazy(gtx.Now); len(stmts) > 0 && t.ed.focused {
@@ -1206,9 +1249,21 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 	comp := cs.completion[k]
 	var items []compItem
 	tableCols := func(sch, name string) []string {
-		kk := metaKey{schema: sch}
+		kk := metaKey{catalog: k.catalog, schema: sch}
 		if sch == "" {
 			kk = k
+		} else {
+			// the schema as the catalog spells it (Oracle folds to upper case)
+			exact := false
+			for _, sc := range cs.schemas[k.catalog] {
+				exact = exact || sc.Name == sch
+			}
+			for _, sc := range cs.schemas[k.catalog] {
+				if !exact && strings.EqualFold(sc.Name, sch) {
+					kk.schema = sc.Name
+					break
+				}
+			}
 		}
 		cs.loadCompletion(kk)
 		m := cs.completion[kk]

@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"image"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"gioui.org/app"
@@ -64,6 +67,8 @@ type App struct {
 	newConnBtn             widget.Clickable
 	backdropTag, dialogTag int
 	overlay                overlay
+	shownOverlay           overlay // overlay of the previous frame
+	overlayQueue           []overlay
 	welcome                welcome
 
 	updBtn        widget.Clickable
@@ -104,10 +109,31 @@ func Run(opts Options) error {
 		app.Decorated(false))
 	a.start()
 
-	errc := make(chan error, 1)
-	go func() { errc <- a.loop() }()
+	// app.Main never returns on Linux and Windows: the loop goroutine ends
+	// the process once the window is gone
+	go func() {
+		err := a.loop()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "lumino:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}()
+	// SIGTERM / SIGINT (logout, kill): save the workspace and close the
+	// sessions like a window close
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		a.post(func() {
+			a.shutdown()
+			os.Exit(0)
+		})
+		time.Sleep(5 * time.Second) // the UI goroutine is stuck
+		os.Exit(1)
+	}()
 	app.Main()
-	return <-errc
+	return nil
 }
 
 func newApp(opts Options, w *app.Window) *App {
@@ -189,10 +215,21 @@ func (a *App) shutdown() {
 	for _, t := range a.tabs {
 		t.Dispose()
 	}
-	for _, cs := range a.conns {
-		if cs.conn != nil {
-			cs.conn.Close()
+	// close the pools (sessions roll back), but never hang the exit on a
+	// server that doesn't answer
+	done := make(chan struct{})
+	go func() {
+		for _, cs := range a.conns {
+			if cs.conn != nil {
+				cs.conn.Close()
+			}
 		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		slog.Warn("shutdown: connections still closing, exiting anyway")
 	}
 }
 
@@ -247,6 +284,28 @@ func (a *App) dismissOverlay(gtx C) {
 	}
 	a.overlay = nil
 	gtx.Execute(key.FocusCmd{})
+	a.nextOverlay()
+}
+
+// pushOverlay shows o, or queues it behind the open overlay: prompts
+// raised by background work (passwords, host keys) must not replace a
+// dialog the user is filling in, nor each other.
+func (a *App) pushOverlay(o overlay) {
+	if a.overlay == nil {
+		a.overlay = o
+		a.invalidate()
+		return
+	}
+	a.overlayQueue = append(a.overlayQueue, o)
+}
+
+// nextOverlay shows the next queued overlay once none is open.
+func (a *App) nextOverlay() {
+	if a.overlay == nil && len(a.overlayQueue) > 0 {
+		a.overlay = a.overlayQueue[0]
+		a.overlayQueue = a.overlayQueue[1:]
+		a.invalidate()
+	}
 }
 
 func (a *App) layout(gtx C) {
@@ -257,6 +316,15 @@ func (a *App) layout(gtx C) {
 	if a.overlay != nil && a.overlay.Done() {
 		a.overlay = nil
 		gtx.Execute(key.FocusCmd{})
+	}
+	a.nextOverlay()
+	if a.overlay != a.shownOverlay {
+		// a new modal takes the keyboard from the widget behind it (the
+		// overlay focuses its own inputs when laid out, later this frame)
+		if a.overlay != nil {
+			gtx.Execute(key.FocusCmd{})
+		}
+		a.shownOverlay = a.overlay
 	}
 	a.handleKeys(gtx)
 	if a.pendingCopy != nil {
@@ -407,7 +475,7 @@ func (a *App) layoutStatus(gtx C) D {
 		}
 	}
 	if a.updBtn.Clicked(gtx) && a.upd.rel != nil {
-		a.overlay = newUpdateDialog(a)
+		a.pushOverlay(newUpdateDialog(a))
 	}
 	t := a.activeTab()
 	var cs *connState

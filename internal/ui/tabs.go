@@ -225,7 +225,9 @@ func (a *App) layoutTabs(gtx C) D {
 					})
 				}),
 				layout.Rigid(func(gtx C) D {
-					if t.Dirty() != "" && !a.tabClose[i].Hovered() {
+					// the dot of a dirty tab turns into the close button when
+					// the tab is hovered (the button gets no hover while hidden)
+					if t.Dirty() != "" && !a.tabClose[i].Hovered() && !a.tabBtns[i].Hovered() {
 						return layout.Inset{Right: 9, Left: 3}.Layout(gtx, func(gtx C) D { return dot(gtx, pal.Accent, 8) })
 					}
 					return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return iconOnly(gtx, &a.tabClose[i], icClose, 12) })

@@ -259,9 +259,12 @@ type Error struct {
 	Code     string
 	Position int // 1-based character offset in the statement, 0 = unknown
 	Line     int // 1-based line in the statement, 0 = unknown
-	Detail   string
-	Hint     string
-	Err      error
+	Column   int // 1-based character column in Line, 0 = unknown
+	// PositionBytes: Position counts bytes, not characters (ClickHouse)
+	PositionBytes bool
+	Detail        string
+	Hint          string
+	Err           error
 }
 
 func (e *Error) Error() string {

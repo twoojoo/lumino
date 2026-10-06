@@ -46,7 +46,7 @@ func file(connID string) string {
 // Size limits: huge statements (dump imports) are truncated in history.
 const (
 	maxSQL  = 256 << 10
-	maxLine = 1 << 20
+	maxLine = 4 << 20 // JSON escaping can grow a truncated statement up to 6x
 )
 
 func Add(connID string, e Entry) error {

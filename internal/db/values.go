@@ -231,6 +231,9 @@ func ParseValue(s string, k Kind) (any, error) {
 		}
 		return f, nil
 	case KindDecimal:
+		if l := strings.ToLower(strings.TrimLeft(t, "+-")); l == "nan" || l == "infinity" || l == "inf" {
+			return t, nil // PostgreSQL numeric accepts them (bound as text, quoted in literals)
+		}
 		if !IsPlainNumber(t) {
 			return nil, fmt.Errorf("%q is not a number", s)
 		}
