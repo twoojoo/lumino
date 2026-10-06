@@ -227,11 +227,16 @@ func Hooks() sqlbase.Hooks {
 			return sqlbase.One(ctx, q, "SELECT current_schema()")
 		},
 		SetCurrentSchema: func(ctx context.Context, q sqlbase.Querier, schema string) error {
-			path := NewDialect().QuoteAlways(schema)
-			if schema != "public" {
-				path += ", public"
+			// prepend to the session's default path (not the current one:
+			// a previously chosen schema must not stay behind the new one);
+			// keeps "$user", extension schemas…
+			cur, err := sqlbase.One(ctx, q, "SELECT reset_val FROM pg_settings WHERE name = 'search_path'")
+			if err != nil || cur == "" {
+				if cur, err = sqlbase.One(ctx, q, "SELECT current_setting('search_path')"); err != nil {
+					return err
+				}
 			}
-			_, err := q.ExecContext(ctx, "SET search_path TO "+path)
+			_, err = q.ExecContext(ctx, "SET search_path TO "+PrependSearchPath(cur, schema))
 			return err
 		},
 		SetReadOnly: func(ctx context.Context, q sqlbase.Querier, on bool) error {
@@ -302,4 +307,52 @@ func MapError(err error) error {
 		return e
 	}
 	return err
+}
+
+// PrependSearchPath puts schema (quoted) first in a search_path value,
+// removing other occurrences of it; the remaining elements are kept as they
+// are (already valid SQL identifiers).
+func PrependSearchPath(path, schema string) string {
+	out := []string{NewDialect().QuoteAlways(schema)}
+	for _, el := range splitSearchPath(path) {
+		if name := searchPathName(el); name != "" && name != schema {
+			out = append(out, el)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// splitSearchPath splits a search_path value at the commas outside double
+// quotes.
+func splitSearchPath(path string) []string {
+	var out []string
+	var cur strings.Builder
+	inq := false
+	for _, r := range path {
+		switch {
+		case r == '"':
+			inq = !inq
+			cur.WriteRune(r)
+		case r == ',' && !inq:
+			out = append(out, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" || len(out) > 0 {
+		out = append(out, s)
+	}
+	return out
+}
+
+// searchPathName is the schema name an element refers to ("" if invalid).
+func searchPathName(el string) string {
+	if len(el) >= 2 && el[0] == '"' && el[len(el)-1] == '"' {
+		return strings.ReplaceAll(el[1:len(el)-1], `""`, `"`)
+	}
+	if strings.ContainsAny(el, "\" \t;") {
+		return ""
+	}
+	return strings.ToLower(el)
 }

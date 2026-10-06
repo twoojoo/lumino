@@ -137,26 +137,43 @@ func (c *Catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 		return nil, err
 	}
 	t := &db.TableInfo{Ref: ref, RowEstimate: -1}
-	identity := "a.attidentity"
 	generated := "CASE WHEN a.attgenerated = 's' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) ELSE '' END"
 	defExpr := "CASE WHEN a.attgenerated = '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END"
+	hidden := "false"
 	if c.Cockroach {
-		generated = "''"
-		defExpr = "pg_catalog.pg_get_expr(d.adbin, d.adrelid)"
+		// CockroachDB: computed columns and hidden columns (the implicit
+		// rowid of tables without a primary key) are in information_schema
+		generated = "COALESCE(ic.generation_expression, '')"
+		defExpr = "CASE WHEN COALESCE(ic.generation_expression, '') = '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END"
+		hidden = "COALESCE(ic.is_hidden = 'YES', false)"
+	}
+	icJoin := ""
+	if c.Cockroach {
+		icJoin = `
+LEFT JOIN information_schema.columns ic ON ic.table_schema = $2 AND ic.table_name = $3 AND ic.column_name = a.attname`
+	}
+	args := []any{oid}
+	if c.Cockroach {
+		args = append(args, ref.Schema, ref.Name)
 	}
 	cols, err := sqlbase.Recs(ctx, c.DB, `
 SELECT a.attname AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type, NOT a.attnotnull AS nullable,
        COALESCE(`+defExpr+`, '') AS def, d.adbin IS NOT NULL AS hasdef,
-       COALESCE(`+identity+`, '') AS ident, `+generated+` AS gen,
+       COALESCE(a.attidentity, '') AS ident, `+generated+` AS gen, `+hidden+` AS hidden,
        COALESCE(pg_catalog.col_description(a.attrelid, a.attnum), '') AS comment
 FROM pg_catalog.pg_attribute a
-LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum`+icJoin+`
 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
-ORDER BY a.attnum`, oid)
+ORDER BY a.attnum`, args...)
 	if err != nil {
 		return nil, MapError(err)
 	}
+	hiddenCols := map[string]bool{}
 	for _, r := range cols {
+		if r.Bool("hidden") {
+			hiddenCols[r["name"]] = true
+			continue
+		}
 		def := r["def"]
 		tc := db.TableColumn{Name: r["name"], Type: r["type"], Kind: KindOfFormatted(r["type"]), Nullable: r.Bool("nullable"),
 			Default: def, HasDefault: def != "", Comment: r["comment"], Generated: r["gen"]}
@@ -196,7 +213,9 @@ ORDER BY con.contype, con.conname`, oid)
 		cols := splitUnit(r["cols"])
 		switch r["type"] {
 		case "p":
-			t.PrimaryKey = cols
+			if !anyIn(cols, hiddenCols) {
+				t.PrimaryKey = cols
+			}
 		case "f":
 			t.ForeignKeys = append(t.ForeignKeys, db.ForeignKey{Name: r["name"], Columns: cols,
 				RefTable:   db.ObjectRef{Schema: r["rschema"], Name: r["rtable"], Type: db.ObjTable},
@@ -221,8 +240,9 @@ ORDER BY con.contype, con.conname`, oid)
 	idx, err := sqlbase.Recs(ctx, c.DB, `
 SELECT ic.relname AS name, i.indisunique AS uniq, i.indisprimary AS prim, am.amname AS method,
        COALESCE(pg_catalog.pg_get_expr(i.indpred, i.indrelid, true), '') AS pred,
-       (SELECT string_agg(pg_catalog.pg_get_indexdef(i.indexrelid, k, true), E'\x1f' ORDER BY k)
-          FROM generate_series(1, i.indnkeyatts) k) AS cols,
+       (SELECT string_agg(COALESCE(a.attname, pg_catalog.pg_get_indexdef(i.indexrelid, k, true)), E'\x1f' ORDER BY k)
+          FROM generate_series(1, i.indnkeyatts) k
+          LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k - 1] AND i.indkey[k - 1] <> 0) AS cols,
        pg_catalog.pg_get_indexdef(i.indexrelid) AS def,
        EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.conindid = i.indexrelid AND con.conrelid = i.indrelid) AS bycons
 FROM pg_catalog.pg_index i
@@ -236,6 +256,10 @@ ORDER BY i.indisprimary DESC, ic.relname`, oid)
 	for _, r := range idx {
 		ix := db.Index{Name: r["name"], Unique: r.Bool("uniq"), Primary: r.Bool("prim"), Method: r["method"], Where: r["pred"],
 			Columns: strings.Split(r["cols"], "\x1f")}
+		if anyIn(ix.Columns, hiddenCols) {
+			// the implicit primary index on CockroachDB's hidden rowid
+			continue
+		}
 		if ix.Method == "btree" || ix.Method == "prefix" {
 			ix.Method = ""
 		}
@@ -244,49 +268,56 @@ ORDER BY i.indisprimary DESC, ic.relname`, oid)
 
 	if !c.Cockroach {
 		trg, err := sqlbase.Recs(ctx, c.DB, `
-SELECT t.tgname AS name, pg_catalog.pg_get_triggerdef(t.oid, true) AS def
+SELECT t.tgname AS name, pg_catalog.pg_get_triggerdef(t.oid, true) AS def, t.tgtype::int AS tgtype
 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal ORDER BY t.tgname`, oid)
 		if err != nil {
 			return nil, MapError(err)
 		}
 		for _, r := range trg {
 			tr := db.Trigger{Name: r["name"], Definition: r["def"]}
-			up := strings.ToUpper(r["def"])
-			for _, tm := range []string{"BEFORE", "AFTER", "INSTEAD OF"} {
-				if strings.Contains(up, " "+tm+" ") {
-					tr.Timing = tm
-					break
-				}
-			}
-			var ev []string
-			for _, e := range []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE"} {
-				if strings.Contains(up, " "+e) {
-					ev = append(ev, e)
-				}
-			}
-			tr.Events = strings.Join(ev, ", ")
+			tr.Timing, tr.Events = triggerType(r.Int("tgtype"))
 			t.Triggers = append(t.Triggers, tr)
 		}
 	}
 	return t, nil
 }
 
+// anyIn reports whether one of names is in set.
+func anyIn(names []string, set map[string]bool) bool {
+	for _, n := range names {
+		if set[n] {
+			return true
+		}
+	}
+	return false
+}
+
+// triggerType decodes pg_trigger.tgtype: timing and events.
+func triggerType(tgtype int64) (timing, events string) {
+	switch {
+	case tgtype&64 != 0:
+		timing = "INSTEAD OF"
+	case tgtype&2 != 0:
+		timing = "BEFORE"
+	default:
+		timing = "AFTER"
+	}
+	var ev []string
+	for _, e := range []struct {
+		bit  int64
+		name string
+	}{{4, "INSERT"}, {16, "UPDATE"}, {8, "DELETE"}, {32, "TRUNCATE"}} {
+		if tgtype&e.bit != 0 {
+			ev = append(ev, e.name)
+		}
+	}
+	return timing, strings.Join(ev, ", ")
+}
+
 func (c *Catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 	switch ref.Type {
 	case db.ObjView, db.ObjMatView:
-		oid, err := c.oid(ctx, ref)
-		if err != nil {
-			return "", err
-		}
-		def, err := sqlbase.One(ctx, c.DB, "SELECT pg_catalog.pg_get_viewdef($1::oid, true)", oid)
-		if err != nil {
-			return "", MapError(err)
-		}
-		kw := "CREATE OR REPLACE VIEW"
-		if ref.Type == db.ObjMatView {
-			kw = "CREATE MATERIALIZED VIEW"
-		}
-		return fmt.Sprintf("%s %s AS\n%s\n", kw, c.D.Qualified(ref), strings.TrimRight(strings.TrimSpace(def), ";")+";"), nil
+		return c.viewDDL(ctx, ref)
 	case db.ObjFunction, db.ObjProcedure:
 		sig := strings.TrimSuffix(strings.TrimPrefix(ref.Signature, "("), ")")
 		def, err := sqlbase.One(ctx, c.DB, `
@@ -315,12 +346,18 @@ WHERE n.nspname = $1 AND p.proname = $2 AND pg_catalog.pg_get_function_identity_
 }
 
 func (c *Catalog) Completion(ctx context.Context, schema db.ObjectRef) (map[string][]string, error) {
+	hiddenFilter := ""
+	if c.Cockroach {
+		hiddenFilter = `
+  AND NOT EXISTS (SELECT 1 FROM information_schema.columns ic WHERE ic.table_schema = n.nspname
+                  AND ic.table_name = c.relname AND ic.column_name = a.attname AND ic.is_hidden = 'YES')`
+	}
 	recs, err := sqlbase.Recs(ctx, c.DB, `
 SELECT c.relname AS t, a.attname AS c
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m','f')
+WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m','f')`+hiddenFilter+`
 ORDER BY c.relname, a.attnum`, schema.Schema)
 	if err != nil {
 		return nil, MapError(err)

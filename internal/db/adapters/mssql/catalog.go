@@ -298,6 +298,18 @@ ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`, id)
 		}
 		ixKeys[r["name"]] = append(ixKeys[r["name"]], k)
 	}
+	// user-named default constraints (system-generated names are not kept)
+	defNames := map[string]string{}
+	dfs, err := sqlbase.Recs(ctx, c.db, `
+SELECT c.name AS col, dc.name AS defname FROM sys.default_constraints dc
+JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+WHERE dc.parent_object_id = @p1 AND dc.is_system_named = 0`, id)
+	if err != nil {
+		return "", mapError(err)
+	}
+	for _, r := range dfs {
+		defNames[r["col"]] = r["defname"]
+	}
 	keys := func(ix db.Index) string {
 		if k, ok := ixKeys[ix.Name]; ok {
 			return strings.Join(k, ", ")
@@ -328,6 +340,9 @@ ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`, id)
 			s += " NULL"
 		}
 		if col.HasDefault {
+			if n := defNames[col.Name]; n != "" {
+				s += " CONSTRAINT " + q(n)
+			}
 			s += " DEFAULT " + col.Default
 		}
 		defs = append(defs, s)
@@ -339,27 +354,17 @@ ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`, id)
 		}
 		return strings.Join(out, ", ")
 	}
-	var after []string
 	for _, ix := range t.Indexes {
 		switch {
 		case ix.Primary:
 			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), keys(ix)))
 		case isConstraint(t, ix.Name):
 			defs = append(defs, fmt.Sprintf("    CONSTRAINT %s UNIQUE %s (%s)", q(ix.Name), strings.ToUpper(ix.Method), keys(ix)))
-		default:
-			u := ""
-			if ix.Unique {
-				u = "UNIQUE "
-			}
-			s := fmt.Sprintf("CREATE %s%s INDEX %s ON %s (%s)", u, strings.ToUpper(ix.Method), q(ix.Name), c.d.Qualified(ref), keys(ix))
-			if inc := ixIncl[ix.Name]; len(inc) > 0 {
-				s += " INCLUDE (" + strings.Join(inc, ", ") + ")"
-			}
-			if ix.Where != "" {
-				s += " WHERE " + ix.Where
-			}
-			after = append(after, s+";")
 		}
+	}
+	after, err := c.indexDDL(ctx, id, ref, ixKeys, ixIncl)
+	if err != nil {
+		return "", err
 	}
 	for _, ch := range t.Constraints {
 		if ch.Type == "CHECK" {
@@ -385,6 +390,98 @@ ORDER BY i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`, id)
 		b.WriteString("GO\n" + strings.TrimSpace(tr.Definition) + "\nGO\n")
 	}
 	return b.String(), nil
+}
+
+// indexDDL scripts the indexes that are not PRIMARY KEY / UNIQUE constraints,
+// by kind: rowstore, columnstore, XML (primary before secondary) and spatial.
+func (c *catalog) indexDDL(ctx context.Context, id string, ref db.ObjectRef, ixKeys, ixIncl map[string][]string) ([]string, error) {
+	q := c.d.Quote
+	recs, err := sqlbase.Recs(ctx, c.db, `
+SELECT i.name, i.type, i.type_desc, i.is_unique, COALESCE(i.filter_definition, '') AS filter,
+       COALESCE(xi.secondary_type_desc, '') AS xml_secondary, COALESCE(px.name, '') AS xml_primary,
+       COALESCE(si.tessellation_scheme, '') AS scheme,
+       COALESCE(CAST(st.bounding_box_xmin AS nvarchar(60)), '') AS xmin, COALESCE(CAST(st.bounding_box_ymin AS nvarchar(60)), '') AS ymin,
+       COALESCE(CAST(st.bounding_box_xmax AS nvarchar(60)), '') AS xmax, COALESCE(CAST(st.bounding_box_ymax AS nvarchar(60)), '') AS ymax,
+       COALESCE(st.level_1_grid_desc, '') AS g1, COALESCE(st.level_2_grid_desc, '') AS g2,
+       COALESCE(st.level_3_grid_desc, '') AS g3, COALESCE(st.level_4_grid_desc, '') AS g4,
+       COALESCE(CAST(st.cells_per_object AS nvarchar(20)), '') AS cells
+FROM sys.indexes i
+LEFT JOIN sys.xml_indexes xi ON xi.object_id = i.object_id AND xi.index_id = i.index_id
+LEFT JOIN sys.indexes px ON px.object_id = i.object_id AND px.index_id = xi.using_xml_index_id
+LEFT JOIN sys.spatial_indexes si ON si.object_id = i.object_id AND si.index_id = i.index_id
+LEFT JOIN sys.spatial_index_tessellations st ON st.object_id = i.object_id AND st.index_id = i.index_id
+WHERE i.object_id = @p1 AND i.type > 0 AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+ORDER BY CASE WHEN xi.using_xml_index_id IS NOT NULL THEN 1 ELSE 0 END, i.name`, id)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	tbl := c.d.Qualified(ref)
+	cols := func(name string) string {
+		k := ixKeys[name]
+		if len(k) == 0 {
+			k = ixIncl[name]
+		}
+		return strings.Join(k, ", ")
+	}
+	var out []string
+	for _, r := range recs {
+		name := r["name"]
+		var s string
+		switch r["type"] {
+		case "1", "2": // rowstore
+			u := ""
+			if r.Bool("is_unique") {
+				u = "UNIQUE "
+			}
+			s = fmt.Sprintf("CREATE %s%s INDEX %s ON %s (%s)", u, r["type_desc"], q(name), tbl, cols(name))
+			if r["type"] == "2" {
+				if inc := ixIncl[name]; len(inc) > 0 {
+					s += " INCLUDE (" + strings.Join(inc, ", ") + ")"
+				}
+			}
+			if r["filter"] != "" {
+				s += " WHERE " + r["filter"]
+			}
+		case "5": // clustered columnstore: no column list
+			s = fmt.Sprintf("CREATE CLUSTERED COLUMNSTORE INDEX %s ON %s", q(name), tbl)
+		case "6":
+			s = fmt.Sprintf("CREATE NONCLUSTERED COLUMNSTORE INDEX %s ON %s (%s)", q(name), tbl, cols(name))
+			if r["filter"] != "" {
+				s += " WHERE " + r["filter"]
+			}
+		case "3":
+			if r["xml_primary"] == "" {
+				s = fmt.Sprintf("CREATE PRIMARY XML INDEX %s ON %s (%s)", q(name), tbl, cols(name))
+			} else if r["xml_secondary"] != "" {
+				s = fmt.Sprintf("CREATE XML INDEX %s ON %s (%s) USING XML INDEX %s FOR %s", q(name), tbl, cols(name),
+					q(r["xml_primary"]), r["xml_secondary"])
+			}
+		case "4":
+			if r["scheme"] == "" {
+				break
+			}
+			s = fmt.Sprintf("CREATE SPATIAL INDEX %s ON %s (%s) USING %s", q(name), tbl, cols(name), r["scheme"])
+			var with []string
+			if strings.HasPrefix(r["scheme"], "GEOMETRY") && r["xmin"] != "" {
+				with = append(with, fmt.Sprintf("BOUNDING_BOX = (%s, %s, %s, %s)", r["xmin"], r["ymin"], r["xmax"], r["ymax"]))
+			}
+			if !strings.HasSuffix(r["scheme"], "_AUTO_GRID") && r["g1"] != "" {
+				with = append(with, fmt.Sprintf("GRIDS = (LEVEL_1 = %s, LEVEL_2 = %s, LEVEL_3 = %s, LEVEL_4 = %s)", r["g1"], r["g2"], r["g3"], r["g4"]))
+			}
+			if r["cells"] != "" {
+				with = append(with, "CELLS_PER_OBJECT = "+r["cells"])
+			}
+			if len(with) > 0 {
+				s += " WITH (" + strings.Join(with, ", ") + ")"
+			}
+		}
+		if s == "" {
+			out = append(out, fmt.Sprintf("-- %s index %s not scripted", strings.ToLower(r["type_desc"]), q(name)))
+			continue
+		}
+		out = append(out, s+";")
+	}
+	return out, nil
 }
 
 func isConstraint(t *db.TableInfo, name string) bool {

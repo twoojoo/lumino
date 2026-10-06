@@ -87,7 +87,10 @@ func (c *Catalog) tableDDL(ctx context.Context, ref db.ObjectRef) (string, error
 		return "", err
 	}
 	rels, err := sqlbase.Recs(ctx, c.DB, `
-SELECT c.relkind AS kind, c.relispartition AS ispart,
+SELECT c.relkind AS kind, c.relispartition AS ispart, c.relpersistence AS persistence,
+       COALESCE((SELECT string_agg(pn.nspname || E'\x1e' || pc.relname, E'\x1f' ORDER BY i.inhseqno) FROM pg_catalog.pg_inherits i
+                 JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
+                 WHERE i.inhrelid = c.oid AND NOT c.relispartition), '') AS inherits,
        CASE WHEN c.relkind = 'p' THEN pg_catalog.pg_get_partkeydef(c.oid) ELSE '' END AS partkey,
        CASE WHEN c.relispartition THEN pg_catalog.pg_get_expr(c.relpartbound, c.oid) ELSE '' END AS bound,
        COALESCE((SELECT pn.nspname || E'\x1f' || pc.relname FROM pg_catalog.pg_inherits i
@@ -130,15 +133,21 @@ ORDER BY a.attnum`, oid)
 		}
 	}
 	extra, err := sqlbase.Recs(ctx, c.DB, `
-SELECT a.attname AS name, a.attidentity AS ident,
-       COALESCE(array_to_string(a.attfdwoptions, E'\x1f'), '') AS fdwopts
-FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped`, oid)
+SELECT a.attname AS name, a.attidentity AS ident, a.attislocal AS islocal,
+       COALESCE(array_to_string(a.attfdwoptions, E'\x1f'), '') AS fdwopts,
+       CASE WHEN a.attcollation <> 0 AND a.attcollation <> ty.typcollation
+            THEN (SELECT CASE WHEN cn.nspname = 'pg_catalog' THEN '' ELSE quote_ident(cn.nspname) || '.' END || quote_ident(co.collname)
+                  FROM pg_catalog.pg_collation co JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
+                  WHERE co.oid = a.attcollation) ELSE '' END AS coll
+FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid = a.atttypid
+WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped`, oid)
 	if err != nil {
 		return "", MapError(err)
 	}
-	identKind, fdwOpts := map[string]string{}, map[string]string{}
+	identKind, fdwOpts, collation, inherited := map[string]string{}, map[string]string{}, map[string]string{}, map[string]bool{}
 	for _, r := range extra {
-		identKind[r["name"]], fdwOpts[r["name"]] = r["ident"], r["fdwopts"]
+		identKind[r["name"]], fdwOpts[r["name"]], collation[r["name"]] = r["ident"], r["fdwopts"], r["coll"]
+		inherited[r["name"]] = !r.Bool("islocal")
 	}
 
 	var b strings.Builder
@@ -161,9 +170,15 @@ FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.
 	} else {
 		var defs []string
 		for _, col := range t.Columns {
+			if inherited[col.Name] && rel["inherits"] != "" {
+				continue // comes from the INHERITS parents
+			}
 			s := "    " + c.D.Quote(col.Name) + " " + col.Type
 			if foreign {
 				s += c.fdwOptions(fdwOpts[col.Name])
+			}
+			if collation[col.Name] != "" {
+				s += " COLLATE " + collation[col.Name]
 			}
 			switch ik := identKind[col.Name]; {
 			case col.Generated != "":
@@ -191,7 +206,7 @@ FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.
 		}
 		cons, err := sqlbase.Recs(ctx, c.DB, `
 SELECT con.conname AS name, pg_catalog.pg_get_constraintdef(con.oid, true) AS def
-FROM pg_catalog.pg_constraint con WHERE con.conrelid = $1 AND con.contype IN ('p','u','c','f','x')
+FROM pg_catalog.pg_constraint con WHERE con.conrelid = $1 AND con.contype IN ('p','u','c','f','x') AND con.conislocal
 ORDER BY CASE con.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'c' THEN 2 WHEN 'x' THEN 3 ELSE 4 END, con.conname`, oid)
 		if err != nil {
 			return "", MapError(err)
@@ -200,10 +215,21 @@ ORDER BY CASE con.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'c' THEN 2 WHEN '
 			defs = append(defs, "    CONSTRAINT "+c.D.Quote(r["name"])+" "+r["def"])
 		}
 		kw := "CREATE TABLE"
-		if foreign {
+		switch {
+		case foreign:
 			kw = "CREATE FOREIGN TABLE"
+		case rel["persistence"] == "u":
+			kw = "CREATE UNLOGGED TABLE"
 		}
 		fmt.Fprintf(&b, "%s %s (\n%s\n)", kw, c.D.Qualified(ref), strings.Join(defs, ",\n"))
+		if rel["inherits"] != "" {
+			var ps []string
+			for _, p := range splitUnit(rel["inherits"]) {
+				pschema, pname, _ := strings.Cut(p, "\x1e")
+				ps = append(ps, c.D.Qualified(db.ObjectRef{Schema: pschema, Name: pname, Type: db.ObjTable}))
+			}
+			b.WriteString("\nINHERITS (" + strings.Join(ps, ", ") + ")")
+		}
 		if rel["partkey"] != "" {
 			b.WriteString("\nPARTITION BY " + rel["partkey"])
 		}
@@ -280,4 +306,109 @@ ORDER BY c.relname`, parent)
 		}
 	}
 	return nil
+}
+
+// relOptions renders a reloptions array (aggregated with \x1f) as a WITH
+// clause, leaving out the keys of skip.
+func (c *Catalog) relOptions(list string, skip ...string) string {
+	if list == "" {
+		return ""
+	}
+	var o []string
+outer:
+	for _, kv := range strings.Split(list, "\x1f") {
+		k, v, _ := strings.Cut(kv, "=")
+		for _, s := range skip {
+			if k == s {
+				continue outer
+			}
+		}
+		if !simpleOption(v) {
+			v = c.D.QuoteString(v)
+		}
+		o = append(o, k+"="+v)
+	}
+	if len(o) == 0 {
+		return ""
+	}
+	return " WITH (" + strings.Join(o, ", ") + ")"
+}
+
+func simpleOption(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// viewDDL renders views and materialized views with their options, check
+// option, indexes and comments.
+func (c *Catalog) viewDDL(ctx context.Context, ref db.ObjectRef) (string, error) {
+	oid, err := c.oid(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	recs, err := sqlbase.Recs(ctx, c.DB, `
+SELECT pg_catalog.pg_get_viewdef(c.oid, true) AS def, c.relkind AS kind, c.relispopulated AS populated,
+       COALESCE(array_to_string(c.reloptions, E'\x1f'), '') AS opts,
+       COALESCE(obj_description(c.oid, 'pg_class'), '') AS comment
+FROM pg_catalog.pg_class c WHERE c.oid = $1`, oid)
+	if err != nil {
+		return "", MapError(err)
+	}
+	if len(recs) != 1 {
+		return "", fmt.Errorf("%s not found", ref)
+	}
+	r := recs[0]
+	mat := r["kind"] == "m"
+	query := strings.TrimRight(strings.TrimSpace(r["def"]), ";")
+	var b strings.Builder
+	if mat {
+		fmt.Fprintf(&b, "CREATE MATERIALIZED VIEW %s%s AS\n%s", c.D.Qualified(ref), c.relOptions(r["opts"]), query)
+		if !r.Bool("populated") {
+			b.WriteString("\nWITH NO DATA")
+		}
+		b.WriteString(";\n")
+	} else {
+		fmt.Fprintf(&b, "CREATE OR REPLACE VIEW %s%s AS\n%s", c.D.Qualified(ref), c.relOptions(r["opts"], "check_option"), query)
+		for _, kv := range splitUnit(r["opts"]) {
+			if k, v, _ := strings.Cut(kv, "="); k == "check_option" {
+				b.WriteString("\nWITH " + strings.ToUpper(v) + " CHECK OPTION")
+			}
+		}
+		b.WriteString(";\n")
+	}
+	if mat {
+		idx, err := sqlbase.Recs(ctx, c.DB, `
+SELECT pg_catalog.pg_get_indexdef(i.indexrelid) AS def FROM pg_catalog.pg_index i
+JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+WHERE i.indrelid = $1 ORDER BY ic.relname`, oid)
+		if err != nil {
+			return "", MapError(err)
+		}
+		for _, ix := range idx {
+			b.WriteString("\n" + ix["def"] + ";\n")
+		}
+	}
+	kw := map[bool]string{true: "MATERIALIZED VIEW", false: "VIEW"}[mat]
+	if r["comment"] != "" {
+		fmt.Fprintf(&b, "\nCOMMENT ON %s %s IS %s;\n", kw, c.D.Qualified(ref), c.D.QuoteString(r["comment"]))
+	}
+	cols, err := sqlbase.Recs(ctx, c.DB, `
+SELECT a.attname AS name, pg_catalog.col_description(a.attrelid, a.attnum) AS comment
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND pg_catalog.col_description(a.attrelid, a.attnum) IS NOT NULL
+ORDER BY a.attnum`, oid)
+	if err != nil {
+		return "", MapError(err)
+	}
+	for _, col := range cols {
+		fmt.Fprintf(&b, "COMMENT ON COLUMN %s.%s IS %s;\n", c.D.Qualified(ref), c.D.Quote(col["name"]), c.D.QuoteString(col["comment"]))
+	}
+	return b.String(), nil
 }

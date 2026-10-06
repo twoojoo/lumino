@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -302,11 +303,7 @@ func (c *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 	var b strings.Builder
 	b.WriteString(fixPLSQL(strings.TrimSpace(main), typ))
 	b.WriteString("\n")
-	if typ == "PACKAGE" {
-		if body, err := get("SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', :1, :2) FROM dual", ref.Name, ref.Schema); err == nil && body != "" {
-			b.WriteString("\n" + fixPLSQL(strings.TrimSpace(body), typ) + "\n")
-		}
-	}
+	// GET_DDL('PACKAGE') already returns the specification and the body
 	if typ == "TABLE" {
 		// indexes not created by PRIMARY KEY / UNIQUE constraints
 		rows, err := conn.QueryContext(ctx, `SELECT i.index_name FROM all_indexes i WHERE i.table_owner = :1 AND i.table_name = :2
@@ -343,22 +340,47 @@ ORDER BY i.index_name`, ref.Schema, ref.Name)
 	return b.String(), nil
 }
 
-// fixPLSQL terminates PL/SQL units with "/" lines (SQL*Plus convention,
-// understood by the splitter) instead of the ";" DBMS_METADATA appends.
+var (
+	plsqlStart = regexp.MustCompile(`(?i)^\s*CREATE\s+(OR\s+REPLACE\s+)?((NON)?EDITIONABLE\s+)?(TRIGGER|PACKAGE|FUNCTION|PROCEDURE|TYPE)\b`)
+	alterTrig  = regexp.MustCompile(`(?i)^\s*ALTER\s+TRIGGER\b`)
+)
+
+// fixPLSQL terminates PL/SQL units with exactly one "/" line (SQL*Plus
+// convention, understood by the splitter). DBMS_METADATA output may hold
+// several units (a package spec and body, every trigger of a table, each
+// followed by "ALTER TRIGGER … ENABLE;") and may or may not already carry the
+// "/" lines: missing ones are added, duplicates dropped.
 func fixPLSQL(s, typ string) string {
 	switch typ {
 	case "FUNCTION", "PROCEDURE", "PACKAGE", "TRIGGER":
 	default:
 		return s
 	}
-	if strings.HasSuffix(s, "\n/") {
-		return s
+	var out []string
+	open := false // inside a PL/SQL unit not yet terminated by "/"
+	for _, ln := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(ln)
+		switch {
+		case t == "/":
+			if !open {
+				continue // duplicate terminator
+			}
+			open = false
+			out = append(out, "/")
+			continue
+		case plsqlStart.MatchString(ln), alterTrig.MatchString(ln):
+			if open {
+				out = append(out, "/")
+			}
+			open = plsqlStart.MatchString(ln)
+			ln = t
+		}
+		out = append(out, ln)
 	}
-	// trigger DDL is "CREATE TRIGGER …END;\nALTER TRIGGER … ENABLE;"
-	if i := strings.Index(s, "\nALTER TRIGGER"); i > 0 {
-		return strings.TrimSpace(s[:i]) + "\n/\n" + strings.TrimSpace(s[i:])
+	if open {
+		out = append(out, "/")
 	}
-	return s + "\n/"
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func (c *catalog) Completion(ctx context.Context, schema db.ObjectRef) (map[string][]string, error) {
