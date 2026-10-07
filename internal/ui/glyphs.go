@@ -94,6 +94,8 @@ var (
 	icFilter     = mustIcon(icons.ContentFilterList)
 	icLock       = mustIcon(icons.ActionLock)
 	icSun        = mustIcon(icons.ImageBrightness7)
+	icZoomIn     = mustIcon(icons.ActionZoomIn)
+	icZoomOut    = mustIcon(icons.ActionZoomOut)
 	icMoon       = mustIcon(icons.ImageBrightness3)
 	icBookmark   = mustIcon(icons.ActionBookmark)
 	icTab        = mustIcon(icons.ActionTab)
