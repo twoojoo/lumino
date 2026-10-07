@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ type PrefsPanel struct {
 
 	themeBtns             []widget.Clickable
 	fontBtns              [5]widget.Clickable
+	scaleBtns             [8]widget.Clickable
 	fetch, maxRows, notif widget.Editor
 	updAutoBtn, updNowBtn widget.Clickable
 	orderPKBtn            widget.Clickable
@@ -94,6 +96,11 @@ func (p *PrefsPanel) Layout(gtx C) D {
 			a.savePrefs()
 		}
 	}
+	for i := range uiScales {
+		if p.scaleBtns[i].Clicked(gtx) {
+			a.setUIScale(uiScales[i])
+		}
+	}
 	if p.updAutoBtn.Clicked(gtx) {
 		a.prefs.SetUpdates(!a.prefs.UpdatesEnabled())
 		a.savePrefs()
@@ -129,12 +136,19 @@ func (p *PrefsPanel) Layout(gtx C) D {
 			fontSel = i
 		}
 	}
-	lw := unitDp(170)
+	scaleSel, scaleNames := 0, make([]string, len(uiScales))
+	for i, s := range uiScales {
+		scaleNames[i] = fmt.Sprintf("%d%%", int(s*100+0.5))
+		if s == a.uiScale() {
+			scaleSel = i
+		}
+	}
+	lw := unitDp(150)
 	keyring := "System keyring available: saved passwords persist securely."
 	if !secrets.Available() {
 		keyring = "No system keyring: passwords are kept for the session only."
 	}
-	return p.d.layout(gtx, th, 600, icSettings, "Preferences", func(gtx C) D {
+	return p.d.layout(gtx, th, 640, icSettings, "Preferences", func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Appearance") }),
 			layout.Rigid(func(gtx C) D {
@@ -142,6 +156,18 @@ func (p *PrefsPanel) Layout(gtx C) D {
 			}),
 			layout.Rigid(func(gtx C) D {
 				return formRow(gtx, th, "Editor font size", lw, func(gtx C) D { return segmented(gtx, th, p.fontBtns[:], fontNames, fontSel) })
+			}),
+			layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, "Interface size", lw, func(gtx C) D {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx C) D { return segmented(gtx, th, p.scaleBtns[:], scaleNames, scaleSel) }),
+						layout.Rigid(func(gtx C) D {
+							return layout.Inset{Top: 4}.Layout(gtx, func(gtx C) D {
+								return lbl(gtx, th, fontSans, 11, pal.TextDim, "Also with "+shortcutLabel("+")+", "+shortcutLabel("−")+" and "+shortcutLabel("0"))
+							})
+						}),
+					)
+				})
 			}),
 			layout.Rigid(func(gtx C) D { return sectionTitle(gtx, th, "Results") }),
 			layout.Rigid(func(gtx C) D {

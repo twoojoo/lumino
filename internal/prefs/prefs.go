@@ -52,9 +52,11 @@ type Prefs struct {
 	// sorted (nil = on).
 	OrderByPK *bool `json:"orderByPrimaryKey,omitempty"`
 	// ValuePanelWidth is the width of the value panel drawer (px, 0 = default).
-	ValuePanelWidth int            `json:"valuePanelWidth,omitempty"`
-	FontSize        int            `json:"fontSize,omitempty"` // editor/grid font size (default 13)
-	Extra           map[string]any `json:"extra,omitempty"`
+	ValuePanelWidth int `json:"valuePanelWidth,omitempty"`
+	FontSize        int `json:"fontSize,omitempty"` // editor/grid font size (default 13)
+	// UIScale enlarges or shrinks the whole interface (1 = 100%).
+	UIScale float64        `json:"uiScale,omitempty"`
+	Extra   map[string]any `json:"extra,omitempty"`
 
 	// LoadError reports a settings file that could not be parsed (moved
 	// aside) or read (left in place, and Save refuses to overwrite it).

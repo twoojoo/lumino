@@ -563,6 +563,9 @@ func (a *App) openPalette() {
 		add(icSun, "Theme  ·  "+t.Name, func() { a.setThemeName(id) })
 	}
 	add(icSettings, "Preferences", func() { a.overlay = newPrefsPanel(a) })
+	add(icZoomIn, "Zoom in", func() { a.zoom(1) })
+	add(icZoomOut, "Zoom out", func() { a.zoom(-1) })
+	add(icSearch, "Reset zoom", func() { a.zoom(0) })
 	add(icAI, "Assistant", func() { a.ai.open = !a.ai.open })
 	add(icDownload, "Check for updates", func() { a.checkUpdates(true) })
 	items := make([]string, len(cmds))
@@ -596,6 +599,10 @@ func (a *App) handleKeys(gtx C) {
 			key.Filter{Name: "R", Required: key.ModShortcut},
 			key.Filter{Name: "J", Required: key.ModShortcut},
 			key.Filter{Name: key.NameF5},
+			key.Filter{Name: "=", Required: key.ModShortcut, Optional: key.ModShift},
+			key.Filter{Name: "+", Required: key.ModShortcut, Optional: key.ModShift},
+			key.Filter{Name: "-", Required: key.ModShortcut},
+			key.Filter{Name: "0", Required: key.ModShortcut},
 		)
 		if !ok {
 			break
@@ -613,6 +620,12 @@ func (a *App) onKey(gtx C, e key.Event) {
 	switch {
 	case e.Name == key.NameEscape:
 		a.escape(gtx)
+	case short && (e.Name == "=" || e.Name == "+"):
+		a.zoom(1)
+	case short && e.Name == "-":
+		a.zoom(-1)
+	case short && e.Name == "0":
+		a.zoom(0)
 	case a.overlay != nil:
 		return
 	case short && (e.Name == "K" || e.Name == "P"):
@@ -760,6 +773,8 @@ func (w *welcome) layout(gtx C, a *App) D {
 					layout.Rigid(func(gtx C) D { return keyHint(gtx, th, shortcutLabel("K"), "commands") }),
 					layout.Rigid(layout.Spacer{Width: 14}.Layout),
 					layout.Rigid(func(gtx C) D { return keyHint(gtx, th, shortcutLabel("Shift N"), "new connection") }),
+					layout.Rigid(layout.Spacer{Width: 14}.Layout),
+					layout.Rigid(func(gtx C) D { return keyHint(gtx, th, shortcutLabel("+/−"), "zoom") }),
 				)
 			}),
 		)
