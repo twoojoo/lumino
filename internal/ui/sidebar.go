@@ -462,7 +462,10 @@ func (s *Sidebar) Layout(gtx C) D {
 	return d
 }
 
-// layoutResize lets the right edge be dragged.
+// layoutResize lets the right edge be dragged. The grip lives in the
+// sidebar's coordinates, whose origin doesn't move: the width is set from
+// the pointer's absolute position (no deltas added to the current width, so
+// the edge follows the pointer exactly).
 func (s *Sidebar) layoutResize(gtx C, w int) {
 	grip := image.Rect(w-gtx.Dp(4), 0, w, gtx.Constraints.Max.Y)
 	st := clip.Rect(grip).Push(gtx.Ops)
@@ -480,11 +483,11 @@ func (s *Sidebar) layoutResize(gtx C, w int) {
 		}
 		switch pe.Kind {
 		case pointer.Press:
-			s.dragging, s.grabX = true, pe.Position.X
+			s.dragging, s.grabX = true, pe.Position.X-float32(w) // pointer offset from the edge
 			s.width = w
 		case pointer.Drag:
 			if s.dragging {
-				s.width = w + int(pe.Position.X-s.grabX)
+				s.width = int(pe.Position.X - s.grabX)
 			}
 		case pointer.Release, pointer.Cancel:
 			s.dragging = false

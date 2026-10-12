@@ -57,8 +57,8 @@ type ConsoleTab struct {
 	divTag   int
 	dragging bool
 	grabY    float32
-	startH   int
 	curH     int
+	divTop   int // y of the divider in the last frame
 
 	stmtVer  int
 	stmts    []sqlx.Statement
@@ -817,8 +817,14 @@ func (t *ConsoleTab) Layout(gtx C) D {
 	)
 }
 
+// layoutDivider resizes the editor. Pointer positions are relative to the
+// divider, which moves while dragging: they are turned into absolute
+// positions with the divider's offset of the frame they were hit-tested in,
+// and the editor height is set from that absolute position (no deltas, so
+// the divider follows the pointer exactly).
 func (t *ConsoleTab) layoutDivider(gtx C, total int) D {
 	h := gtx.Dp(5)
+	prevTop := t.divTop
 	sz := image.Pt(gtx.Constraints.Max.X, h)
 	fillRect(gtx, pal.Header, image.Rectangle{Max: sz})
 	fillRect(gtx, pal.Border, image.Rect(0, h/2, sz.X, h/2+gtx.Dp(1)))
@@ -837,16 +843,18 @@ func (t *ConsoleTab) layoutDivider(gtx C, total int) D {
 		}
 		switch pe.Kind {
 		case pointer.Press:
-			t.dragging, t.grabY, t.startH = true, pe.Position.Y, t.curH
+			t.dragging, t.grabY = true, pe.Position.Y // pointer offset in the divider
 		case pointer.Drag:
 			if t.dragging && total > 0 {
-				t.split = float32(t.startH+int(pe.Position.Y-t.grabY)) / float32(total)
-				t.split = max(0.1, min(t.split, 0.9))
+				edH := int(float32(prevTop) + pe.Position.Y - t.grabY)
+				// +0.5: int(total*split) gives back edH exactly
+				t.split = max(0.1, min((float32(edH)+0.5)/float32(total), 0.9))
 			}
 		case pointer.Release, pointer.Cancel:
 			t.dragging = false
 		}
 	}
+	t.divTop = t.curH // where it is laid out this frame
 	return D{Size: sz}
 }
 
