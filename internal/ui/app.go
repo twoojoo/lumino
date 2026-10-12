@@ -334,6 +334,9 @@ func (a *App) layout(gtx C) {
 		gtx.Execute(key.FocusCmd{})
 	}
 	a.nextOverlay()
+	a.handleKeys(gtx)
+	// after handleKeys: an overlay opened by a shortcut must be seen this
+	// frame, or the focus it asks for when laid out is cleared next frame
 	if a.overlay != a.shownOverlay {
 		// a new modal takes the keyboard from the widget behind it (the
 		// overlay focuses its own inputs when laid out, later this frame)
@@ -342,7 +345,6 @@ func (a *App) layout(gtx C) {
 		}
 		a.shownOverlay = a.overlay
 	}
-	a.handleKeys(gtx)
 	if a.pendingCopy != nil {
 		copyText(gtx, *a.pendingCopy)
 		msg := a.pendingCopyMsg
