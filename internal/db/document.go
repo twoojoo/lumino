@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"io"
+	"strconv"
+	"strings"
 )
 
 // Document databases: whole documents next to the (flattened) rows, and
@@ -204,11 +206,77 @@ type DocumentTools interface {
 	Operations(ctx context.Context, all bool) ([]Operation, error)
 	// Watch streams the changes of a collection (Name = "": of the
 	// database) until ctx is done; pipeline filters them ("" = all).
-	Watch(ctx context.Context, ref ObjectRef, pipeline string, fn func(ChangeEvent)) error
+	// ready (optional) runs once the stream is open: changes made after it
+	// are seen.
+	Watch(ctx context.Context, ref ObjectRef, pipeline string, ready func(), fn func(ChangeEvent)) error
 	// Import inserts the documents read from r; progress gets the count.
 	Import(ctx context.Context, ref ObjectRef, r io.Reader, o ImportOptions, progress func(int64)) (int64, error)
 	// ExportDocument encodes a document: "ejson" (relaxed Extended JSON,
 	// one line: small longs read back as ints), "ejson-canonical" (every
 	// type kept) or "bson".
 	ExportDocument(d DocNode, format string) ([]byte, error)
+}
+
+// Field paths of documents: names joined by dots; a name containing a dot
+// or a quote, or starting with $, is written quoted ("a.b") so that paths
+// stay unambiguous.
+
+// fieldNeedsQuote reports whether a field name must be quoted in a path.
+func fieldNeedsQuote(name string) bool {
+	return name == "" || strings.ContainsAny(name, `."`) || strings.HasPrefix(name, "$")
+}
+
+// JoinFieldPath appends a field name to a document path ("" = top level).
+func JoinFieldPath(parent, name string) string {
+	if fieldNeedsQuote(name) {
+		name = strconv.Quote(name)
+	}
+	if parent == "" {
+		return name
+	}
+	return parent + "." + name
+}
+
+// SplitFieldPath returns the field names of a path.
+func SplitFieldPath(p string) []string {
+	var out []string
+	for len(p) > 0 {
+		if p[0] == '"' {
+			// quoted name: up to the closing quote
+			i := 1
+			for i < len(p) && p[i] != '"' {
+				if p[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			end := min(i+1, len(p))
+			name, err := strconv.Unquote(p[:end])
+			if err != nil {
+				name = strings.Trim(p[:end], `"`)
+			}
+			out = append(out, name)
+			p = strings.TrimPrefix(p[end:], ".")
+			continue
+		}
+		i := strings.IndexByte(p, '.')
+		if i < 0 {
+			out = append(out, p)
+			break
+		}
+		out = append(out, p[:i])
+		p = p[i+1:]
+	}
+	return out
+}
+
+// PlainFieldPath reports whether every name of a path can be used in a
+// dotted path of the database (no quoted names).
+func PlainFieldPath(p string) bool {
+	for _, n := range SplitFieldPath(p) {
+		if fieldNeedsQuote(n) {
+			return false
+		}
+	}
+	return true
 }

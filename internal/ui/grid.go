@@ -136,7 +136,15 @@ func (g *DataGrid) SetModel(m gridModel) {
 // rows in place (reverted inserts, a filter with fewer rows).
 func (g *DataGrid) validate() {
 	n, nc := g.rows(), len(g.cols())
-	if g.colW != nil && len(g.colW) != nc {
+	switch {
+	case g.colW != nil && len(g.colW) < nc && strings.HasPrefix(colsKeyOf(g.model), g.colsKey):
+		// columns appended (document results): the new ones are sized
+		// at the next layout, the others keep their width
+		for len(g.colW) < nc {
+			g.colW = append(g.colW, 0)
+		}
+		g.colsKey = colsKeyOf(g.model)
+	case g.colW != nil && len(g.colW) != nc:
 		g.colW = nil
 	}
 	if g.hasSel {
@@ -505,6 +513,11 @@ func (g *DataGrid) Layout(gtx C) D {
 	}
 	g.validate()
 	g.autosize(gtx)
+	for c, w := range g.colW {
+		if w == 0 {
+			g.autosizeCol(gtx, c)
+		}
+	}
 	cols := g.cols()
 	nrows := g.rows()
 	g.rowNumW = measureText(gtx, th, fontMono, 11, itoa(max(10, nrows))) + gtx.Dp(18)

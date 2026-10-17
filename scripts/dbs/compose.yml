@@ -142,6 +142,30 @@ services:
       timeout: 10s
       retries: 30
 
+  # replica set with internal keyFile authentication, TLS required and
+  # access control: SCRAM user lumino / lumino, X.509 user CN=lumino
+  # (.dev/certs/client.crt); scripts/dbs/mongo-secure-init.js creates them
+  mongo-secure:
+    image: mongo:8.0
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        cat /certs/server.crt /certs/server.key > /tmp/server.pem
+        cp /certs/mongo.key /tmp/key
+        chown mongodb /tmp/server.pem /tmp/key && chmod 400 /tmp/server.pem /tmp/key
+        exec gosu mongodb mongod --replSet rs1 --keyFile /tmp/key --tlsMode requireTLS \
+          --tlsCertificateKeyFile /tmp/server.pem --tlsCAFile /certs/ca.crt \
+          --tlsAllowConnectionsWithoutCertificates --bind_ip_all
+    volumes:
+      - ../../.dev/certs:/certs:ro
+      - ./mongo-secure-init.js:/init.js:ro
+    ports: ["127.0.0.1:55019:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--tls", "--tlsCAFile", "/certs/ca.crt", "--host", "localhost", "/init.js"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+
   # MongoDB-compatible, no transactions; SCRAM user lumino / lumino
   ferretdb:
     image: ghcr.io/ferretdb/ferretdb-eval:2

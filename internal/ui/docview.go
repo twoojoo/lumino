@@ -100,10 +100,7 @@ func (v *docView) lines(rs *resultSet) []docLine {
 			return
 		}
 		for _, c := range n.Children {
-			p := c.Name
-			if path != "" {
-				p = path + "." + c.Name
-			}
+			p := db.JoinFieldPath(path, c.Name) // names with dots are quoted
 			walk(row, key+"\x00"+c.Name, p, c, depth+1)
 		}
 	}

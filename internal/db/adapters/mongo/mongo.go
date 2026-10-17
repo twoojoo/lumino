@@ -105,6 +105,8 @@ func buildURI(cfg *db.Config, defPort int) (string, error) {
 			continue
 		case "tls", "ssl", "tlsinsecure", "tlscafile", "tlscertificatekeyfile", "tlsallowinvalidcertificates", "tlsallowinvalidhostnames":
 			continue // TLS comes from the connection's TLS settings
+		case "authmechanism", "authsource", "authmechanismproperties":
+			continue // the credential (Open)
 		}
 		q.Set(k, cfg.Params[k])
 	}
@@ -150,9 +152,23 @@ func (Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 	}
 	mech := strings.ToUpper(cfg.Param("authMechanism"))
 	if cfg.User != "" || mech != "" {
+		src := cfg.Param("authSource")
+		if src == "" && (mech == "" || strings.HasPrefix(mech, "SCRAM")) {
+			// users live in admin unless said otherwise (the database
+			// field is the default database, not the authentication one)
+			src = "admin"
+		}
 		cred := options.Credential{
-			AuthMechanism: mech, AuthSource: cfg.Param("authSource"),
+			AuthMechanism: mech, AuthSource: src,
 			Username: cfg.User, Password: cfg.Password, PasswordSet: cfg.Password != "",
+		}
+		// AWS_SESSION_TOKEN:…, SERVICE_NAME:… (comma-separated)
+		if props := cfg.Param("authMechanismProperties"); props != "" {
+			cred.AuthMechanismProperties = map[string]string{}
+			for _, kv := range strings.Split(props, ",") {
+				k, v, _ := strings.Cut(kv, ":")
+				cred.AuthMechanismProperties[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
 		}
 		if mech == "MONGODB-X509" && tc == nil {
 			return nil, errors.New("X.509 authentication needs TLS with a client certificate")

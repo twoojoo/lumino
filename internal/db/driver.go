@@ -171,6 +171,8 @@ type Session interface {
 // Result is a cursor over the result sets of a statement.
 type Result interface {
 	// Columns of the current result set; nil for statements without rows.
+	// Document databases may append columns after a Fetch (fields first
+	// seen in later documents): rows fetched before lack them.
 	Columns() []Column
 	// Fetch returns up to n rows of the current result set; more is false
 	// once it is exhausted.

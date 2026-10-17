@@ -505,7 +505,7 @@ func (c *conn) Operations(ctx context.Context, all bool) ([]db.Operation, error)
 
 // ---- change streams ----
 
-func (c *conn) Watch(ctx context.Context, ref db.ObjectRef, pipeline string, fn func(db.ChangeEvent)) error {
+func (c *conn) Watch(ctx context.Context, ref db.ObjectRef, pipeline string, ready func(), fn func(db.ChangeEvent)) error {
 	pipe := bson.A{}
 	if strings.TrimSpace(pipeline) != "" {
 		v, err := parseValue(pipeline)
@@ -537,6 +537,10 @@ func (c *conn) Watch(ctx context.Context, ref db.ObjectRef, pipeline string, fn 
 		return mapError(err)
 	}
 	defer cs.Close(context.Background())
+	// the server opened the stream: later changes are delivered
+	if ready != nil {
+		ready()
+	}
 	for cs.Next(ctx) {
 		var d bson.D
 		if err := cs.Decode(&d); err != nil {

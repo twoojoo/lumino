@@ -40,3 +40,6 @@ func TestCassandra(t *testing.T)  { run(t, "cassandra") }
 // document databases: the document suite
 func TestMongoDB(t *testing.T)  { dbtest.RunDocuments(t, dbtest.Targets()["mongo"]) }
 func TestFerretDB(t *testing.T) { dbtest.RunDocuments(t, dbtest.Targets()["ferretdb"]) }
+
+// the whole suite over TLS with access control
+func TestMongoDBSecure(t *testing.T) { dbtest.RunDocuments(t, dbtest.Targets()["mongo-secure"]) }

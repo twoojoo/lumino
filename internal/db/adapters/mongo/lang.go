@@ -476,37 +476,39 @@ func (l *language) DocumentChanges(orig db.DocNode, edited string) ([]db.ColValu
 	if !ok {
 		return nil, nil, errors.New("the document has no _id: it can't be updated")
 	}
-	key := []db.ColValue{{Column: "_id", Kind: id.Kind, Value: db.Raw(id.Lit)}}
 	before, err := parseDocument(l.FormatDocument(orig))
 	if err != nil {
 		return nil, nil, fmt.Errorf("original document: %w", err)
 	}
+	// the key as written (composite _id documents included, fields in order)
+	bid, _ := field(before, "_id")
+	idLit := shellLit(bid)
+	key := []db.ColValue{{Column: "_id", Kind: id.Kind, Value: db.Raw(idLit)}}
 	after, err := parseDocument(edited)
 	if err != nil {
 		return nil, nil, err
 	}
-	if nid, ok := field(after, "_id"); !ok || shellLit(nid) != id.Lit {
+	if nid, ok := field(after, "_id"); !ok || shellLit(nid) != idLit {
 		return nil, nil, errors.New("the _id can't be changed (insert a copy and delete the original)")
 	}
 	var vals []db.ColValue
+	// names with dots or a leading $ are quoted in the paths (updated
+	// through a pipeline)
 	var diff func(prefix string, a, b bson.D) error
 	diff = func(prefix string, a, b bson.D) error {
 		for _, e := range b {
 			if prefix == "" && e.Key == "_id" {
 				continue
 			}
-			if !plainKeys(bson.D{e}) {
-				return fmt.Errorf("field %q can't be edited by path: change it in the console", prefix+e.Key)
-			}
-			p := prefix + e.Key
+			p := db.JoinFieldPath(prefix, e.Key)
 			av, had := field(a, e.Key)
 			ad, aIsDoc := av.(bson.D)
 			bd, bIsDoc := e.Value.(bson.D)
 			switch {
 			case !had:
 				vals = append(vals, db.ColValue{Column: p, Kind: kindOf(e.Value), Value: db.Raw(shellLit(e.Value))})
-			case aIsDoc && bIsDoc && len(ad) > 0 && len(bd) > 0 && plainKeys(ad) && plainKeys(bd):
-				if err := diff(p+".", ad, bd); err != nil {
+			case aIsDoc && bIsDoc && len(ad) > 0 && len(bd) > 0:
+				if err := diff(p, ad, bd); err != nil {
 					return err
 				}
 			case shellLit(av) != shellLit(e.Value):
@@ -515,7 +517,7 @@ func (l *language) DocumentChanges(orig db.DocNode, edited string) ([]db.ColValu
 		}
 		for _, e := range a {
 			if _, ok := field(b, e.Key); !ok {
-				vals = append(vals, db.ColValue{Column: prefix + e.Key, Value: db.Unset})
+				vals = append(vals, db.ColValue{Column: db.JoinFieldPath(prefix, e.Key), Value: db.Unset})
 			}
 		}
 		return nil
@@ -686,18 +688,21 @@ func insertDoc(vals []db.ColValue, like func(string) any) (bson.D, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", cv.Column, err)
 		}
-		if _, top := field(d, cv.Column); top || !strings.Contains(cv.Column, ".") {
-			d = append(d, bson.E{Key: cv.Column, Value: v})
-			continue
-		}
-		d = setPath(d, cv.Column, v)
+		d = setPath(d, cv.Column, v) // dotted and quoted names are paths
 	}
 	return d, nil
 }
 
-// updateDoc builds {$set: …, $unset: …} of an update by path. like
-// returns the stored value of a path (its type is kept).
-func updateDoc(vals []db.ColValue, like func(string) any) (bson.D, error) {
+// updateDoc builds the update of the values by path: {$set: …, $unset:
+// …}, or, when a field name has a dot or starts with $ (paths can't name
+// it), an update pipeline of $setField / $unsetField. like returns the
+// stored value of a path (its type is kept).
+func updateDoc(vals []db.ColValue, like func(string) any) (any, error) {
+	for _, cv := range vals {
+		if !db.PlainFieldPath(cv.Column) {
+			return pipelineUpdate(vals, like)
+		}
+	}
 	set, unset := bson.D{}, bson.D{}
 	for _, cv := range vals {
 		if cv.Value == db.Unset {
@@ -718,6 +723,64 @@ func updateDoc(vals []db.ColValue, like func(string) any) (bson.D, error) {
 		upd = append(upd, bson.E{Key: "$unset", Value: unset})
 	}
 	return upd, nil
+}
+
+// fieldName is a field name operand of $getField / $setField.
+func fieldName(s string) any {
+	if strings.HasPrefix(s, "$") {
+		return bson.D{{Key: "$literal", Value: s}}
+	}
+	return s
+}
+
+func getField(input any, name string) bson.D {
+	return bson.D{{Key: "$getField", Value: bson.D{{Key: "field", Value: fieldName(name)}, {Key: "input", Value: input}}}}
+}
+
+// setExpr is the document input with the field of segs set to v.
+func setExpr(input any, segs []string, v any) bson.D {
+	var value any = bson.D{{Key: "$literal", Value: v}}
+	if len(segs) > 1 {
+		inner := bson.D{{Key: "$ifNull", Value: bson.A{getField(input, segs[0]), bson.D{}}}}
+		value = setExpr(inner, segs[1:], v)
+	}
+	return bson.D{{Key: "$setField", Value: bson.D{{Key: "field", Value: fieldName(segs[0])}, {Key: "input", Value: input}, {Key: "value", Value: value}}}}
+}
+
+// unsetExpr is the document input without the field of segs.
+func unsetExpr(input any, segs []string) bson.D {
+	if len(segs) == 1 {
+		return bson.D{{Key: "$unsetField", Value: bson.D{{Key: "field", Value: fieldName(segs[0])}, {Key: "input", Value: input}}}}
+	}
+	sub := getField(input, segs[0])
+	value := bson.D{{Key: "$cond", Value: bson.A{
+		bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: sub}}, "object"}}},
+		unsetExpr(sub, segs[1:]), sub}}}
+	return bson.D{{Key: "$setField", Value: bson.D{{Key: "field", Value: fieldName(segs[0])}, {Key: "input", Value: input}, {Key: "value", Value: value}}}}
+}
+
+// pipelineUpdate sets and removes fields whatever their names: one
+// $replaceWith stage per value.
+func pipelineUpdate(vals []db.ColValue, like func(string) any) (bson.A, error) {
+	pipe := bson.A{}
+	for _, cv := range vals {
+		segs := db.SplitFieldPath(cv.Column)
+		if len(segs) == 0 {
+			return nil, errors.New("empty field path")
+		}
+		var expr bson.D
+		if cv.Value == db.Unset {
+			expr = unsetExpr("$$ROOT", segs)
+		} else {
+			v, err := toBSON(cv.Value, cv.Kind, like(cv.Column))
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", cv.Column, err)
+			}
+			expr = setExpr("$$ROOT", segs, v)
+		}
+		pipe = append(pipe, bson.D{{Key: "$replaceWith", Value: expr}})
+	}
+	return pipe, nil
 }
 
 func noLike(string) any { return nil }

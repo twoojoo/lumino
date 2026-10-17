@@ -57,6 +57,20 @@ func (r *resultSet) Value(i, c int) any {
 	return r.rows[i][c]
 }
 
+// growColumns adopts the columns of the cursor when it appended some
+// (document results) and pads the rows fetched before.
+func (r *resultSet) growColumns(cols []db.Column) {
+	if len(cols) <= len(r.cols) {
+		return
+	}
+	r.cols = cols
+	for i, row := range r.rows {
+		if len(row) < len(cols) {
+			r.rows[i] = append(row, make(db.Row, len(cols)-len(row))...)
+		}
+	}
+}
+
 // docsOf returns the documents of the rows just fetched from res (nil when
 // res is not a document result).
 func docsOf(res db.Result, n int) []db.DocNode {
@@ -171,17 +185,21 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 			}
 			if len(got) >= 50000 { // hand rows to the UI in chunks
 				chunk, chunkDocs, withDocs := got, gotDocs, docs
+				chunkCols := res.Columns()
 				got, gotDocs = nil, nil
 				a.post(func() {
 					r.rows = append(r.rows, chunk...)
+					r.growColumns(chunkCols)
 					r.addDocs(chunkDocs, withDocs)
 					r.resort()
 				})
 			}
 		}
+		cols := res.Columns()
 		a.post(func() {
 			r.fetching = false
 			r.rows = append(r.rows, got...)
+			r.growColumns(cols)
 			r.addDocs(gotDocs, docs)
 			if r.res != res {
 				// detached or closed meanwhile (re-run, later statement):

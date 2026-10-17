@@ -286,8 +286,8 @@ func TestValues(t *testing.T) {
 		}
 	}
 	oi := slices.IndexFunc(cols, func(c db.Column) bool { return c.Name == "o" })
-	o := r[oi].(map[string]any)
-	if o["x"].(map[string]any)["$numberLong"] != "7" || o["id"].(map[string]any)["$oid"] != id.Hex() {
+	o := r[oi].(string)
+	if o != `{"x": {"$numberLong":"7"}, "id": {"$oid":"`+id.Hex()+`"}, "a": [1, "s"]}` {
 		t.Errorf("nested %v", o)
 	}
 	// nested values go back with their types
@@ -296,7 +296,7 @@ func TestValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	bd := back.(bson.D)
-	if fieldOr(bd, "x") != int64(7) || fieldOr(bd, "id") != id {
+	if fieldOr(bd, "x") != int64(7) || fieldOr(bd, "id") != id || bd[0].Key != "x" || bd[2].Key != "a" {
 		t.Errorf("back %#v", bd)
 	}
 	if a := fieldOr(bd, "a").(bson.A); a[0] != int32(1) || a[1] != "s" {
@@ -350,7 +350,7 @@ func TestURL(t *testing.T) {
 		t.Fatal("foreign scheme")
 	}
 	u, err := buildURI(&db.Config{Host: "127.0.0.1", Port: 55017, Database: "shop", Params: map[string]string{"authSource": "admin", "tls": "true"}}, 27017)
-	if err != nil || u != "mongodb://127.0.0.1:55017/shop?authSource=admin&directConnection=true" {
+	if err != nil || u != "mongodb://127.0.0.1:55017/shop?directConnection=true" {
 		t.Fatalf("uri %q %v", u, err)
 	}
 	u, _ = buildURI(&db.Config{Host: "a, b:2", Port: 3}, 27017)
@@ -373,15 +373,32 @@ func TestFlatten(t *testing.T) {
 	for _, c := range cols {
 		names = append(names, c.Name)
 	}
-	if got := strings.Join(names, ","); got != "_id,address.city,address.geo.lat,address.zip,tags,odd,empty,address2" {
+	if got := strings.Join(names, ","); got != `_id,address.city,address.geo.lat,address.zip,tags,odd."a.b",empty,address2` {
 		t.Fatalf("columns %s", got)
 	}
 	r := row(docs[0], cols)
 	if r[1] != "London" || r[2] != 1.5 || r[3] != nil {
 		t.Fatalf("row %v", r)
 	}
-	if v, _ := lookup(docs[0], "odd"); v == nil {
-		t.Fatal("top-level lookup")
+	if v, _ := lookup(docs[0], `odd."a.b"`); v != 1 {
+		t.Fatalf("quoted lookup %v", v)
+	}
+	// a composite _id stays one column; documents read later add columns
+	more := []bson.D{{{Key: "_id", Value: bson.D{{Key: "a", Value: int32(1)}, {Key: "b", Value: int32(2)}}}, {Key: "x", Value: int32(1)}}}
+	c2, _ := inferColumns(more)
+	if len(c2) != 2 || c2[0].Name != "_id" || c2[0].Kind != db.KindJSON {
+		t.Fatalf("composite key %+v", c2)
+	}
+	c2 = extendColumns(c2, bson.D{{Key: "_id", Value: int32(3)}, {Key: "y", Value: bson.D{{Key: "z", Value: "k"}, {Key: "w.v", Value: true}}}, {Key: "x", Value: int32(2)}})
+	var names2 []string
+	for _, c := range c2 {
+		names2 = append(names2, c.Name)
+	}
+	if strings.Join(names2, ",") != `_id,x,y.z,y."w.v"` || c2[3].Kind != db.KindBool {
+		t.Fatalf("extended %v", names2)
+	}
+	if r := row(bson.D{{Key: "y", Value: bson.D{{Key: "w.v", Value: true}}}}, c2); r[3] != true {
+		t.Fatalf("row of a quoted column %v", r)
 	}
 	d := setPath(bson.D{{Key: "a", Value: bson.D{{Key: "x", Value: int32(1)}}}}, "a.y.z", "v")
 	if shellLit(d) != `{a: {x: 1, y: {z: "v"}}}` {

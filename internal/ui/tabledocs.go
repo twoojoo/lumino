@@ -182,7 +182,7 @@ func (t *TableTab) docMenu(r int, path string, n db.DocNode) []*menuItem {
 	if t.readOnlyReason() != "" {
 		return items
 	}
-	key, hasKey := docKey(d)
+	key, hasKey := docKey(dl, d)
 	if !hasKey {
 		return items
 	}

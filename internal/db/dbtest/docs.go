@@ -830,10 +830,18 @@ print("inserted", db.shell_t.countDocuments({}))`)
 			wctx, stop := context.WithCancel(ctx)
 			events := make(chan db.ChangeEvent, 10)
 			werr := make(chan error, 1)
+			opened := make(chan struct{})
 			go func() {
-				werr <- tools.Watch(wctx, ref("watch_t"), `[{$match: {operationType: {$in: ["insert", "update", "delete"]}}}]`, func(e db.ChangeEvent) { events <- e })
+				werr <- tools.Watch(wctx, ref("watch_t"), `[{$match: {operationType: {$in: ["insert", "update", "delete"]}}}]`,
+					func() { close(opened) }, func(e db.ChangeEvent) { events <- e })
 			}()
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-opened:
+			case err := <-werr:
+				t.Fatalf("watch: %v", err)
+			case <-time.After(15 * time.Second):
+				t.Fatal("the change stream didn't open")
+			}
 			exec(t, s, `db.watch_t.insertOne({_id: 1, a: 1})`)
 			exec(t, s, `db.watch_t.updateOne({_id: 1}, {$set: {b: 2}, $unset: {a: ""}})`)
 			exec(t, s, `db.watch_t.deleteOne({_id: 1})`)
@@ -916,6 +924,106 @@ print("inserted", db.shell_t.countDocuments({}))`)
 		if _, rows, err := Query(ctx, s, tr); err != nil || len(rows) != 3 {
 			t.Fatalf("%s: %v %v", tr, rows, err)
 		}
+	})
+
+	t.Run("Paths", func(t *testing.T) {
+		if tg.Name == "ferretdb" {
+			t.Skip("FerretDB has no $setField / $getField")
+		}
+		s := session(t, conn)
+		dl := lang.(db.DocumentLanguage)
+		r := ref("paths_t")
+		exec(t, s, `db.paths_t.drop()`)
+		exec(t, s, `db.runCommand({insert: "paths_t", documents: [{_id: {a: 1, b: 2}, x: 1, "a.b": 5, nested: {"c.d": 1, "$e": 2, z: {y: 1, w: 2}}}]})`)
+		q, _ := lang.Browse(r, db.BrowseQuery{})
+		res, err := s.Execute(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, _, err := res.Fetch(ctx, 10)
+		cols := res.Columns()
+		docs := res.(db.DocumentResult).Documents()
+		res.Close()
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows %v %v", rows, err)
+		}
+		var names []string
+		for _, c := range cols {
+			names = append(names, c.Name)
+		}
+		if strings.Join(names, ",") != `_id,x,"a.b",nested."c.d",nested."$e",nested.z.y,nested.z.w` || cols[0].Kind != db.KindJSON {
+			t.Fatalf("columns %v", names)
+		}
+		if rows[0][0] != `{"a": 1, "b": 2}` {
+			t.Fatalf("composite key cell %v", rows[0][0])
+		}
+		// a grid edit of a dotted field name, the key a composite _id
+		key := []db.ColValue{{Column: "_id", Kind: db.KindJSON, Value: rows[0][0]}}
+		if _, err := db.Apply(ctx, s, conn, r, []db.Change{{Op: db.OpUpdate, Key: key,
+			Values: []db.ColValue{{Column: `"a.b"`, Kind: db.KindInt, Value: int64(6)}, {Column: `nested."$e"`, Kind: db.KindInt, Value: int64(3)}}}}); err != nil {
+			t.Fatal(err)
+		}
+		if v := count(t, s, "paths_t", `{$expr: {$and: [{$eq: [{$getField: "a.b"}, 6]}, {$eq: [{$getField: {field: {$literal: "$e"}, input: "$nested"}}, 3]}]}}`); v != "1" {
+			t.Fatalf("pipeline update: %s", v)
+		}
+		// the document editor: quoted paths, field order kept
+		text := dl.FormatDocument(docs[0])
+		edited := strings.Replace(text, `"c.d": 1`, `"c.d": 10`, 1)
+		edited = strings.Replace(edited, "z: {\n      y: 1,\n      w: 2\n    }", "z: {\n      y: 1,\n      w: 20\n    }", 1)
+		edited = strings.Replace(edited, `  x: 1,`+"\n", "", 1)
+		k2, vals, err := dl.DocumentChanges(docs[0], edited)
+		if err != nil || len(vals) != 3 {
+			t.Fatalf("changes %v %v\n%s", vals, err, edited)
+		}
+		if _, err := db.Apply(ctx, s, conn, r, []db.Change{{Op: db.OpUpdate, Key: k2, Values: vals}}); err != nil {
+			t.Fatal(err)
+		}
+		if v := count(t, s, "paths_t", `{x: {$exists: false}, "nested.z.w": 20, $expr: {$eq: [{$getField: {field: "c.d", input: "$nested"}}, 10]}}`); v != "1" {
+			t.Fatalf("document changes: %s", v)
+		}
+		// nested documents are JSON in document order
+		res, _ = s.Execute(ctx, `db.paths_t.aggregate([{$project: {_id: 0, arr: {$literal: [{b: 1, a: NumberLong(2)}]}}}])`)
+		rows, _, _ = res.Fetch(ctx, 1)
+		res.Close()
+		if len(rows) != 1 || rows[0][0] != `[{"b": 1, "a": {"$numberLong":"2"}}]` {
+			t.Fatalf("nested row %v", rows)
+		}
+		if _, err := db.Apply(ctx, s, conn, r, []db.Change{{Op: db.OpDelete, Key: key}}); err != nil {
+			t.Fatal(err)
+		}
+		// fields seen after the first documents add columns
+		exec(t, s, `db.grow_t.drop()`)
+		exec(t, s, `for (let i = 0; i < 1500; i++) { db.grow_t.insertOne(i < 1200 ? {_id: i, a: i} : {_id: i, a: i, late: true, n: {z: i}}) }`)
+		q, _ = lang.Browse(ref("grow_t"), db.BrowseQuery{Sort: []db.SortKey{{Field: "_id"}}})
+		res, err = s.Execute(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Close()
+		first, _, _ := res.Fetch(ctx, 1000)
+		if len(res.Columns()) != 2 || len(first[0]) != 2 {
+			t.Fatalf("first columns %v", res.Columns())
+		}
+		var rest []db.Row
+		for {
+			rr, more, err := res.Fetch(ctx, 300)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rest = append(rest, rr...)
+			if !more {
+				break
+			}
+		}
+		grown := res.Columns()
+		if len(grown) != 4 || grown[2].Name != "late" || grown[3].Name != "n.z" || len(rest) != 500 {
+			t.Fatalf("grown columns %v (%d rows)", grown, len(rest))
+		}
+		last := rest[len(rest)-1]
+		if len(last) != 4 || last[2] != true || last[3] != int64(1499) {
+			t.Fatalf("last row %v", last)
+		}
+		exec(t, s, `db.grow_t.drop()`)
 	})
 
 	t.Run("Script", func(t *testing.T) {

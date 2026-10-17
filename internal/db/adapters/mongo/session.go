@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -240,7 +241,7 @@ func (r *result) Columns() []db.Column {
 	if r.cols == nil {
 		return []db.Column{}
 	}
-	return r.cols
+	return slices.Clone(r.cols)
 }
 
 func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
@@ -267,6 +268,9 @@ func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
 		if err := bson.Unmarshal(r.cur.Current, &d); err != nil {
 			return rows, false, err
 		}
+		// documents after the first ones may bring new fields: the columns
+		// grow (rows fetched before lack them)
+		r.cols = extendColumns(r.cols, d)
 		rows = append(rows, row(d, r.cols))
 		r.last = append(r.last, d)
 	}

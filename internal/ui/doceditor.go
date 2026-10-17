@@ -129,14 +129,15 @@ func queryItems(lang db.Language, fields func() []string) *compRequest {
 }
 
 // docKey is the key of a document for edits (its _id, as written).
-func docKey(d db.DocNode) ([]db.ColValue, bool) {
+func docKey(dl db.DocumentLanguage, d db.DocNode) ([]db.ColValue, bool) {
 	id, ok := d.Field("_id")
-	if !ok || id.Lit == "" && len(id.Children) == 0 {
+	if !ok {
 		return nil, false
 	}
 	lit := id.Lit
 	if lit == "" {
-		return nil, false // composite _id documents: edit in the console
+		// a composite _id document, its fields in their order
+		lit = dl.FormatDocument(id)
 	}
 	return []db.ColValue{{Column: "_id", Kind: id.Kind, Value: db.Raw(lit)}}, true
 }

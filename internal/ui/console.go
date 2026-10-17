@@ -589,6 +589,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 					rows, more, ferr := res.Fetch(ctx, fetch)
 					rs.rows, rs.more, err = rows, more, ferr
 					rs.docs = docsOf(res, len(rows))
+					rs.growColumns(res.Columns())
 					rs.elapsed = time.Since(rs.started)
 					switch {
 					case more && last:

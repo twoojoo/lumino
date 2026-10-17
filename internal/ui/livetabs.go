@@ -27,6 +27,7 @@ type WatchTab struct {
 	ref    db.ObjectRef
 	filter *CodeEditor
 	cancel context.CancelFunc
+	open   bool // the stream is open (changes from now on are seen)
 	err    error
 	paused bool
 	rs     *resultSet
@@ -69,10 +70,10 @@ func (t *WatchTab) start() {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.cancel, t.err = cancel, nil
+	t.cancel, t.err, t.open = cancel, nil, false
 	ref, pipe := t.ref, t.filter.Text()
 	go func() {
-		err := tools.Watch(ctx, ref, pipe, func(ev db.ChangeEvent) {
+		err := tools.Watch(ctx, ref, pipe, func() { a.post(func() { t.open = true }) }, func(ev db.ChangeEvent) {
 			at := time.Now()
 			a.post(func() {
 				if t.paused {
@@ -174,6 +175,8 @@ func (t *WatchTab) Layout(gtx C) D {
 				s, c = db.AsError(t.err).Error(), pal.Err
 			case t.cancel == nil:
 				s = "Stopped."
+			case !t.open:
+				s = "Opening the change stream…"
 			}
 			return layout.Inset{Left: 10, Top: 4, Bottom: 4}.Layout(gtx, func(gtx C) D { return lbl(gtx, th, fontSans, 11.5, c, s) })
 		}),

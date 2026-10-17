@@ -200,3 +200,83 @@ func TestSSHTunnelMongo(t *testing.T) {
 	}
 	res.Close()
 }
+
+// TestMongoAuthTLS: SCRAM and X.509 authentication over TLS on the
+// keyFile replica set (mongo-secure), and the failures that must happen.
+func TestMongoAuthTLS(t *testing.T) {
+	needs(t, "127.0.0.1:55019")
+	ca := devPath("certs", "ca.crt")
+	base := db.Config{Driver: "mongodb", Host: "localhost", Port: 55019, Database: "lumino_test",
+		TLS: db.TLSConfig{Mode: "verify-full", CAFile: ca}}
+	open := func(cfg db.Config) (db.Conn, error) {
+		return db.Open(context.Background(), &cfg, db.OpenOptions{})
+	}
+	t.Run("SCRAM", func(t *testing.T) {
+		cfg := base
+		cfg.User, cfg.Password = "lumino", "lumino"
+		conn := ping(t, cfg, db.OpenOptions{})
+		if !conn.Caps().Transactions {
+			t.Fatal("replica set without transactions")
+		}
+		cfg.Params = map[string]string{"authMechanism": "SCRAM-SHA-256"}
+		ping(t, cfg, db.OpenOptions{})
+	})
+	t.Run("X.509", func(t *testing.T) {
+		cfg := base
+		cfg.Params = map[string]string{"authMechanism": "MONGODB-X509"}
+		cfg.TLS.CertFile, cfg.TLS.KeyFile = devPath("certs", "client.crt"), devPath("certs", "client.key")
+		conn := ping(t, cfg, db.OpenOptions{})
+		s, err := conn.Session(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		res, err := s.Execute(context.Background(), `db.x509_t.insertOne({ok: true})`)
+		if err != nil {
+			t.Fatalf("write as the X.509 user: %v", err)
+		}
+		res.Close()
+	})
+	t.Run("IP verified", func(t *testing.T) {
+		cfg := base
+		cfg.Host, cfg.User, cfg.Password = "127.0.0.1", "lumino", "lumino"
+		ping(t, cfg, db.OpenOptions{})
+	})
+	bad := map[string]func(*db.Config){
+		"wrong password": func(c *db.Config) { c.User, c.Password = "lumino", "nope" },
+		"no credentials": func(c *db.Config) {},
+		"no TLS": func(c *db.Config) {
+			c.User, c.Password, c.TLS = "lumino", "lumino", db.TLSConfig{}
+		},
+		"unknown CA": func(c *db.Config) {
+			c.User, c.Password, c.TLS.CAFile = "lumino", "lumino", ""
+		},
+		"X.509 without a certificate": func(c *db.Config) {
+			c.Params = map[string]string{"authMechanism": "MONGODB-X509"}
+		},
+	}
+	for name, mod := range bad {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			mod(&cfg)
+			conn, err := open(cfg)
+			if err == nil {
+				// connecting is lazy for some failures: a command must fail
+				s, serr := conn.Session(context.Background())
+				if serr == nil {
+					res, eerr := s.Execute(context.Background(), "db.x.find({})")
+					if eerr == nil {
+						res.Close()
+					}
+					s.Close()
+					serr = eerr
+				}
+				conn.Close()
+				err = serr
+			}
+			if err == nil {
+				t.Fatal("connection accepted")
+			}
+		})
+	}
+}

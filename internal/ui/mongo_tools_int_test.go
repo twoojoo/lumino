@@ -144,13 +144,8 @@ func TestUIMongoTools(t *testing.T) {
 	// change stream
 	a.openWatch(cfg.ID, ref("watch_ui"))
 	wt := a.activeTab().(*WatchTab)
-	h.waitFor("watching", func() bool { return wt.cancel != nil })
-	var events int
-	for i := 0; i < 50 && events == 0; i++ {
-		query(`db.watch_ui.insertOne({at: new Date(), n: 1})`)
-		h.frame()
-		events = len(wt.rs.rows)
-	}
+	h.waitFor("watching", func() bool { return wt.open })
+	query(`db.watch_ui.insertOne({at: new Date(), n: 1})`)
 	h.waitFor("event", func() bool { return len(wt.rs.rows) > 0 })
 	if wt.rs.rows[0][1] != "insert" || !wt.rs.hasDocs() {
 		t.Fatalf("event %v", wt.rs.rows[0])

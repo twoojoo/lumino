@@ -95,11 +95,17 @@ func (t *tableData) pending() int {
 func (t *tableData) set(r, c int, v any) {
 	i, isBase := t.base(r)
 	if !isBase {
+		for len(t.inserted[i]) <= c { // columns appended after the insert
+			t.inserted[i] = append(t.inserted[i], nil)
+		}
 		t.inserted[i][c] = v
 		t.insSet[i][c] = true
 		return
 	}
-	orig := t.rs.rows[i][c]
+	var orig any
+	if c < len(t.rs.rows[i]) {
+		orig = t.rs.rows[i][c]
+	}
 	if t.edits[i] == nil {
 		t.edits[i] = map[int]cellEdit{}
 	}
@@ -587,6 +593,7 @@ func (t *TableTab) reload() {
 				rs.cols = res.Columns()
 				rs.rows, rs.more, err = res.Fetch(context.Background(), fetch)
 				rs.docs = docsOf(res, len(rs.rows))
+				rs.growColumns(res.Columns())
 				if rs.more {
 					rs.res = res
 				} else {
