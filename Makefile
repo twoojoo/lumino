@@ -54,7 +54,7 @@ site-shots:
 
 # ---- release packages (dist/) ----
 
-# icons for every package + the UI logo, from packaging/logo-source.png
+# icons for every package, the UI logo and the website logo, from packaging/logo-source.png
 icons:
 	go run ./scripts/icongen -out packaging/icons
 

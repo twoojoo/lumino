@@ -42,5 +42,5 @@ driver-neutral database API with one adapter per database.
   ed25519 public key; the private key is `.dev/update-signing.key` locally and the `UPDATE_SIGNING_KEY`
   repo secret in CI. Never print, commit or regenerate it. Dev builds never update.
 - Packages are published as GitHub releases of this repo (`twoojoo/lumino`, tag `v*` → CI job `release`).
-- `make package-linux|windows|macos`, icons from `packaging/logo-source.png` (`go run ./scripts/logogen`,
-  then `make icons`).
+- `make package-linux|windows|macos`, icons from `packaging/logo-source.png` (imported from an artwork
+  with `go run ./scripts/logogen -src art.png`, then `make icons`: package icons, UI logo, website logo/favicon).
