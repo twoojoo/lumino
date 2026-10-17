@@ -294,8 +294,9 @@ type TableTab struct {
 	structGrids [6]*DataGrid
 	structTab   int
 
-	viewBtns                                                                                  [4]widget.Clickable
+	viewBtns                                                                                  [5]widget.Clickable
 	tools                                                                                     tableTools // document databases
+	statsV                                                                                    statsView
 	refreshBtn, addBtn, delBtn, saveBtn, revertBtn, countBtn, exportBtn, valueBtn, clearWhere widget.Clickable
 	consoleBtn, copyDDLBtn, refreshDDL                                                        widget.Clickable
 	structBtns                                                                                [6]widget.Clickable
@@ -899,7 +900,7 @@ func (t *TableTab) Layout(gtx C) D {
 	a, th := t.a, t.a.th
 	views, labels := []string{"data", "structure", "ddl"}, []string{"Data", "Structure", "DDL"}
 	if t.isDocCollection() {
-		views, labels = append(views, "schema"), append(labels, "Schema")
+		views, labels = append(views, "schema", "stats"), append(labels, "Schema", "Stats")
 	}
 	for i, v := range views {
 		if t.viewBtns[i].Clicked(gtx) {
@@ -931,7 +932,7 @@ func (t *TableTab) Layout(gtx C) D {
 							if !t.ref.Type.Relation() {
 								return D{}
 							}
-							sel := map[string]int{"data": 0, "structure": 1, "ddl": 2, "schema": 3}[t.view]
+							sel := map[string]int{"data": 0, "structure": 1, "ddl": 2, "schema": 3, "stats": 4}[t.view]
 							return segmented(gtx, th, t.viewBtns[:len(views)], labels, sel)
 						}),
 						layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }),
@@ -947,6 +948,8 @@ func (t *TableTab) Layout(gtx C) D {
 				return t.layoutStructure(gtx)
 			case "schema":
 				return t.layoutSchema(gtx)
+			case "stats":
+				return t.layoutStats(gtx)
 			case "ddl":
 				return t.layoutDDL(gtx)
 			}

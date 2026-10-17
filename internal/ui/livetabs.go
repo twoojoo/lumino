@@ -393,8 +393,10 @@ func (t *MonitorTab) Layout(gtx C) D {
 }
 
 // layoutTiles draws the statistics in rows of tiles.
-func (t *MonitorTab) layoutTiles(gtx C, th *material.Theme) D {
-	tiles := t.tiles()
+func (t *MonitorTab) layoutTiles(gtx C, th *material.Theme) D { return drawTiles(gtx, th, t.tiles()) }
+
+// drawTiles draws label / value tiles in rows.
+func drawTiles(gtx C, th *material.Theme, tiles [][2]string) D {
 	if len(tiles) == 0 {
 		return lbl(gtx, th, fontSans, 12.5, pal.TextDim, "Loading…")
 	}

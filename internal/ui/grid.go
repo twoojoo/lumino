@@ -118,9 +118,13 @@ func newDataGrid(a *App) *DataGrid {
 // SetModel replaces the data; columns widths are kept when the columns
 // didn't change.
 func (g *DataGrid) SetModel(m gridModel) {
+	wasEmpty := g.model == nil || g.model.Rows() == 0
 	g.model = m
 	g.editing = false
 	key := colsKeyOf(m)
+	if key == g.colsKey && wasEmpty {
+		g.colW = nil // sized on the headers only: size again on the data
+	}
 	if key != g.colsKey {
 		g.colsKey = key
 		g.colW = nil
@@ -214,8 +218,8 @@ func (g *DataGrid) autosize(gtx C) {
 	g.colW = make([]int, len(cols))
 	n := min(g.rows(), 300)
 	for c, col := range cols {
-		longest := col.Name
-		lw := utf8.RuneCountInString(col.Name) + 3
+		// the header (with room for the sort arrow) and the longest cell
+		longest, lw := "", 0
 		for r := 0; r < n; r++ {
 			s := db.CellText(g.model.Value(r, c), col.Kind)
 			if l := utf8.RuneCountInString(s); l > lw {
@@ -225,7 +229,7 @@ func (g *DataGrid) autosize(gtx C) {
 		if lw > 60 {
 			longest = string([]rune(longest)[:60])
 		}
-		w := measureText(gtx, th, fontSans, 12.5, longest) + gtx.Dp(26)
+		w := max(measureText(gtx, th, fontSans, 12.5, col.Name)+gtx.Dp(40), measureText(gtx, th, fontSans, 12.5, longest)+gtx.Dp(26))
 		g.colW[c] = max(gtx.Dp(60), min(w, gtx.Dp(420)))
 	}
 }
