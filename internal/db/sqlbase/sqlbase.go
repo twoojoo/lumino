@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // Hooks customize the generic implementation.

@@ -7,17 +7,17 @@ package conformance
 import (
 	"testing"
 
-	_ "github.com/giovanni/lumino/internal/db/adapters/cassandra"
-	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
-	_ "github.com/giovanni/lumino/internal/db/adapters/cockroach"
-	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
-	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
-	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
-	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
-	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
-	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
-	_ "github.com/giovanni/lumino/internal/db/adapters/trino"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/cassandra"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/clickhouse"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/cockroach"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/firebird"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mssql"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mysql"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/oracle"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/postgres"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/trino"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func run(t *testing.T, name string) { dbtest.Run(t, dbtest.Targets()[name]) }

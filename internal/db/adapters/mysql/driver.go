@@ -19,9 +19,9 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // Flavor distinguishes the MySQL-compatible servers.

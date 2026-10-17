@@ -12,9 +12,9 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 // cellEdit is an edited value (Value nil = NULL).

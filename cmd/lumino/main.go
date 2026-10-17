@@ -10,23 +10,23 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/giovanni/lumino/internal/desktop"
-	"github.com/giovanni/lumino/internal/safety"
-	"github.com/giovanni/lumino/internal/secrets"
-	"github.com/giovanni/lumino/internal/ui"
-	"github.com/giovanni/lumino/internal/update"
+	"github.com/twoojoo/lumino/internal/desktop"
+	"github.com/twoojoo/lumino/internal/safety"
+	"github.com/twoojoo/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/ui"
+	"github.com/twoojoo/lumino/internal/update"
 
 	// database adapters
-	_ "github.com/giovanni/lumino/internal/db/adapters/cassandra"
-	_ "github.com/giovanni/lumino/internal/db/adapters/clickhouse"
-	_ "github.com/giovanni/lumino/internal/db/adapters/cockroach"
-	_ "github.com/giovanni/lumino/internal/db/adapters/firebird"
-	_ "github.com/giovanni/lumino/internal/db/adapters/mssql"
-	_ "github.com/giovanni/lumino/internal/db/adapters/mysql"
-	_ "github.com/giovanni/lumino/internal/db/adapters/oracle"
-	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
-	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
-	_ "github.com/giovanni/lumino/internal/db/adapters/trino"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/cassandra"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/clickhouse"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/cockroach"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/firebird"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mssql"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mysql"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/oracle"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/postgres"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/trino"
 )
 
 // version is set at build time (-ldflags "-X main.version=…").

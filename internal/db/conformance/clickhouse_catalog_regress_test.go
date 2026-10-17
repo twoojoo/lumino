@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // Primary keys with expressions, commas and quoted names give real columns.

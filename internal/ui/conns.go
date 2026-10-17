@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sshtunnel"
-	"github.com/giovanni/lumino/internal/knownhosts"
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/safety"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sshtunnel"
+	"github.com/twoojoo/lumino/internal/knownhosts"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/safety"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 type connStatus int

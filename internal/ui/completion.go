@@ -15,7 +15,7 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/widget"
 
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // compItem is a completion candidate.

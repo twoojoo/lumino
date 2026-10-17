@@ -26,8 +26,8 @@ import (
 )
 
 // DefaultURL is the "latest release" endpoint of the public repository that
-// hosts the packages (drafts and prereleases excluded); the source
-// repository is private. LUMINO_UPDATE_URL overrides it.
+// hosts the packages (drafts and prereleases excluded). LUMINO_UPDATE_URL
+// overrides it.
 const DefaultURL = "https://api.github.com/repos/twoojoo/lumino-releases/releases/latest"
 
 // PublicKey verifies SHA256SUMS.txt.sig (base64 ed25519 public key; its

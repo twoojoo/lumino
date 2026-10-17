@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // Rec is one metadata row: column name (lower case) → value as text.

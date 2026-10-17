@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // StmtKind classifies a statement for safety policies.

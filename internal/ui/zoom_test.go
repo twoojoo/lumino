@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 func TestUIScaleClamp(t *testing.T) {

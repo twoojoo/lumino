@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func TestJSONLexLine(t *testing.T) {

@@ -20,9 +20,9 @@ import (
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func init() { db.Register(Driver{}) }

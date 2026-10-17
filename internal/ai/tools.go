@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 const maxToolOutput = 14000

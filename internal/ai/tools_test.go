@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
-	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func sqliteConn(t *testing.T) db.Conn {

@@ -11,8 +11,8 @@ import (
 	"gioui.org/f32"
 	"gioui.org/io/pointer"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 // TestUIValuePanelJSON: JSON columns open in highlighted JSON mode, edits

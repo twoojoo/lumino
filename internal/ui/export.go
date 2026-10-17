@@ -20,8 +20,8 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // exportFormats lists the file formats (id, label, extension).

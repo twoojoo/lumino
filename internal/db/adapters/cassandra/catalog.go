@@ -8,7 +8,7 @@ import (
 
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 type catalog struct {

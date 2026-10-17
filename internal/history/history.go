@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 // Entry is one executed statement.

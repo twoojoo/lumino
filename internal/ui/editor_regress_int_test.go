@@ -7,7 +7,7 @@ import (
 
 	"gioui.org/io/key"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // TestEditorRegressWidgets covers editor bugs that need the real event

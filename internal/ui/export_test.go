@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 func TestExportWriters(t *testing.T) {

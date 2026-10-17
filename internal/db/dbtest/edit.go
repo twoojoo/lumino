@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // defaultSamples are written to all_types columns by name.

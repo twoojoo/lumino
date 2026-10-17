@@ -9,7 +9,7 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // TestUIRegressions covers bugs found in review: tab clicks swallowed by

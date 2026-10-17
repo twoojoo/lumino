@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func msrOpen(t *testing.T, host string) (db.Conn, db.Session) {

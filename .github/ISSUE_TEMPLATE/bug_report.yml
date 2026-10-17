@@ -1,0 +1,41 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If it involves a query or a table, include a minimal SQL script.
+  - type: input
+    id: version
+    attributes:
+      label: Lumino version
+      description: Output of `lumino --version`, or Preferences → Updates.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04 (Wayland), Windows 11, macOS 15
+    validations:
+      required: true
+  - type: input
+    id: database
+    attributes:
+      label: Database and version
+      placeholder: e.g. PostgreSQL 17, MySQL 8.4
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `--log-level debug`. Remove passwords and hostnames you don't want to share.
+      render: text

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // devDir is the repository's .dev directory.

@@ -13,7 +13,7 @@ description: |
   SQL console with completion, streaming grids, table editing, DDL, SSH
   tunnels, TLS and an AI assistant.
 homepage: https://github.com/twoojoo/lumino
-license: Proprietary
+license: GPL-3.0-or-later
 depends:
   - libc6 (>= 2.34)
   - libwayland-client0

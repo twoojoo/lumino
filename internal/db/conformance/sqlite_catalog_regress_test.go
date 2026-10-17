@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func scrConn(t *testing.T, stmts ...string) db.Conn {

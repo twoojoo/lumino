@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/adapters/clickhouse"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/adapters/clickhouse"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func chRegressConn(t *testing.T) (db.Conn, db.Session) {

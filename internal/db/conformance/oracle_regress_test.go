@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 // bug 10: rows keyed on DATE/TIMESTAMP columns with a non-UTC client.

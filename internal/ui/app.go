@@ -23,8 +23,8 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"github.com/giovanni/lumino/internal/notify"
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/notify"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 // Options configure the UI.

@@ -3,8 +3,8 @@ package mysql
 import (
 	"strings"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 var reserved = db.WordSet(`

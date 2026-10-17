@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 // Kind of provider implementation.
