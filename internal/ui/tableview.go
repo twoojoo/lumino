@@ -288,7 +288,8 @@ type TableTab struct {
 	structGrids [6]*DataGrid
 	structTab   int
 
-	viewBtns                                                                                  [3]widget.Clickable
+	viewBtns                                                                                  [4]widget.Clickable
+	tools                                                                                     tableTools // document databases
 	refreshBtn, addBtn, delBtn, saveBtn, revertBtn, countBtn, exportBtn, valueBtn, clearWhere widget.Clickable
 	consoleBtn, copyDDLBtn, refreshDDL                                                        widget.Clickable
 	structBtns                                                                                [6]widget.Clickable
@@ -889,7 +890,11 @@ func (t *TableTab) loadDDL() {
 
 func (t *TableTab) Layout(gtx C) D {
 	a, th := t.a, t.a.th
-	for i, v := range []string{"data", "structure", "ddl"} {
+	views, labels := []string{"data", "structure", "ddl"}, []string{"Data", "Structure", "DDL"}
+	if t.isDocCollection() {
+		views, labels = append(views, "schema"), append(labels, "Schema")
+	}
+	for i, v := range views {
 		if t.viewBtns[i].Clicked(gtx) {
 			t.show(v)
 		}
@@ -919,8 +924,8 @@ func (t *TableTab) Layout(gtx C) D {
 							if !t.ref.Type.Relation() {
 								return D{}
 							}
-							sel := map[string]int{"data": 0, "structure": 1, "ddl": 2}[t.view]
-							return segmented(gtx, th, t.viewBtns[:], []string{"Data", "Structure", "DDL"}, sel)
+							sel := map[string]int{"data": 0, "structure": 1, "ddl": 2, "schema": 3}[t.view]
+							return segmented(gtx, th, t.viewBtns[:len(views)], labels, sel)
 						}),
 						layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }),
 						layout.Rigid(func(gtx C) D { return a.connBadges(gtx, t.connID) }),
@@ -933,6 +938,8 @@ func (t *TableTab) Layout(gtx C) D {
 			switch t.view {
 			case "structure":
 				return t.layoutStructure(gtx)
+			case "schema":
+				return t.layoutSchema(gtx)
 			case "ddl":
 				return t.layoutDDL(gtx)
 			}
@@ -1087,6 +1094,7 @@ func (t *TableTab) layoutData(gtx C) D {
 						}
 						return segmented(gtx, th, t.modeBtns[:], viewNames[:], t.mode)
 					}),
+					layout.Rigid(func(gtx C) D { return layout.Inset{Left: 8}.Layout(gtx, t.dataTools) }),
 					layout.Rigid(func(gtx C) D {
 						if t.readOnlyReason() != "" {
 							return D{}
@@ -1273,8 +1281,12 @@ func (t *TableTab) layoutStructure(gtx C) D {
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D {
-			return layout.Inset{Left: 8, Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
-				return segmented(gtx, th, t.structBtns[:], labels, t.structTab)
+			return layout.Inset{Left: 8, Right: 8, Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return segmented(gtx, th, t.structBtns[:], labels, t.structTab) }),
+					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }),
+					layout.Rigid(t.structureTools),
+				)
 			})
 		}),
 		layout.Rigid(func(gtx C) D { return hline(gtx, pal.Border) }),

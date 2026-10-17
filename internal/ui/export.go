@@ -42,6 +42,11 @@ func exportFormatsFor(l db.Language) [][3]string {
 			out[i][1], out[i][2] = l.InsertFormat()
 		}
 	}
+	if _, ok := l.(db.DocumentLanguage); ok {
+		// whole documents, every type kept (mongoimport / mongorestore)
+		out = append(out, [3]string{"docs-json", "Extended JSON", ".json"}, [3]string{"docs-jsonl", "JSON lines", ".jsonl"},
+			[3]string{"docs-bson", "BSON", ".bson"})
+	}
 	return out
 }
 
@@ -65,6 +70,9 @@ func newRowWriter(w io.Writer, format string, cols []db.Column, lang db.Language
 	}
 	rw := &rowWriter{w: bufio.NewWriterSize(w, 256*1024), format: format, cols: cols, lang: lang, ref: ref}
 	switch format {
+	case "docs-json":
+		rw.w.WriteString("[\n")
+	case "docs-jsonl", "docs-bson":
 	case "csv", "tsv", "tsv-noheader":
 		rw.csv = csv.NewWriter(rw.w)
 		if format != "csv" {
@@ -217,10 +225,36 @@ func (rw *rowWriter) close() error {
 			return err
 		}
 	}
-	if rw.format == "json" {
+	if rw.format == "json" || rw.format == "docs-json" {
 		rw.w.WriteString("\n]\n")
 	}
 	return rw.w.Flush()
+}
+
+// writeDoc writes a whole document (docs-* formats).
+func (rw *rowWriter) writeDoc(d db.DocNode, enc func(db.DocNode, string) ([]byte, error)) error {
+	var b []byte
+	var err error
+	switch rw.format {
+	case "docs-json":
+		if rw.n > 0 {
+			rw.w.WriteString(",\n")
+		}
+		b, err = enc(d, "ejson-canonical")
+	case "docs-jsonl":
+		b, err = enc(d, "ejson")
+		b = append(b, '\n')
+	case "docs-bson":
+		b, err = enc(d, "bson")
+	default:
+		return fmt.Errorf("format %s doesn't write documents", rw.format)
+	}
+	if err != nil {
+		return fmt.Errorf("document %d: %w", rw.n+1, err)
+	}
+	rw.w.Write(b)
+	rw.n++
+	return nil
 }
 
 // writeRows writes a block of rows (clipboard copies).
@@ -344,6 +378,28 @@ func (d *ExportDialog) start() {
 	for i := range rows {
 		rows[i] = d.rs.rows[d.rs.row(i)]
 	}
+	// whole documents (document databases)
+	isDocs := strings.HasPrefix(format, "docs-")
+	var docs []db.DocNode
+	var enc func(db.DocNode, string) ([]byte, error)
+	if isDocs {
+		tools := a.connState(d.connID).docTools()
+		if tools == nil || !d.rs.hasDocs() {
+			d.running, d.result = false, "This result has no documents to export"
+			cancel()
+			return
+		}
+		if toClip && format == "docs-bson" {
+			d.running, d.result = false, "BSON is binary: export it to a file"
+			cancel()
+			return
+		}
+		enc = tools.ExportDocument
+		for i := range rows {
+			doc, _ := d.rs.doc(i)
+			docs = append(docs, doc)
+		}
+	}
 	all, query, schema := d.all, d.query, d.schema
 	cs := a.connState(d.connID)
 	conn := cs.conn
@@ -375,8 +431,14 @@ func (d *ExportDialog) start() {
 				if err != nil {
 					return err
 				}
-				for _, r := range rows {
-					if err := rw.write(r); err != nil {
+				for i, r := range rows {
+					var err error
+					if isDocs {
+						err = rw.writeDoc(docs[i], enc)
+					} else {
+						err = rw.write(r)
+					}
+					if err != nil {
 						return err
 					}
 					d.written.Add(1)
@@ -416,8 +478,20 @@ func (d *ExportDialog) start() {
 				if err != nil {
 					return err
 				}
-				for _, r := range batch {
-					if err := rw.write(r); err != nil {
+				var bdocs []db.DocNode
+				if isDocs {
+					if bdocs = docsOf(res, len(batch)); bdocs == nil {
+						return fmt.Errorf("the result has no documents")
+					}
+				}
+				for i, r := range batch {
+					var err error
+					if isDocs {
+						err = rw.writeDoc(bdocs[i], enc)
+					} else {
+						err = rw.write(r)
+					}
+					if err != nil {
 						return err
 					}
 				}

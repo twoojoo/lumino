@@ -1296,6 +1296,9 @@ func (t *ConsoleTab) editorMenu(at image.Point) {
 		{icon: icAI, label: "Explain with the assistant", action: func() { a.askAboutSQL(t.connID, t.pickedSQL(), nil) }},
 		{icon: icBookmark, label: "Save query…", action: func() { a.saveQueryDialog(t.connID, t.pickedSQL()) }},
 	}
+	if _, ok := t.cs().docLanguage(); ok {
+		items = append(items, &menuItem{icon: icCommand, label: "Translate SQL to MongoDB…", action: func() { a.openTranslate(t.connID, ed.Selected()) }})
+	}
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}
 }
 

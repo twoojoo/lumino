@@ -1,8 +1,10 @@
 package dbtest
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -716,6 +718,206 @@ print("inserted", db.shell_t.countDocuments({}))`)
 		run(`let cleanup = db.shell_t.drop(); cleanup`)
 	})
 
+	t.Run("Tools", func(t *testing.T) {
+		tools, ok := conn.(db.DocumentTools)
+		if !ok {
+			t.Fatal("no document tools")
+		}
+		dl := lang.(db.DocumentLanguage)
+		s := session(t, conn)
+		ferret := tg.Name == "ferretdb"
+		// schema analysis
+		rep, err := tools.AnalyzeSchema(ctx, ref("customers"), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := map[string]db.SchemaField{}
+		for _, f := range rep.Fields {
+			fields[f.Path] = f
+		}
+		if rep.Sampled != 3 || fields["email"].Presence != 1 || fields["address.city"].Path == "" || fields["tags[]"].Path == "" ||
+			fields["age"].Min != "36" || fields["age"].Max != "54" || fields["name"].Distinct != 3 {
+			t.Errorf("schema report %+v", rep)
+		}
+		// explain, index suggestion, then the index is used
+		if !ferret {
+			q := db.BrowseQuery{Filter: `{label: "row 7"}`}
+			ex, err := tools.ExplainFind(ctx, ref("big"), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ex.Returned != 1 || ex.DocsExamined != int64(tg.BigRows) || len(ex.Suggestions) != 1 || ex.Suggestions[0].Keys != "{label: 1}" {
+				t.Fatalf("explain %+v", ex)
+			}
+			exec(t, s, ex.Suggestions[0].Statement)
+			ex, err = tools.ExplainFind(ctx, ref("big"), q)
+			if err != nil || ex.DocsExamined != 1 || len(ex.Suggestions) != 0 || !strings.Contains(fmt.Sprint(ex.Plan), "IXSCAN") {
+				t.Fatalf("explain with the index %+v %v", ex, err)
+			}
+			drop, _ := dl.AdminStatement("dropIndex", ref("big"), "label_1")
+			exec(t, s, drop)
+		}
+		// server status and operations
+		if !ferret {
+			st, err := tools.ServerStats(ctx)
+			if err != nil || st.Version == "" || st.Counters["ops.query"] <= 0 || len(st.Gauges) < 3 || !strings.HasPrefix(st.Role, "primary") {
+				t.Fatalf("server stats %+v %v", st, err)
+			}
+			if tg.Sleep != "" {
+				slow := session(t, conn)
+				done := make(chan error, 1)
+				go func() { _, _, err := Query(ctx, slow, tg.Sleep); done <- err }()
+				var id string
+				for i := 0; i < 50 && id == ""; i++ {
+					time.Sleep(100 * time.Millisecond)
+					ops, err := tools.Operations(ctx, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, op := range ops {
+						if op.NS == tg.Schema+".big" && strings.Contains(op.Command, "$where") {
+							id = op.ID
+						}
+					}
+				}
+				if id == "" {
+					t.Fatal("running operation not listed")
+				}
+				kill, err := dl.AdminStatement("killOp", db.ObjectRef{}, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec(t, s, kill)
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatal("killed operation succeeded")
+					}
+				case <-time.After(20 * time.Second):
+					t.Fatal("killOp didn't stop the operation")
+				}
+			}
+		}
+		// validation rules
+		if !ferret {
+			v, _ := dl.AdminStatement("setValidator", ref("customers"), `{$jsonSchema: {required: ["email"]}}`, "strict", "error")
+			exec(t, s, v)
+			if _, err := s.Execute(ctx, `db.customers.insertOne({_id: 9500, name: "no email"})`); err == nil {
+				t.Fatal("validator not applied")
+			}
+			info, _ := cat.Table(ctx, ref("customers"))
+			if len(info.Constraints) != 1 || !strings.Contains(info.Constraints[0].Definition, "required") {
+				t.Fatalf("validator not described: %+v", info.Constraints)
+			}
+			v, _ = dl.AdminStatement("setValidator", ref("customers"), "{}", "off", "error")
+			exec(t, s, v)
+		}
+		// users
+		if !ferret {
+			u := db.ObjectRef{Schema: tg.Schema}
+			for _, st := range []string{mustAdmin(t, dl, "createUser", u, "lumino_ui_test", "pw-123", `["read"]`),
+				mustAdmin(t, dl, "grantRoles", u, "lumino_ui_test", `["readWrite"]`)} {
+				exec(t, s, st)
+			}
+			_, rows, err := Query(ctx, s, mustAdmin(t, dl, "listUsers", u))
+			if err != nil || len(rows) != 1 || !strings.Contains(db.FormatValue(rows[0][0], db.KindJSON), "lumino_ui_test") {
+				t.Fatalf("users: %v %v", rows, err)
+			}
+			exec(t, s, mustAdmin(t, dl, "dropUser", u, "lumino_ui_test"))
+		}
+		// change streams (replica sets)
+		if caps.Transactions {
+			wctx, stop := context.WithCancel(ctx)
+			events := make(chan db.ChangeEvent, 10)
+			werr := make(chan error, 1)
+			go func() {
+				werr <- tools.Watch(wctx, ref("watch_t"), `[{$match: {operationType: {$in: ["insert", "update", "delete"]}}}]`, func(e db.ChangeEvent) { events <- e })
+			}()
+			time.Sleep(500 * time.Millisecond)
+			exec(t, s, `db.watch_t.insertOne({_id: 1, a: 1})`)
+			exec(t, s, `db.watch_t.updateOne({_id: 1}, {$set: {b: 2}, $unset: {a: ""}})`)
+			exec(t, s, `db.watch_t.deleteOne({_id: 1})`)
+			var got []string
+			for len(got) < 3 {
+				select {
+				case e := <-events:
+					got = append(got, e.Op+" "+e.Key+" "+e.Fields)
+				case <-time.After(10 * time.Second):
+					t.Fatalf("events: %v", got)
+				}
+			}
+			stop()
+			if err := <-werr; err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "|") != "insert 1 |update 1 b, -a|delete 1 " {
+				t.Fatalf("events %q", got)
+			}
+		}
+		// export → import round trip (BSON, Extended JSON, CSV)
+		q, _ := lang.Browse(ref("all_types"), db.BrowseQuery{})
+		res, err := s.Execute(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, _ = res.Fetch(ctx, 10)
+		docs := res.(db.DocumentResult).Documents()
+		res.Close()
+		if j, err := tools.ExportDocument(docs[0], "ejson"); err != nil || !strings.Contains(string(j), `"c_oid":{"$oid":"`) {
+			t.Fatalf("relaxed json: %s %v", j, err)
+		}
+		var bsonBuf, jsonBuf bytes.Buffer
+		for _, d := range docs {
+			b, err := tools.ExportDocument(d, "bson")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bsonBuf.Write(b)
+			j, err := tools.ExportDocument(d, "ejson-canonical")
+			if err != nil {
+				t.Fatal(err)
+			}
+			jsonBuf.Write(append(j, '\n'))
+		}
+		for _, c := range []struct {
+			format string
+			data   []byte
+		}{{"bson", bsonBuf.Bytes()}, {"json", jsonBuf.Bytes()}, {"csv", []byte("_id,c_int,c_obj.n\n1,7,5\n")}} {
+			var seen int64
+			n, err := tools.Import(ctx, ref("import_t"), bytes.NewReader(c.data), db.ImportOptions{Format: c.format, Drop: true, CSVTypes: true}, func(k int64) { seen = k })
+			if err != nil || n != 1 || seen != 1 {
+				t.Fatalf("import %s: %d %v", c.format, n, err)
+			}
+			if c.format == "csv" {
+				if v := count(t, s, "import_t", `{c_int: 7, "c_obj.n": 5}`); v != "1" {
+					t.Fatalf("csv import: %s", v)
+				}
+				continue
+			}
+			// every type survives the round trip
+			q2, _ := lang.Browse(ref("import_t"), db.BrowseQuery{})
+			r2, err := s.Execute(ctx, q2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _ = r2.Fetch(ctx, 10)
+			back := r2.(db.DocumentResult).Documents()
+			r2.Close()
+			if len(back) != 1 || dl.FormatDocument(back[0]) != dl.FormatDocument(docs[0]) {
+				t.Fatalf("%s round trip:\n%v\n%s", c.format, back, dl.FormatDocument(docs[0]))
+			}
+		}
+		exec(t, s, `db.import_t.drop()`)
+		// SQL translation runs
+		tr, err := dl.TranslateSQL("SELECT name, COUNT(*) AS n FROM customers GROUP BY name ORDER BY name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, rows, err := Query(ctx, s, tr); err != nil || len(rows) != 3 {
+			t.Fatalf("%s: %v %v", tr, rows, err)
+		}
+	})
+
 	t.Run("Script", func(t *testing.T) {
 		sc := "// leading comment\ndb.customers.countDocuments({});\n/* block; comment */\ndb.customers.find({name: 'a;b'})\n  .limit(1)\nshow collections"
 		stmts := lang.Split(sc)
@@ -780,4 +982,13 @@ func mustSort(t *testing.T, dl db.DocumentLanguage, s string) []db.SortKey {
 		t.Fatal(err)
 	}
 	return k
+}
+
+func mustAdmin(t *testing.T, dl db.DocumentLanguage, op string, ref db.ObjectRef, args ...string) string {
+	t.Helper()
+	s, err := dl.AdminStatement(op, ref, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }

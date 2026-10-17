@@ -787,6 +787,10 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		if cs.status == stReady {
 			add(icConsole, "New console", shortcutLabel("T"), false, func() { a.newConsole(r.connID, cs.defaultSchema(""), "") })
 			add(icPlug, "Disconnect", "", false, func() { a.requestDisconnect(r.connID, nil) })
+			if cs.docTools() != nil {
+				add(icCluster, "Server activity", "", false, func() { a.openMonitor(r.connID) })
+				add(icCommand, "Translate SQL to MongoDB…", "", false, func() { a.openTranslate(r.connID, "") })
+			}
 		} else {
 			add(icPlug, "Connect", "", false, func() {
 				cs.status = stIdle
@@ -803,6 +807,11 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		add(icDelete, "Delete connection", "", true, func() { a.deleteConn(r.connID) })
 	case nCatalog, nSchema:
 		add(icConsole, "New console here", "", false, func() { a.newConsole(r.connID, r.ref.Schema, "") })
+		if cs.docTools() != nil && r.kind == nSchema {
+			dbRef := db.ObjectRef{Schema: r.ref.Schema}
+			add(icPerson, "Users and roles…", "", false, func() { a.openUsers(r.connID, dbRef.Schema) })
+			add(icEye, "Watch changes", "", false, func() { a.openWatch(r.connID, dbRef) })
+		}
 		add(icRefresh, "Refresh", "F5", false, func() { s.refresh(r) })
 		add(icCopyText, "Copy name", "", false, func() { a.copyLater(r.label) })
 	case nFolder:
@@ -826,6 +835,17 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		add(icCopyText, "Copy name", "", false, func() { a.copyLater(ref.Name) })
 		if connected {
 			add(icCopyText, "Copy qualified name", "", false, func() { a.copyLater(lang.DisplayName(ref)) })
+		}
+		if cs.docTools() != nil && (ref.Type == db.ObjCollection || ref.Type == db.ObjView) {
+			sep()
+			add(icTree, "Aggregation pipeline…", "", false, func() { a.openPipeline(r.connID, ref, "") })
+			if ref.Type == db.ObjCollection {
+				add(icColumn, "Analyze schema", "", false, func() { a.openObject(r.connID, ref, "schema") })
+				add(icEye, "Watch changes", "", false, func() { a.openWatch(r.connID, ref) })
+				if !a.connReadOnly(r.connID) {
+					add(icDownload, "Import…", "", false, func() { a.openImport(r.connID, ref, nil) })
+				}
+			}
 		}
 		add(icAI, "Ask the assistant", "", false, func() { a.askAboutObject(r.connID, ref) })
 		sep()
