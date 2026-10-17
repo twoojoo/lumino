@@ -53,7 +53,7 @@ type PipelineTab struct {
 	modeB [3]widget.Clickable
 	list  widget.List
 
-	addBtn, consoleBtn, refreshBtn widget.Clickable
+	addBtn, consoleBtn, codeBtn, refreshBtn widget.Clickable
 }
 
 // openPipeline opens the builder on a collection (filter: an initial
@@ -240,6 +240,13 @@ func (t *PipelineTab) Layout(gtx C) D {
 			a.newConsole(t.connID, t.ref.Schema, q+"\n")
 		}
 	}
+	if t.codeBtn.Clicked(gtx) {
+		if q, _, err := t.statement(-1, false); err != nil {
+			a.flash(err.Error(), true)
+		} else {
+			a.openCodeExport(t.connID, q, t.ref.Schema)
+		}
+	}
 	if t.refreshBtn.Clicked(gtx) {
 		t.preview()
 	}
@@ -299,6 +306,9 @@ func (t *PipelineTab) Layout(gtx C) D {
 						layout.Rigid(func(gtx C) D { return pillButton(gtx, th, &t.refreshBtn, icRefresh, "Preview", pal.Text, colorNRGBA{}) }),
 						layout.Rigid(func(gtx C) D {
 							return pillButton(gtx, th, &t.consoleBtn, icConsole, "Open in console", pal.Text, colorNRGBA{})
+						}),
+						layout.Rigid(func(gtx C) D {
+							return pillButton(gtx, th, &t.codeBtn, icCode, "Export to code…", pal.Text, colorNRGBA{})
 						}),
 						layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }),
 						layout.Rigid(func(gtx C) D { return a.connBadges(gtx, t.connID) }),

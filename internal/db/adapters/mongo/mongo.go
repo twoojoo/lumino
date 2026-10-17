@@ -203,6 +203,7 @@ type conn struct {
 	caps     db.Capabilities
 	version  string
 	ferret   bool
+	topology string
 	lang     *language
 	cat      *catalog
 }
@@ -234,6 +235,14 @@ func (c *conn) probe(ctx context.Context) error {
 	c.caps = baseCaps
 	set, _ := field(hello, "setName")
 	msg, _ := field(hello, "msg")
+	switch {
+	case msg == "isdbgrid":
+		c.topology = "sharded"
+	case set != nil:
+		c.topology = "replicaset"
+	default:
+		c.topology = "standalone"
+	}
 	if (set != nil || msg == "isdbgrid") && !c.ferret {
 		c.caps.Transactions = true // replica sets and sharded clusters
 	}

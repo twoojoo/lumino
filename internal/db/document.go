@@ -88,6 +88,13 @@ type DocumentLanguage interface {
 	// TranslateSQL translates a SQL statement (SELECT with WHERE, GROUP
 	// BY, ORDER BY, LIMIT; INSERT; UPDATE; DELETE) to the language.
 	TranslateSQL(sql string) (string, error)
+	// GenerateCode writes a statement (find, findOne, aggregate,
+	// countDocuments, distinct, insert, update, replace, delete) as driver
+	// code: target go, python, node, java or csharp; dbName is the
+	// database of unqualified collections. A program has the imports and
+	// connects to the URI of the MONGODB_URI environment variable; a
+	// snippet expects a connected client (and ctx in Go).
+	GenerateCode(stmt, dbName, target string, program bool) (string, error)
 	// AdminStatement builds a management statement: createIndex (keys,
 	// options), dropIndex (name), setValidator (validator, level, action),
 	// listUsers, createUser (user, password, roles), dropUser (user),
@@ -227,6 +234,66 @@ type DocumentTools interface {
 	// the ones scanning or sorting.
 	Profiler(ctx context.Context, dbName string) (*ProfilerStatus, error)
 	SlowQueries(ctx context.Context, dbName string, limit int) ([]SlowQuery, error)
+	// Topology is "standalone", "replicaset" or "sharded" (connected to a
+	// router).
+	Topology() string
+	ReplicaSet(ctx context.Context) (*ReplicaSetStatus, error)
+	Sharding(ctx context.Context) (*ShardingStatus, error)
+}
+
+// ReplicaSetStatus is the state of a replica set.
+type ReplicaSetStatus struct {
+	Name    string
+	Members []ReplicaMember
+	// Oplog window: the time span the oplog of the primary keeps (a
+	// member behind more than that must resync).
+	OplogFirst, OplogLast time.Time
+	OplogSize, OplogMax   int64
+}
+
+// ReplicaMember is a member of a replica set.
+type ReplicaMember struct {
+	Name       string
+	State      string // PRIMARY, SECONDARY, ARBITER…
+	Healthy    bool
+	Self       bool
+	Uptime     int64 // seconds
+	Optime     time.Time
+	Lag        time.Duration // behind the primary
+	PingMs     int64
+	SyncSource string
+	Message    string
+}
+
+// ShardingStatus is the state of a sharded cluster.
+type ShardingStatus struct {
+	Shards      []Shard
+	Balancer    string // running / enabled / disabled…
+	Routers     []string
+	Databases   []ShardedDatabase
+	Collections []ShardedCollection
+}
+
+// Shard is a shard of a cluster.
+type Shard struct {
+	ID, Host string
+	State    int
+	Draining bool
+}
+
+// ShardedDatabase is a database of a cluster with its primary shard.
+type ShardedDatabase struct {
+	Name, Primary string
+}
+
+// ShardedCollection is a sharded collection with its chunks per shard.
+type ShardedCollection struct {
+	NS      string
+	Key     string
+	Unique  bool
+	Chunks  map[string]int // shard → chunks
+	Jumbo   int
+	Balance bool // the balancer moves its chunks
 }
 
 // CollectionStats are the sizes of a collection (bytes).

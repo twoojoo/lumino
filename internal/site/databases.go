@@ -286,6 +286,8 @@ SELECT n FROM customer_count;`,
 			"Index advisor: collection sizes, index usage since the server started, unused indexes and indexes made useless by another one, hidden or dropped after review; the profiler's slow queries with the index they need.",
 			"Change streams followed live, server activity (operations per second, connections, memory, running operations with kill), import and export in Extended JSON, JSON lines, CSV and BSON.",
 			"SQL to MongoDB translation: SELECT with WHERE, GROUP BY, HAVING, ORDER BY and LIMIT, INSERT, UPDATE and DELETE become find, aggregate and write statements.",
+			"Cluster status: replica set members with state, health, optime and replication lag, the oplog window and size; on mongos the shards, the balancer, sharded collections with their shard key and chunks per shard, and the primary shard of each database.",
+			"Export to code: a find, aggregate, count, distinct or write statement (or a pipeline from the builder) becomes Go, Python, Node.js, Java or C# code for the official driver, as a snippet or a complete program, with the BSON types kept.",
 			"Transactions on replica sets and sharded clusters, SCRAM, X.509 and AWS IAM authentication, TLS and SSH tunnels.",
 		},
 		Notes: []string{
