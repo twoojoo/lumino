@@ -1,8 +1,10 @@
 package site
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -201,6 +203,27 @@ func TestLLMSTxt(t *testing.T) {
 	}
 	if strings.Contains(full, "&#") || strings.Contains(full, "&lt;") {
 		t.Error("llms-full.txt is HTML-escaped")
+	}
+}
+
+// TestTemplatesUseLF: Windows checkouts convert to CRLF unless .gitattributes
+// forces LF, and the generated site must not depend on the build OS.
+func TestTemplatesUseLF(t *testing.T) {
+	err := fs.WalkDir(files, "templates", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := fs.ReadFile(files, p)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(b, []byte("\r")) {
+			t.Errorf("%s has CR line endings (check .gitattributes)", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
