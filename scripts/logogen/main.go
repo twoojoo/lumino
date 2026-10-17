@@ -1,9 +1,12 @@
 // Command logogen turns a logo artwork into packaging/logo-source.png
-// (1024×1024 RGBA): the rounded tile of -src is cut out of its flat black
+// (1024×1024 RGBA): the rounded tile of -src is cut out of its flat dark
 // surround (made transparent) and centered in the same 64 px safe-area
 // margin the icons always had. Run it, then `make icons`.
 //
-//	go run ./scripts/logogen -src path/to/artwork.png
+//	go run ./scripts/logogen -src path/to/artwork.png [-black 28]
+//
+// -black is the brightest channel of a surround pixel: raise it when the
+// surround is not pure black (it must stay below the tile's rim).
 package main
 
 import (
@@ -20,12 +23,12 @@ import (
 const (
 	S      = 1024 // output size
 	margin = 64   // transparent safe area around the tile
-	black  = 10   // max channel (0–255) of a surround pixel
 )
 
 // cutout returns the tile of art (whatever is not reachable from the image
-// border through near-black pixels) on a transparent S×S canvas.
-func cutout(art image.Image) *image.NRGBA {
+// border through dark pixels, max channel <= black) on a transparent S×S
+// canvas.
+func cutout(art image.Image, black uint8) *image.NRGBA {
 	b := art.Bounds()
 	w, h := b.Dx(), b.Dy()
 	src := image.NewNRGBA(image.Rect(0, 0, w, h))
@@ -91,6 +94,7 @@ func cutout(art image.Image) *image.NRGBA {
 func main() {
 	in := flag.String("src", "", "logo artwork (rounded tile on a black or transparent surround)")
 	out := flag.String("out", "packaging/logo-source.png", "output PNG")
+	black := flag.Uint("black", 10, "max channel (0–255) of a surround pixel")
 	flag.Parse()
 	if *in == "" {
 		log.Fatal("-src is required")
@@ -109,7 +113,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer o.Close()
-	if err := png.Encode(o, cutout(art)); err != nil {
+	if err := png.Encode(o, cutout(art, uint8(min(*black, 255)))); err != nil {
 		log.Fatal(err)
 	}
 }
