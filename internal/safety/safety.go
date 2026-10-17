@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/twoojoo/lumino/internal/db"
@@ -62,6 +63,10 @@ func CheckConnection(c *db.Config) error {
 		}
 		return nil
 	}
+	// DNS seed lists (mongodb+srv) name hosts that can't be checked here
+	if c.Param("srv") == "true" {
+		return fmt.Errorf("dev build: SRV connection strings refused (only 127.0.0.1 development databases)")
+	}
 	if c.SSH != nil && c.SSH.Host != "" {
 		if err := devHost(c.SSH.Host, c.SSH.Port); err != nil {
 			return fmt.Errorf("SSH: %w", err)
@@ -83,7 +88,16 @@ func CheckConnection(c *db.Config) error {
 		port = info.DefaultPort
 	}
 	for _, h := range strings.Split(c.Host, ",") {
-		if err := devHost(h, port); err != nil {
+		p := port
+		// a node with its own port (MongoDB replica sets)
+		if host, ps, err := net.SplitHostPort(strings.TrimSpace(h)); err == nil {
+			n, err := strconv.Atoi(ps)
+			if err != nil {
+				return fmt.Errorf("dev build: invalid port in %q", h)
+			}
+			h, p = host, n
+		}
+		if err := devHost(h, p); err != nil {
 			return err
 		}
 	}

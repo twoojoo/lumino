@@ -1366,11 +1366,20 @@ func (t *ConsoleTab) keywordItems(items []compItem) *compRequest {
 	for kw := range e.kw {
 		items = append(items, compItem{label: kw, kind: "keyword"})
 	}
-	for f := range e.funcs {
-		items = append(items, compItem{label: f, kind: "function", insert: f + "()"})
+	// functions and types as the language spells them (case-sensitive
+	// languages: ObjectId, not objectid)
+	seen := map[string]bool{}
+	for _, f := range e.lang.Functions() {
+		if !seen[f] {
+			seen[f] = true
+			items = append(items, compItem{label: f, kind: "function", insert: f + "()"})
+		}
 	}
-	for ty := range e.types {
-		items = append(items, compItem{label: ty, kind: "type"})
+	for _, ty := range e.lang.Types() {
+		if !seen[ty] {
+			seen[ty] = true
+			items = append(items, compItem{label: ty, kind: "type"})
+		}
 	}
 	return &compRequest{items: items}
 }

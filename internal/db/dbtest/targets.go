@@ -203,6 +203,23 @@ func Targets() map[string]Target {
 			FilterSuffix:     " ALLOW FILTERING",
 		}
 	}
+	// MongoDB and FerretDB run the document suite (RunDocuments)
+	t["mongo"] = Target{
+		Name:    "mongo",
+		Config:  db.Config{Driver: "mongodb", Host: "127.0.0.1", Port: 55017, Database: "lumino_test"},
+		Schema:  "lumino_test",
+		BigRows: 3000,
+		Sleep:   `db.big.find({$where: "sleep(100) || true"})`,
+		Loader:  mongoLoader(true),
+	}
+	t["ferretdb"] = Target{
+		Name:    "ferretdb",
+		Config:  db.Config{Driver: "mongodb", Host: "127.0.0.1", Port: 55018, Database: "lumino_test", User: "lumino", Password: "lumino"},
+		Schema:  "lumino_test",
+		BigRows: 3000,
+		NoViews: true,
+		Loader:  mongoLoader(false),
+	}
 	return t
 }
 
@@ -227,5 +244,34 @@ func createDB(t *testing.T, cfg db.Config, stmt string) {
 			t.Fatalf("setup: %v", err)
 		}
 		time.Sleep(3 * time.Second)
+	}
+}
+
+// mongoLoader loads fixtures/mongo.js, the "big" collection and (views)
+// a view and a capped collection.
+func mongoLoader(views bool) func(ctx context.Context, c db.Conn) error {
+	return func(ctx context.Context, c db.Conn) error {
+		if err := Load(ctx, c, Script("mongo.js")); err != nil {
+			return err
+		}
+		for start := 0; start < 3000; start += 1000 {
+			var b strings.Builder
+			b.WriteString("db.big.insertMany([")
+			for i := start; i < start+1000; i++ {
+				if i > start {
+					b.WriteString(", ")
+				}
+				fmt.Fprintf(&b, "{_id: %d, label: 'row %d', v: %g}", i, i, float64(i)*0.5)
+			}
+			b.WriteString("])")
+			if err := Load(ctx, c, b.String()); err != nil {
+				return err
+			}
+		}
+		if views {
+			return Load(ctx, c, `db.createView("customer_names", "customers", [{$project: {name: 1}}]);
+db.createCollection("capped_log", {capped: true, size: 65536})`)
+		}
+		return nil
 	}
 }

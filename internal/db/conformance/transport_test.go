@@ -176,3 +176,27 @@ func TestPostgresNotices(t *testing.T) {
 	}
 	res.Close()
 }
+
+// TestSSHTunnelMongo reaches the replica set member through the bastion:
+// the tunnel goes to one node, which the client must use directly.
+func TestSSHTunnelMongo(t *testing.T) {
+	needs(t, "127.0.0.1:55222")
+	needs(t, "127.0.0.1:55017")
+	cfg := db.Config{Driver: "mongodb", Host: "mongo", Port: 27017, Database: "lumino_test",
+		SSH: &db.SSHConfig{Host: "127.0.0.1", Port: 55222, User: "lumino", Auth: "password", Secret: "lumino"}}
+	opts := db.OpenOptions{HostKey: func(string, net.Addr, ssh.PublicKey) error { return nil }}
+	conn := ping(t, cfg, opts)
+	if !strings.HasPrefix(conn.ServerVersion(), "MongoDB") || !conn.Caps().Transactions {
+		t.Fatalf("version %q caps %+v", conn.ServerVersion(), conn.Caps())
+	}
+	s, err := conn.Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	res, err := s.Execute(context.Background(), "db.runCommand({ping: 1})")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Close()
+}

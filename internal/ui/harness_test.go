@@ -28,6 +28,7 @@ import (
 	_ "github.com/twoojoo/lumino/internal/db/adapters/clickhouse"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/cockroach"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/firebird"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mongo"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/mssql"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/mysql"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/oracle"
