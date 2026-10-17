@@ -78,16 +78,10 @@ func (s *session) ApplyChanges(ctx context.Context, ref db.ObjectRef, changes []
 		var n int64
 		switch ch.Op {
 		case db.OpInsert:
-			doc := bson.D{}
-			for _, cv := range ch.Values {
-				if cv.Value == nil {
-					continue // an empty cell is a missing field
-				}
-				v, err := toBSON(cv.Value, cv.Kind, nil)
-				if err != nil {
-					return fail(fmt.Errorf("insert row %d, %s: %w", i+1, cv.Column, err))
-				}
-				doc = append(doc, bson.E{Key: cv.Column, Value: v})
+			// an empty cell is a missing field; dotted columns are paths
+			doc, err := insertDoc(ch.Values, noLike)
+			if err != nil {
+				return fail(fmt.Errorf("insert row %d, %w", i+1, err))
 			}
 			if _, has := field(doc, "_id"); !has {
 				doc = append(bson.D{{Key: "_id", Value: bson.NewObjectID()}}, doc...)
@@ -114,16 +108,17 @@ func (s *session) ApplyChanges(ctx context.Context, ref db.ObjectRef, changes []
 			if err != nil {
 				return fail(fmt.Errorf("update row %d: %w", i+1, mapError(err)))
 			}
-			set := bson.D{}
-			for _, cv := range ch.Values {
-				like, _ := field(cur, cv.Column)
-				v, err := toBSON(cv.Value, cv.Kind, like)
-				if err != nil {
-					return fail(fmt.Errorf("update row %d, %s: %w", i+1, cv.Column, err))
-				}
-				set = append(set, bson.E{Key: cv.Column, Value: v})
+			upd, err := updateDoc(ch.Values, func(path string) any {
+				v, _ := lookup(cur, path)
+				return v
+			})
+			if err != nil {
+				return fail(fmt.Errorf("update row %d, %w", i+1, err))
 			}
-			r, err := coll.UpdateOne(octx, f, bson.D{{Key: "$set", Value: set}})
+			if len(upd) == 0 {
+				continue
+			}
+			r, err := coll.UpdateOne(octx, f, upd)
 			if err != nil {
 				return fail(fmt.Errorf("update row %d: %w", i+1, mapError(err)))
 			}

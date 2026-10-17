@@ -19,6 +19,7 @@ type resultSet struct {
 	stmtStart int // byte offset of the statement in the console text
 	cols      []db.Column
 	rows      []db.Row
+	docs      []db.DocNode // whole documents of the rows (document databases), else nil
 	res       db.Result
 	more      bool
 	fetching  bool
@@ -54,6 +55,32 @@ func (r *resultSet) Value(i, c int) any {
 		return nil
 	}
 	return r.rows[i][c]
+}
+
+// docsOf returns the documents of the rows just fetched from res (nil when
+// res is not a document result).
+func docsOf(res db.Result, n int) []db.DocNode {
+	dr, ok := res.(db.DocumentResult)
+	if !ok {
+		return nil
+	}
+	d := dr.Documents()
+	if len(d) != n {
+		return nil
+	}
+	return d
+}
+
+// hasDocs reports whether the result carries whole documents.
+func (r *resultSet) hasDocs() bool { return r.docs != nil && len(r.docs) == len(r.rows) }
+
+// doc returns the document of a displayed row.
+func (r *resultSet) doc(i int) (db.DocNode, bool) {
+	j := r.row(i)
+	if !r.hasDocs() || j < 0 || j >= len(r.docs) {
+		return db.DocNode{}, false
+	}
+	return r.docs[j], true
 }
 
 // row returns the underlying row index of a displayed row.
@@ -119,8 +146,11 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 	r.fetching = true
 	res := r.res
 	have := len(r.rows)
+	withDocs := r.docs != nil
 	go func() {
 		var got []db.Row
+		var gotDocs []db.DocNode
+		docs := withDocs
 		more := true
 		var err error
 		total := have
@@ -128,19 +158,31 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 			var rows []db.Row
 			rows, more, err = res.Fetch(context.Background(), n)
 			got = append(got, rows...)
+			if docs {
+				if d := docsOf(res, len(rows)); d != nil {
+					gotDocs = append(gotDocs, d...)
+				} else {
+					docs = false
+				}
+			}
 			total += len(rows)
 			if !all || !more || err != nil || total >= limit*4 {
 				break
 			}
 			if len(got) >= 50000 { // hand rows to the UI in chunks
-				chunk := got
-				got = nil
-				a.post(func() { r.rows = append(r.rows, chunk...); r.resort() })
+				chunk, chunkDocs, withDocs := got, gotDocs, docs
+				got, gotDocs = nil, nil
+				a.post(func() {
+					r.rows = append(r.rows, chunk...)
+					r.addDocs(chunkDocs, withDocs)
+					r.resort()
+				})
 			}
 		}
 		a.post(func() {
 			r.fetching = false
 			r.rows = append(r.rows, got...)
+			r.addDocs(gotDocs, docs)
 			if r.res != res {
 				// detached or closed meanwhile (re-run, later statement):
 				// keep the rows, the cursor state is no longer ours
@@ -167,6 +209,19 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 			}
 		})
 	}()
+}
+
+// addDocs appends the documents of appended rows (without them, the
+// result stops carrying documents).
+func (r *resultSet) addDocs(d []db.DocNode, ok bool) {
+	if r.docs == nil {
+		return
+	}
+	if !ok {
+		r.docs = nil
+		return
+	}
+	r.docs = append(r.docs, d...)
 }
 
 func (r *resultSet) closeCursor() {

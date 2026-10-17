@@ -216,30 +216,87 @@ type fieldStats struct {
 	first   any
 }
 
-// inferColumns derives result columns from documents: fields in order of
-// first appearance (_id first); the kind is the common kind of the values.
-func inferColumns(docs []bson.D) ([]db.Column, []*fieldStats) {
-	var order []*fieldStats
-	byName := map[string]*fieldStats{}
-	for _, d := range docs {
-		for _, e := range d {
-			fs := byName[e.Key]
-			if fs == nil {
-				fs = &fieldStats{name: e.Key, types: map[string]int{}}
-				byName[e.Key] = fs
-				order = append(order, fs)
-			}
-			fs.present++
-			if e.Value == nil {
-				fs.nulls++
-				continue
-			}
-			if fs.first == nil {
-				fs.first = e.Value
-			}
-			fs.types[typeName(e.Value)]++
+// maxFlatten is how many levels of nested documents become columns.
+const maxFlatten = 3
+
+// fieldNode is a field path seen in documents, with its sub-fields in
+// order of first appearance.
+type fieldNode struct {
+	stats    *fieldStats
+	children []*fieldNode
+	byName   map[string]*fieldNode
+	objects  int  // values that are non-empty documents with plain keys
+	opaque   bool // some value can't be split into columns
+}
+
+func (n *fieldNode) child(name, path string) *fieldNode {
+	if c := n.byName[name]; c != nil {
+		return c
+	}
+	c := &fieldNode{stats: &fieldStats{name: path, types: map[string]int{}}, byName: map[string]*fieldNode{}}
+	n.byName[name] = c
+	n.children = append(n.children, c)
+	return c
+}
+
+// plainKeys reports whether every key of d can be part of a dotted path.
+func plainKeys(d bson.D) bool {
+	for _, e := range d {
+		if e.Key == "" || strings.Contains(e.Key, ".") || strings.HasPrefix(e.Key, "$") {
+			return false
 		}
 	}
+	return true
+}
+
+func (n *fieldNode) add(prefix string, d bson.D, depth int) {
+	for _, e := range d {
+		path := prefix + e.Key
+		c := n.child(e.Key, path)
+		fs := c.stats
+		fs.present++
+		if e.Value == nil {
+			fs.nulls++
+			continue
+		}
+		if fs.first == nil {
+			fs.first = e.Value
+		}
+		fs.types[typeName(e.Value)]++
+		if sub, ok := e.Value.(bson.D); ok && len(sub) > 0 && plainKeys(sub) && depth < maxFlatten {
+			c.objects++
+			c.add(path+".", sub, depth+1)
+		} else {
+			c.opaque = true
+		}
+	}
+}
+
+// flat reports whether a field is shown as the columns of its sub-fields:
+// all its values are documents (or null).
+func (n *fieldNode) flat() bool { return n.objects > 0 && !n.opaque }
+
+func (n *fieldNode) collect(out *[]*fieldStats) {
+	for _, c := range n.children {
+		if c.flat() {
+			c.collect(out)
+		} else {
+			*out = append(*out, c.stats)
+		}
+	}
+}
+
+// inferColumns derives result columns from documents: fields in order of
+// first appearance (_id first), nested documents as dotted columns
+// ("address.city") when every value of the field is a document; the kind
+// is the common kind of the values.
+func inferColumns(docs []bson.D) ([]db.Column, []*fieldStats) {
+	root := &fieldNode{byName: map[string]*fieldNode{}}
+	for _, d := range docs {
+		root.add("", d, 0)
+	}
+	var order []*fieldStats
+	root.collect(&order)
 	if i := slices.IndexFunc(order, func(f *fieldStats) bool { return f.name == "_id" }); i > 0 {
 		id := order[i]
 		order = append(order[:i], order[i+1:]...)
@@ -251,6 +308,80 @@ func inferColumns(docs []bson.D) ([]db.Column, []*fieldStats) {
 			Nullable: fs.nulls > 0 || fs.present < len(docs)}
 	}
 	return cols, order
+}
+
+// lookup returns the value of a column in a document: a top-level field
+// named like the column, else the dotted path.
+func lookup(d bson.D, path string) (any, bool) {
+	if v, ok := field(d, path); ok {
+		return v, true
+	}
+	cur := d
+	parts := strings.Split(path, ".")
+	for i, p := range parts {
+		v, ok := field(cur, p)
+		if !ok {
+			return nil, false
+		}
+		if i == len(parts)-1 {
+			return v, true
+		}
+		sub, ok := v.(bson.D)
+		if !ok {
+			return nil, false
+		}
+		cur = sub
+	}
+	return nil, false
+}
+
+// setPath sets a dotted path in a document, creating the parents.
+func setPath(d bson.D, path string, v any) bson.D {
+	head, rest, nested := strings.Cut(path, ".")
+	for i, e := range d {
+		if e.Key == head {
+			if nested {
+				sub, _ := e.Value.(bson.D)
+				d[i].Value = setPath(sub, rest, v)
+			} else {
+				d[i].Value = v
+			}
+			return d
+		}
+	}
+	if nested {
+		return append(d, bson.E{Key: head, Value: setPath(bson.D{}, rest, v)})
+	}
+	return append(d, bson.E{Key: head, Value: v})
+}
+
+// docNode is the document tree of a value.
+func docNode(name string, v any) db.DocNode {
+	n := db.DocNode{Name: name, Type: typeName(v), Kind: kindOf(v)}
+	switch x := v.(type) {
+	case bson.D:
+		n.Kind = db.KindJSON
+		for _, e := range x {
+			n.Children = append(n.Children, docNode(e.Key, e.Value))
+		}
+		n.Children = nonNil(n.Children)
+		return n
+	case bson.A:
+		for i, e := range x {
+			n.Children = append(n.Children, docNode(strconv.Itoa(i), e))
+		}
+		n.Children = nonNil(n.Children)
+		return n
+	}
+	n.Value, n.Lit = cell(v), shellLit(v)
+	return n
+}
+
+func nonNil(c []db.DocNode) []db.DocNode {
+	if c == nil {
+		return []db.DocNode{}
+	}
+	return c
 }
 
 // kind is the grid kind of a field: the kind of its values, numbers of
@@ -303,12 +434,9 @@ func (fs *fieldStats) typeLabel() string {
 // row builds the grid row of a document for cols.
 func row(d bson.D, cols []db.Column) db.Row {
 	r := make(db.Row, len(cols))
-	for _, e := range d {
-		for i, c := range cols {
-			if c.Name == e.Key {
-				r[i] = cell(e.Value)
-				break
-			}
+	for i, c := range cols {
+		if v, ok := lookup(d, c.Name); ok {
+			r[i] = cell(v)
 		}
 	}
 	return r

@@ -69,6 +69,10 @@ type ConsoleTab struct {
 	histBtn, saveBtn, aiBtn, fetchAllBtn, exportBtn, valueBtn     widget.Clickable
 	modeBtns                                                      [2]widget.Clickable
 	resTabs                                                       []widget.Clickable
+	resMode                                                       int // viewTable | viewTree | viewJSON (document results)
+	resModeBtns                                                   [3]widget.Clickable
+	docs                                                          *docView
+	docsOf                                                        *resultSet
 	msgTab, gotoErrBtn                                            widget.Clickable
 }
 
@@ -85,6 +89,7 @@ func newConsoleTab(a *App, st prefs.TabState) *ConsoleTab {
 	t.ed.Completer = t.complete
 	t.ed.OnChange = func() { a.scheduleSave() }
 	t.ed.OnContextMenu = t.editorMenu
+	t.docs = newDocView(a)
 	t.grid = newDataGrid(a)
 	t.grid.OnSort = func(c int) {
 		if rs := t.current(); rs != nil {
@@ -530,6 +535,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 					rs.isQuery, rs.cols = true, res.Columns()
 					rows, more, ferr := res.Fetch(ctx, fetch)
 					rs.rows, rs.more, err = rows, more, ferr
+					rs.docs = docsOf(res, len(rows))
 					rs.elapsed = time.Since(rs.started)
 					switch {
 					case more && last:
@@ -1024,6 +1030,18 @@ func (t *ConsoleTab) layoutResults(gtx C) D {
 					}))
 					tabs = append(tabs, layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 1)} }))
 					if rs := t.current(); rs != nil {
+						if rs.isQuery && rs.hasDocs() {
+							tabs = append(tabs, layout.Rigid(func(gtx C) D {
+								for i := range t.resModeBtns {
+									if t.resModeBtns[i].Clicked(gtx) {
+										t.resMode = i
+									}
+								}
+								return layout.Inset{Right: 10}.Layout(gtx, func(gtx C) D {
+									return segmented(gtx, th, t.resModeBtns[:], viewNames[:], t.resMode)
+								})
+							}))
+						}
 						tabs = append(tabs, layout.Rigid(func(gtx C) D {
 							return lbl(gtx, th, fontSans, 11.5, pal.TextDim, rs.summary())
 						}))
@@ -1078,6 +1096,12 @@ func (t *ConsoleTab) layoutResults(gtx C) D {
 				return layout.Center.Layout(gtx, func(gtx C) D {
 					return iconText(gtx, th, icOK, 14, pal.Ok, rs.summary())
 				})
+			case rs.hasDocs() && t.resMode != viewTable:
+				if t.docsOf != rs {
+					t.docsOf = rs
+					t.docs.reset()
+				}
+				return t.docs.Layout(gtx, rs, t.ed.lang, t.resMode)
 			}
 			return t.value.layoutWith(gtx, t.grid, func(r, c int) (any, db.Column, bool) {
 				if r >= 0 && c >= 0 && r < rs.Rows() && c < len(rs.cols) {

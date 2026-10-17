@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -265,14 +266,15 @@ func TestValues(t *testing.T) {
 		{Key: "dec", Value: dec}, {Key: "d", Value: bson.NewDateTimeFromTime(now)}, {Key: "b", Value: bson.Binary{Data: []byte{1, 2}}},
 		{Key: "u", Value: bson.Binary{Subtype: 4, Data: make([]byte, 16)}},
 		{Key: "o", Value: bson.D{{Key: "x", Value: int64(7)}, {Key: "id", Value: id}, {Key: "a", Value: bson.A{int32(1), "s"}}}}}
-	docs := []bson.D{doc, {{Key: "_id", Value: "str"}, {Key: "i", Value: 2.5}, {Key: "extra", Value: true}}}
+	// o is a document in one and a string in the other: one mixed column
+	docs := []bson.D{doc, {{Key: "_id", Value: "str"}, {Key: "i", Value: 2.5}, {Key: "extra", Value: true}, {Key: "o", Value: "plain"}}}
 	cols, _ := inferColumns(docs)
 	kinds := map[string]db.Kind{}
 	for _, c := range cols {
 		kinds[c.Name] = c.Kind
 	}
 	if cols[0].Name != "_id" || kinds["_id"] != db.KindOther || kinds["i"] != db.KindFloat || kinds["l"] != db.KindInt ||
-		kinds["dec"] != db.KindDecimal || kinds["d"] != db.KindTimestampTZ || kinds["o"] != db.KindJSON || kinds["u"] != db.KindUUID {
+		kinds["dec"] != db.KindDecimal || kinds["d"] != db.KindTimestampTZ || kinds["o"] != db.KindOther || kinds["u"] != db.KindUUID {
 		t.Fatalf("kinds %v", kinds)
 	}
 	r := row(doc, cols)
@@ -283,7 +285,8 @@ func TestValues(t *testing.T) {
 			t.Errorf("%s: unnormalized %T", cols[i].Name, v)
 		}
 	}
-	o := r[len(cols)-2].(map[string]any)
+	oi := slices.IndexFunc(cols, func(c db.Column) bool { return c.Name == "o" })
+	o := r[oi].(map[string]any)
 	if o["x"].(map[string]any)["$numberLong"] != "7" || o["id"].(map[string]any)["$oid"] != id.Hex() {
 		t.Errorf("nested %v", o)
 	}
@@ -356,5 +359,99 @@ func TestURL(t *testing.T) {
 	}
 	if _, err := buildURI(&db.Config{Host: "127.0.0.1", Params: map[string]string{"srv": "true"}}, 27017); err == nil {
 		t.Fatal("srv with an IP accepted")
+	}
+}
+
+func TestFlatten(t *testing.T) {
+	docs := []bson.D{
+		{{Key: "_id", Value: int32(1)}, {Key: "address", Value: bson.D{{Key: "city", Value: "London"}, {Key: "geo", Value: bson.D{{Key: "lat", Value: 1.5}}}}},
+			{Key: "tags", Value: bson.A{"a"}}, {Key: "odd", Value: bson.D{{Key: "a.b", Value: 1}}}, {Key: "empty", Value: bson.D{}}},
+		{{Key: "_id", Value: int32(2)}, {Key: "address", Value: bson.D{{Key: "zip", Value: "N1"}}}, {Key: "address2", Value: nil}},
+	}
+	cols, _ := inferColumns(docs)
+	var names []string
+	for _, c := range cols {
+		names = append(names, c.Name)
+	}
+	if got := strings.Join(names, ","); got != "_id,address.city,address.geo.lat,address.zip,tags,odd,empty,address2" {
+		t.Fatalf("columns %s", got)
+	}
+	r := row(docs[0], cols)
+	if r[1] != "London" || r[2] != 1.5 || r[3] != nil {
+		t.Fatalf("row %v", r)
+	}
+	if v, _ := lookup(docs[0], "odd"); v == nil {
+		t.Fatal("top-level lookup")
+	}
+	d := setPath(bson.D{{Key: "a", Value: bson.D{{Key: "x", Value: int32(1)}}}}, "a.y.z", "v")
+	if shellLit(d) != `{a: {x: 1, y: {z: "v"}}}` {
+		t.Fatalf("setPath %s", shellLit(d))
+	}
+	n := docNode("", docs[0])
+	if !n.IsObject() || n.Children[1].Name != "address" || len(n.Children[1].Children) != 2 || n.Children[0].Lit != "1" || n.Children[0].Value != int64(1) {
+		t.Fatalf("doc node %+v", n)
+	}
+	if tg := n.Children[2]; !tg.IsArray() || tg.Children[0].Name != "0" || tg.Children[0].Lit != `"a"` {
+		t.Fatalf("array node %+v", tg)
+	}
+}
+
+func TestDocumentEditing(t *testing.T) {
+	l := &language{}
+	orig := docNode("", bson.D{{Key: "_id", Value: bson.NewObjectID()}, {Key: "n", Value: int64(5)}, {Key: "a", Value: bson.D{{Key: "x", Value: int32(1)}, {Key: "y", Value: "k"}}},
+		{Key: "arr", Value: bson.A{int32(1), int32(2)}}, {Key: "gone", Value: true}, {Key: "d", Value: bson.DateTime(0)}})
+	text := l.FormatDocument(orig)
+	if !strings.Contains(text, "n: NumberLong(\"5\")") || !strings.Contains(text, "\n  a: {\n    x: 1,") || !strings.Contains(text, "arr: [1, 2]") {
+		t.Fatalf("format:\n%s", text)
+	}
+	key, vals, err := l.DocumentChanges(orig, text)
+	if err != nil || len(vals) != 0 || key[0].Column != "_id" {
+		t.Fatalf("no change: %v %v", vals, err)
+	}
+	edited := strings.Replace(text, "x: 1", "x: 2", 1)
+	edited = strings.Replace(edited, "  gone: true,\n", "", 1)
+	edited = strings.Replace(edited, "arr: [1, 2]", "arr: [1, 2, 3], added: {z: 1}", 1)
+	_, vals, err = l.DocumentChanges(orig, edited)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, edited)
+	}
+	got := map[string]any{}
+	for _, v := range vals {
+		got[v.Column] = v.Value
+	}
+	if got["a.x"] != db.Raw("2") || got["arr"] != db.Raw("[1, 2, 3]") || got["added"] != db.Raw("{z: 1}") || got["gone"] != db.Unset || len(got) != 4 {
+		t.Fatalf("changes %v", got)
+	}
+	upd, err := updateDoc(vals, noLike)
+	if err != nil || shellLit(upd) != `{$set: {"a.x": 2, arr: [1, 2, 3], added: {z: 1}}, $unset: {gone: ""}}` {
+		t.Fatalf("update %s %v", shellLit(upd), err)
+	}
+	if _, _, err := l.DocumentChanges(orig, strings.Replace(text, "ObjectId(", "String(", 1)); err == nil {
+		t.Fatal("bad text accepted")
+	}
+	id := orig.Children[0].Lit
+	if _, _, err := l.DocumentChanges(orig, strings.Replace(text, id, `"other"`, 1)); err == nil {
+		t.Fatal("_id change accepted")
+	}
+	nd, err := l.NewDocument(`{name: "x", when: ISODate("2024-01-01T00:00:00Z")}`)
+	if err != nil || len(nd) != 2 || nd[1].Value != db.Raw(`ISODate("2024-01-01T00:00:00.000Z")`) {
+		t.Fatalf("new document %v %v", nd, err)
+	}
+	ins, err := insertDoc([]db.ColValue{{Column: "a.b", Kind: db.KindInt, Value: int64(1)}, {Column: "c", Value: nil}, {Column: "d", Kind: db.KindJSON, Value: db.Raw("{e: 1}")}}, noLike)
+	if err != nil || shellLit(ins) != "{a: {b: 1}, d: {e: 1}}" {
+		t.Fatalf("insert %s %v", shellLit(ins), err)
+	}
+	if s, err := l.ParseSort("{a: 1, b: -1}"); err != nil || len(s) != 2 || !s[1].Desc || l.FormatSort(s) != "{a: 1, b: -1}" {
+		t.Fatalf("sort %v %v", s, err)
+	}
+	if _, err := l.ParseSort("{a: 2}"); err == nil {
+		t.Fatal("bad sort accepted")
+	}
+	q, err := l.Browse(db.ObjectRef{Name: "c"}, db.BrowseQuery{Filter: "{a: 1}", Projection: "{a: 1}", Sort: []db.SortKey{{Field: "a.b", Desc: true}}, Limit: 10})
+	if err != nil || q != `db.c.find({a: 1}, {a: 1}).sort({"a.b": -1}).limit(10)` {
+		t.Fatalf("browse %q %v", q, err)
+	}
+	if l.Classify(q) != db.StmtRead {
+		t.Fatal("browse classification")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,24 +253,32 @@ type TableTab struct {
 	infoErr error
 	loading bool
 
-	sess     db.Session
-	sessGen  int
-	saving   bool // a save runs: edits are blocked until it ends
-	opening  bool
-	sessWait []sessWaiter
-	disposed bool
-	data     *tableData
-	grid     *DataGrid
-	value    *valuePanel
-	where    widget.Editor
-	order    []db.SortKey // sort of the browse query
-	sortCol  int
-	sortDsc  bool
-	query    string
-	running  bool
-	loadErr  error
-	count    string
-	gen      int
+	sess                  db.Session
+	sessGen               int
+	saving                bool // a save runs: edits are blocked until it ends
+	opening               bool
+	sessWait              []sessWaiter
+	disposed              bool
+	data                  *tableData
+	grid                  *DataGrid
+	value                 *valuePanel
+	where                 *CodeEditor // filter (SQL condition, filter document…)
+	proj                  *CodeEditor // projection document (document languages)
+	sortEd                *CodeEditor // sort document (document languages)
+	limit                 widget.Editor
+	langSet               db.Language // language the query editors follow
+	mode                  int         // viewTable | viewTree | viewJSON (document results)
+	modeBtns              [3]widget.Clickable
+	docs                  *docView
+	insDocBtn, editDocBtn widget.Clickable
+	order                 []db.SortKey // sort of the browse query
+	sortCol               int
+	sortDsc               bool
+	query                 string
+	running               bool
+	loadErr               error
+	count                 string
+	gen                   int
 
 	ddl      *CodeEditor
 	ddlState int // 0 none, 1 loading, 2 loaded
@@ -290,7 +299,19 @@ func newTableTab(a *App, st prefs.TabState) *TableTab {
 	if !t.ref.Type.Relation() {
 		t.view = "ddl"
 	}
-	t.where.SingleLine, t.where.Submit = true, true
+	fields := t.fieldNames
+	for _, ed := range []**CodeEditor{&t.where, &t.proj, &t.sortEd} {
+		e := newCodeEditor(a, "")
+		e.SingleLine = true
+		e.OnSubmit = func() { t.refresh(nil) }
+		e.Completer = func(e *CodeEditor) *compRequest { return queryItems(e.lang, fields) }
+		*ed = e
+	}
+	t.proj.Hint, t.sortEd.Hint = "{name: 1, _id: 0}", "{created: -1}"
+	t.limit.SingleLine, t.limit.Submit = true, true
+	t.docs = newDocView(a)
+	t.docs.Menu = t.docMenu
+	t.docs.OnActivate = t.editDocument
 	t.grid = newDataGrid(a)
 	t.value = newValuePanel(a)
 	t.grid.OnSort = t.sortBy
@@ -319,7 +340,8 @@ func (t *TableTab) Title() string      { return t.ref.Name }
 func (t *TableTab) Icon() *widget.Icon { return objIcon(t.ref.Type) }
 func (t *TableTab) ConnID() string     { return t.connID }
 func (t *TableTab) Focused(gtx C) bool {
-	return gtx.Focused(&t.where) || t.grid.Focused(gtx) || t.value.focused(gtx) || t.ddl.Focused(gtx)
+	return t.where.Focused(gtx) || t.proj.Focused(gtx) || t.sortEd.Focused(gtx) || gtx.Focused(&t.limit) ||
+		t.grid.Focused(gtx) || t.value.focused(gtx) || t.ddl.Focused(gtx)
 }
 
 func (t *TableTab) Dirty() string {
@@ -511,8 +533,30 @@ func (t *TableTab) reload() {
 		return
 	}
 	t.order = nil
+	bq := db.BrowseQuery{Filter: t.where.Text()}
+	dl, isDoc := t.cs().language().(db.DocumentLanguage)
+	var typedSort []db.SortKey
+	if isDoc {
+		bq.Projection = t.proj.Text()
+		if n := strings.TrimSpace(t.limit.Text()); n != "" {
+			v, err := strconv.ParseInt(n, 10, 64)
+			if err != nil || v < 0 {
+				t.loadErr = fmt.Errorf("limit: %q is not a number", n)
+				return
+			}
+			bq.Limit = v
+		}
+		ks, err := dl.ParseSort(t.sortEd.Text())
+		if err != nil {
+			t.loadErr = err
+			return
+		}
+		typedSort = ks
+	}
 	if t.sortCol >= 0 && t.data != nil && t.sortCol < len(t.data.rs.cols) {
 		t.order = []db.SortKey{{Field: t.data.rs.cols[t.sortCol].Name, Desc: t.sortDsc}}
+	} else if len(typedSort) > 0 {
+		t.order = typedSort
 	} else if pkOrder && t.info != nil {
 		for _, k := range t.info.PrimaryKey {
 			t.order = append(t.order, db.SortKey{Field: k})
@@ -526,7 +570,8 @@ func (t *TableTab) reload() {
 		return
 	}
 	t.withSession(func(s db.Session) {
-		q, err := t.cs().language().Browse(t.ref, db.BrowseQuery{Filter: t.where.Text(), Sort: t.order})
+		bq.Sort = t.order
+		q, err := t.cs().language().Browse(t.ref, bq)
 		if err != nil {
 			t.running, t.loadErr = false, err
 			return
@@ -540,6 +585,7 @@ func (t *TableTab) reload() {
 			if err == nil {
 				rs.cols = res.Columns()
 				rs.rows, rs.more, err = res.Fetch(context.Background(), fetch)
+				rs.docs = docsOf(res, len(rs.rows))
 				if rs.more {
 					rs.res = res
 				} else {
@@ -561,6 +607,7 @@ func (t *TableTab) reload() {
 					t.data.rs.closeCursor()
 				}
 				t.data = newTableData(rs)
+				t.docs.reset()
 				t.grid.SetModel(t.data)
 				t.grid.SortCol, t.grid.SortDesc = t.sortCol, t.sortDsc
 				if t.sortCol < 0 && len(t.order) > 0 {
@@ -896,8 +943,18 @@ func (t *TableTab) Layout(gtx C) D {
 
 func (t *TableTab) layoutData(gtx C) D {
 	a, th := t.a, t.a.th
+	lang := t.cs().language()
+	if lang != t.langSet {
+		// highlighting and completion follow the connection's language
+		t.langSet = lang
+		for _, e := range []*CodeEditor{t.where, t.proj, t.sortEd} {
+			e.setLanguage(lang)
+		}
+	}
+	t.where.Hint = lang.FilterHint()
+	_, isDoc := lang.(db.DocumentLanguage)
 	for {
-		ev, ok := t.where.Update(gtx)
+		ev, ok := t.limit.Update(gtx)
 		if !ok {
 			break
 		}
@@ -905,6 +962,17 @@ func (t *TableTab) layoutData(gtx C) D {
 			t.refresh(nil)
 		}
 	}
+	if t.insDocBtn.Clicked(gtx) {
+		t.insertDocument()
+	}
+	if t.editDocBtn.Clicked(gtx) {
+		if r, ok := t.currentRow(); ok {
+			t.editDocument(r)
+		} else {
+			a.flash("Select a document first", false)
+		}
+	}
+	docs := isDoc && t.data != nil && t.data.rs.hasDocs()
 	if t.refreshBtn.Clicked(gtx) {
 		t.refresh(nil)
 	}
@@ -948,12 +1016,10 @@ func (t *TableTab) layoutData(gtx C) D {
 		layout.Rigid(func(gtx C) D {
 			return layout.Inset{Left: 8, Right: 8, Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, "WHERE ") }),
-					layout.Flexed(1, func(gtx C) D {
-						return textField(gtx, th, &t.where, t.cs().language().FilterHint(), true)
-					}),
+					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, lang.FilterLabel()+" ") }),
+					layout.Flexed(1, func(gtx C) D { return queryField(gtx, t.where) }),
 					layout.Rigid(func(gtx C) D {
-						if t.where.Len() == 0 {
+						if t.where.Text() == "" {
 							return D{}
 						}
 						return iconOnly(gtx, &t.clearWhere, icClear, 15)
@@ -997,6 +1063,46 @@ func (t *TableTab) layoutData(gtx C) D {
 				)
 			})
 		}),
+		layout.Rigid(func(gtx C) D {
+			if !isDoc {
+				return D{}
+			}
+			return layout.Inset{Left: 8, Right: 8, Bottom: 6}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, "Project ") }),
+					layout.Flexed(1, func(gtx C) D { return queryField(gtx, t.proj) }),
+					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, "  Sort ") }),
+					layout.Flexed(0.7, func(gtx C) D { return queryField(gtx, t.sortEd) }),
+					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, "  Limit ") }),
+					layout.Rigid(func(gtx C) D {
+						gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(80), gtx.Dp(80)
+						return textField(gtx, th, &t.limit, "none", true)
+					}),
+					layout.Rigid(func(gtx C) D { return layout.Inset{Left: 8, Right: 8}.Layout(gtx, vsep) }),
+					layout.Rigid(func(gtx C) D {
+						for i := range t.modeBtns {
+							if t.modeBtns[i].Clicked(gtx) {
+								t.mode = i
+							}
+						}
+						return segmented(gtx, th, t.modeBtns[:], viewNames[:], t.mode)
+					}),
+					layout.Rigid(func(gtx C) D {
+						if t.readOnlyReason() != "" {
+							return D{}
+						}
+						return layout.Inset{Left: 8}.Layout(gtx, func(gtx C) D {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx C) D { return pillButton(gtx, th, &t.insDocBtn, icAdd, "Insert…", pal.Text, colorNRGBA{}) }),
+								layout.Rigid(func(gtx C) D {
+									return pillButton(gtx, th, &t.editDocBtn, icEdit, "Edit document…", pal.Text, colorNRGBA{})
+								}),
+							)
+						})
+					}),
+				)
+			})
+		}),
 		layout.Rigid(func(gtx C) D { return hline(gtx, pal.Border) }),
 		layout.Flexed(1, func(gtx C) D {
 			switch {
@@ -1012,6 +1118,8 @@ func (t *TableTab) layoutData(gtx C) D {
 				})
 			case t.data == nil:
 				return layout.Center.Layout(gtx, func(gtx C) D { return lbl(gtx, th, fontSans, 12.5, pal.TextDim, "Loading…") })
+			case docs && t.mode != viewTable:
+				return t.docs.Layout(gtx, t.data.rs, lang, t.mode)
 			}
 			return t.value.layoutWith(gtx, t.grid, func(r, c int) (any, db.Column, bool) {
 				if r >= 0 && r < t.data.Rows() && c >= 0 && c < len(t.data.rs.cols) {
@@ -1067,7 +1175,7 @@ func (t *TableTab) gridMenu(at image.Point) {
 	items = append(items, &menuItem{icon: icFilter, label: "Filter by this value", action: func() {
 		col := t.data.rs.cols[sel.c1]
 		v := t.data.Value(sel.r1, sel.c1)
-		cond := t.cs().language().EqualsFilter(col.Name, v, col.Kind)
+		cond := oneLine(t.cs().language().EqualsFilter(col.Name, v, col.Kind))
 		t.refresh(func() { t.where.SetText(cond) })
 	}})
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}
