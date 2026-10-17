@@ -789,6 +789,7 @@ func (s *Sidebar) contextMenu(r treeRow) {
 			add(icPlug, "Disconnect", "", false, func() { a.requestDisconnect(r.connID, nil) })
 			if cs.docTools() != nil {
 				add(icCluster, "Server activity", "", false, func() { a.openMonitor(r.connID) })
+				add(icCluster, "Cluster status", "", false, func() { a.openCluster(r.connID) })
 				add(icCommand, "Translate SQL to MongoDB…", "", false, func() { a.openTranslate(r.connID, "") })
 			}
 		} else {

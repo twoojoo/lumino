@@ -81,6 +81,7 @@ var (
 	icInfo       = mustIcon(icons.ActionInfo)
 	icClear      = mustIcon(icons.ContentClear)
 	icCommand    = mustIcon(icons.NavigationApps)
+	icCode       = mustIcon(icons.ActionCode)
 	icCloudOff   = mustIcon(icons.FileCloudOff)
 	icStatusDone = mustIcon(icons.ActionCheckCircle)
 	icEye        = mustIcon(icons.ActionVisibility)

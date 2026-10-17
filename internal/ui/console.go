@@ -1298,7 +1298,8 @@ func (t *ConsoleTab) editorMenu(at image.Point) {
 		{icon: icBookmark, label: "Save query…", action: func() { a.saveQueryDialog(t.connID, t.pickedSQL()) }},
 	}
 	if _, ok := t.cs().docLanguage(); ok {
-		items = append(items, &menuItem{icon: icCommand, label: "Translate SQL to MongoDB…", action: func() { a.openTranslate(t.connID, ed.Selected()) }})
+		items = append(items, &menuItem{icon: icCommand, label: "Translate SQL to MongoDB…", action: func() { a.openTranslate(t.connID, ed.Selected()) }},
+			&menuItem{icon: icCode, label: "Export to code…", action: func() { a.openCodeExport(t.connID, t.pickedSQL(), t.schema) }})
 	}
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}
 }

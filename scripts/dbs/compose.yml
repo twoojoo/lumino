@@ -166,6 +166,51 @@ services:
       timeout: 15s
       retries: 30
 
+  # sharded cluster: config server, two single-node shards, a router
+  # (mongos, 55020); scripts/dbs/mongos-init.js adds the shards
+  shard-cfg:
+    image: mongo:8.0
+    command: ["mongod", "--configsvr", "--replSet", "cfg", "--port", "27017", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval",
+        "try { rs.status().ok } catch (e) { rs.initiate({_id: 'cfg', configsvr: true, members: [{_id: 0, host: 'shard-cfg:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+  shard-a:
+    image: mongo:8.0
+    command: ["mongod", "--shardsvr", "--replSet", "sa", "--port", "27017", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval",
+        "try { rs.status().ok } catch (e) { rs.initiate({_id: 'sa', members: [{_id: 0, host: 'shard-a:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+  shard-b:
+    image: mongo:8.0
+    command: ["mongod", "--shardsvr", "--replSet", "sb", "--port", "27017", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval",
+        "try { rs.status().ok } catch (e) { rs.initiate({_id: 'sb', members: [{_id: 0, host: 'shard-b:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+  mongos:
+    image: mongo:8.0
+    command: ["mongos", "--configdb", "cfg/shard-cfg:27017", "--port", "27017", "--bind_ip_all"]
+    depends_on:
+      shard-cfg: {condition: service_healthy}
+      shard-a: {condition: service_healthy}
+      shard-b: {condition: service_healthy}
+    volumes:
+      - ./mongos-init.js:/init.js:ro
+    ports: ["127.0.0.1:55020:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "/init.js"]
+      interval: 5s
+      timeout: 20s
+      retries: 40
+
   # MongoDB-compatible, no transactions; SCRAM user lumino / lumino
   ferretdb:
     image: ghcr.io/ferretdb/ferretdb-eval:2
