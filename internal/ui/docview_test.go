@@ -103,7 +103,7 @@ func TestQueryItems(t *testing.T) {
 	if !found {
 		t.Fatal("SQL keywords")
 	}
-	k, ok := docKey(testDocs().docs[0])
+	k, ok := docKey(mongo.Language(), testDocs().docs[0])
 	if !ok || k[0].Value != db.Raw("1") {
 		t.Fatalf("key %v", k)
 	}
@@ -113,3 +113,46 @@ func TestQueryItems(t *testing.T) {
 }
 
 func (r *compRequest) req() []compItem { return r.items }
+
+func TestGrowColumns(t *testing.T) {
+	rs := &resultSet{cols: []db.Column{{Name: "_id"}}, rows: []db.Row{{int64(1)}}, sortCol: -1}
+	rs.growColumns([]db.Column{{Name: "_id"}, {Name: "late"}})
+	if len(rs.cols) != 2 || len(rs.rows[0]) != 2 || rs.rows[0][1] != nil {
+		t.Fatalf("grow %v %v", rs.cols, rs.rows)
+	}
+	rs.growColumns([]db.Column{{Name: "_id"}}) // never shrinks
+	if len(rs.cols) != 2 {
+		t.Fatal("shrunk")
+	}
+	// a row inserted before the growth gets the new column when set
+	td := newTableData(rs)
+	td.inserted = append(td.inserted, make(db.Row, 1))
+	td.insSet = append(td.insSet, map[int]bool{})
+	rs.growColumns([]db.Column{{Name: "_id"}, {Name: "late"}, {Name: "later"}})
+	td.set(1, 2, "x")
+	if td.Value(1, 2) != "x" || td.Value(0, 2) != nil {
+		t.Fatalf("inserted row %v", td.inserted)
+	}
+	// the grid keeps the widths of the columns it had
+	g := newDataGrid(nil)
+	g.SetModel(rs)
+	g.colW = []int{10, 20}
+	g.colsKey = colsKeyOf(&resultSet{cols: rs.cols[:2]})
+	g.validate()
+	if len(g.colW) != 3 || g.colW[0] != 10 || g.colW[2] != 0 {
+		t.Fatalf("widths %v", g.colW)
+	}
+}
+
+func TestFieldPaths(t *testing.T) {
+	p := db.JoinFieldPath(db.JoinFieldPath("", "a"), "b.c")
+	if p != `a."b.c"` || db.JoinFieldPath("", "$x") != `"$x"` {
+		t.Fatalf("join %q", p)
+	}
+	if s := db.SplitFieldPath(`a."b.c".d."q\"x"`); len(s) != 4 || s[1] != "b.c" || s[3] != `q"x` {
+		t.Fatalf("split %q", s)
+	}
+	if db.PlainFieldPath(`a."b.c"`) || !db.PlainFieldPath("a.b") {
+		t.Fatal("plain")
+	}
+}

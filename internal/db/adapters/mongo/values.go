@@ -3,6 +3,7 @@ package mongo
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -21,9 +22,9 @@ import (
 // Values: a top-level field becomes a grid cell in the Row value set
 // (ObjectId → hex string, Date → time.Time, Decimal128 → decimal string,
 // UUID → string, other binary → []byte). Nested documents and arrays are
-// map[string]any / []any whose special values are Extended JSON wrappers
+// Extended JSON text in document order, special values as wrappers
 // ({"$oid": …}, {"$date": …}, {"$numberLong": …}…), so editing them as
-// JSON keeps their types.
+// JSON keeps their types and the order of the fields.
 
 // typeName is the $type name of a BSON value.
 func typeName(v any) string {
@@ -132,26 +133,88 @@ func cell(v any) any {
 			return uuidString(x.Data)
 		}
 		return append([]byte(nil), x.Data...)
-	case bson.D:
-		m := make(map[string]any, len(x))
-		for _, e := range x {
-			m[e.Key] = nested(e.Value)
-		}
-		return m
+	case bson.D, bson.A:
+		// Extended JSON text in document order (a map would lose it)
+		return ejsonText(x)
 	case bson.M:
-		m := make(map[string]any, len(x))
-		for k, e := range x {
-			m[k] = nested(e)
-		}
-		return m
-	case bson.A:
-		a := make([]any, len(x))
-		for i, e := range x {
-			a[i] = nested(e)
-		}
-		return a
+		return ejsonText(x)
 	}
-	return nested(v)
+	return ejsonText(v)
+}
+
+// ejsonText writes a value as relaxed Extended JSON, keys in document
+// order: special values are wrappers ({"$oid": …}, {"$numberLong": …}…)
+// that toBSON reads back with their type.
+func ejsonText(v any) string {
+	var b strings.Builder
+	writeEJSON(&b, v)
+	return b.String()
+}
+
+func writeEJSON(b *strings.Builder, v any) {
+	switch x := v.(type) {
+	case bson.D:
+		b.WriteByte('{')
+		for i, e := range x {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			writeJSONString(b, e.Key)
+			b.WriteString(": ")
+			writeEJSON(b, e.Value)
+		}
+		b.WriteByte('}')
+	case bson.A:
+		b.WriteByte('[')
+		for i, e := range x {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			writeEJSON(b, e)
+		}
+		b.WriteByte(']')
+	case bson.M:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		d := make(bson.D, len(keys))
+		for i, k := range keys {
+			d[i] = bson.E{Key: k, Value: x[k]}
+		}
+		writeEJSON(b, d)
+	case nil:
+		b.WriteString("null")
+	case string:
+		writeJSONString(b, x)
+	case bool:
+		b.WriteString(strconv.FormatBool(x))
+	case int32:
+		b.WriteString(strconv.FormatInt(int64(x), 10))
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			b.WriteString(`{"$numberDouble": "` + strconv.FormatFloat(x, 'g', -1, 64) + `"}`)
+			return
+		}
+		s := strconv.FormatFloat(x, 'g', -1, 64)
+		if !strings.ContainsAny(s, ".eE") {
+			s += ".0" // stays a double when read back
+		}
+		b.WriteString(s)
+	default:
+		j, err := json.Marshal(nested(v))
+		if err != nil {
+			writeJSONString(b, fmt.Sprint(v))
+			return
+		}
+		b.Write(j)
+	}
+}
+
+func writeJSONString(b *strings.Builder, s string) {
+	j, _ := json.Marshal(s)
+	b.Write(j)
 }
 
 // nested normalizes a value inside a document or array.
@@ -249,9 +312,10 @@ func plainKeys(d bson.D) bool {
 	return true
 }
 
-func (n *fieldNode) add(prefix string, d bson.D, depth int) {
+// add accumulates the fields of d under the path parent ("" = top level).
+func (n *fieldNode) add(parent string, d bson.D, depth int) {
 	for _, e := range d {
-		path := prefix + e.Key
+		path := db.JoinFieldPath(parent, e.Key)
 		c := n.child(e.Key, path)
 		fs := c.stats
 		fs.present++
@@ -263,13 +327,45 @@ func (n *fieldNode) add(prefix string, d bson.D, depth int) {
 			fs.first = e.Value
 		}
 		fs.types[typeName(e.Value)]++
-		if sub, ok := e.Value.(bson.D); ok && len(sub) > 0 && plainKeys(sub) && depth < maxFlatten {
+		// the key stays whole (rows are identified by it)
+		isKey := parent == "" && e.Key == "_id"
+		if sub, ok := e.Value.(bson.D); ok && len(sub) > 0 && depth < maxFlatten && !isKey {
 			c.objects++
-			c.add(path+".", sub, depth+1)
+			c.add(path, sub, depth+1)
 		} else {
 			c.opaque = true
 		}
 	}
+}
+
+// extendColumns adds the columns of the fields of d that cols lack
+// (documents read after the first ones): new nested documents become
+// dotted columns like in inferColumns.
+func extendColumns(cols []db.Column, d bson.D) []db.Column {
+	have := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		have[c.Name] = true
+	}
+	var walk func(parent string, d bson.D, depth int)
+	walk = func(parent string, d bson.D, depth int) {
+		for _, e := range d {
+			p := db.JoinFieldPath(parent, e.Key)
+			if have[p] {
+				continue // shown whole (JSON, mixed types)
+			}
+			sub, isDoc := e.Value.(bson.D)
+			isKey := parent == "" && e.Key == "_id"
+			if isDoc && len(sub) > 0 && depth < maxFlatten && !isKey {
+				walk(p, sub, depth+1)
+				continue
+			}
+			k := kindOf(e.Value)
+			cols = append(cols, db.Column{Name: p, Kind: k, DBType: strings.ToUpper(typeName(e.Value)), Nullable: true})
+			have[p] = true
+		}
+	}
+	walk("", d, 0)
+	return cols
 }
 
 // flat reports whether a field is shown as the columns of its sub-fields:
@@ -313,11 +409,8 @@ func inferColumns(docs []bson.D) ([]db.Column, []*fieldStats) {
 // lookup returns the value of a column in a document: a top-level field
 // named like the column, else the dotted path.
 func lookup(d bson.D, path string) (any, bool) {
-	if v, ok := field(d, path); ok {
-		return v, true
-	}
 	cur := d
-	parts := strings.Split(path, ".")
+	parts := db.SplitFieldPath(path)
 	for i, p := range parts {
 		v, ok := field(cur, p)
 		if !ok {
@@ -337,20 +430,28 @@ func lookup(d bson.D, path string) (any, bool) {
 
 // setPath sets a dotted path in a document, creating the parents.
 func setPath(d bson.D, path string, v any) bson.D {
-	head, rest, nested := strings.Cut(path, ".")
+	return setSegs(d, db.SplitFieldPath(path), v)
+}
+
+// setSegs sets the field of a list of names.
+func setSegs(d bson.D, segs []string, v any) bson.D {
+	if len(segs) == 0 {
+		return d
+	}
+	head, rest := segs[0], segs[1:]
 	for i, e := range d {
 		if e.Key == head {
-			if nested {
+			if len(rest) > 0 {
 				sub, _ := e.Value.(bson.D)
-				d[i].Value = setPath(sub, rest, v)
+				d[i].Value = setSegs(sub, rest, v)
 			} else {
 				d[i].Value = v
 			}
 			return d
 		}
 	}
-	if nested {
-		return append(d, bson.E{Key: head, Value: setPath(bson.D{}, rest, v)})
+	if len(rest) > 0 {
+		return append(d, bson.E{Key: head, Value: setSegs(bson.D{}, rest, v)})
 	}
 	return append(d, bson.E{Key: head, Value: v})
 }

@@ -96,12 +96,21 @@ func (s *session) ApplyChanges(ctx context.Context, ref db.ObjectRef, changes []
 				return fail(err)
 			}
 			// the stored values give the BSON types to keep
+			// (quoted names can't be projected: the whole document is read)
 			proj := bson.D{}
 			for _, cv := range ch.Values {
+				if !db.PlainFieldPath(cv.Column) {
+					proj = nil
+					break
+				}
 				proj = append(proj, bson.E{Key: cv.Column, Value: 1})
 			}
+			fo := options.FindOne()
+			if proj != nil {
+				fo.SetProjection(proj)
+			}
 			var cur bson.D
-			err = coll.FindOne(octx, f, options.FindOne().SetProjection(proj)).Decode(&cur)
+			err = coll.FindOne(octx, f, fo).Decode(&cur)
 			if errors.Is(err, mongo.ErrNoDocuments) {
 				return fail(fmt.Errorf("update row %d: no document matched (it was changed or deleted by someone else); nothing was saved", i+1))
 			}
@@ -115,7 +124,7 @@ func (s *session) ApplyChanges(ctx context.Context, ref db.ObjectRef, changes []
 			if err != nil {
 				return fail(fmt.Errorf("update row %d, %w", i+1, err))
 			}
-			if len(upd) == 0 {
+			if len(ch.Values) == 0 {
 				continue
 			}
 			r, err := coll.UpdateOne(octx, f, upd)

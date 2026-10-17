@@ -212,6 +212,16 @@ func Targets() map[string]Target {
 		Sleep:   `db.big.find({$where: "sleep(100) || true"})`,
 		Loader:  mongoLoader(true),
 	}
+	// keyFile replica set with TLS required and access control (SCRAM)
+	t["mongo-secure"] = Target{
+		Name: "mongo-secure",
+		Config: db.Config{Driver: "mongodb", Host: "localhost", Port: 55019, Database: "lumino_test", User: "lumino", Password: "lumino",
+			TLS: db.TLSConfig{Mode: "verify-full", CAFile: filepath.Join(sqliteDir, "certs", "ca.crt")}},
+		Schema:  "lumino_test",
+		BigRows: 3000,
+		Sleep:   `db.big.find({$where: "sleep(100) || true"})`,
+		Loader:  mongoLoader(true),
+	}
 	t["ferretdb"] = Target{
 		Name:    "ferretdb",
 		Config:  db.Config{Driver: "mongodb", Host: "127.0.0.1", Port: 55018, Database: "lumino_test", User: "lumino", Password: "lumino"},

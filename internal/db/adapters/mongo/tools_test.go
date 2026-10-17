@@ -178,3 +178,53 @@ func TestAdminStatements(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotedPaths(t *testing.T) {
+	l := &language{}
+	orig := docNode("", bson.D{{Key: "_id", Value: bson.D{{Key: "b", Value: int32(2)}, {Key: "a", Value: int32(1)}}},
+		{Key: "a.b", Value: int32(5)}, {Key: "n", Value: bson.D{{Key: "$e", Value: int32(1)}, {Key: "k", Value: int32(1)}}}})
+	text := l.FormatDocument(orig)
+	edited := strings.Replace(strings.Replace(text, `"a.b": 5`, `"a.b": 6`, 1), `$e: 1,`, "", 1)
+	key, vals, err := l.DocumentChanges(orig, edited)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, edited)
+	}
+	if key[0].Value != db.Raw("{b: 2, a: 1}") {
+		t.Fatalf("composite key %v", key[0].Value)
+	}
+	got := map[string]any{}
+	for _, v := range vals {
+		got[v.Column] = v.Value
+	}
+	if got[`"a.b"`] != db.Raw("6") || got[`n."$e"`] != db.Unset || len(got) != 2 {
+		t.Fatalf("changes %v", got)
+	}
+	upd, err := updateDoc(vals, noLike)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{$replaceWith: {$setField: {field: "a.b", input: "$$ROOT", value: {$literal: 6}}}}, ` +
+		`{$replaceWith: {$setField: {field: "n", input: "$$ROOT", value: {$cond: [{$eq: [{$type: {$getField: {field: "n", input: "$$ROOT"}}}, "object"]}, ` +
+		`{$unsetField: {field: {$literal: "$e"}, input: {$getField: {field: "n", input: "$$ROOT"}}}}, {$getField: {field: "n", input: "$$ROOT"}}]}}}}]`
+	if shellLit(upd) != want {
+		t.Fatalf("pipeline\n%s\nwant\n%s", shellLit(upd), want)
+	}
+	// plain paths keep $set / $unset
+	upd, _ = updateDoc([]db.ColValue{{Column: "n.k", Kind: db.KindInt, Value: int64(2)}}, noLike)
+	if shellLit(upd) != `{$set: {"n.k": 2}}` {
+		t.Fatalf("plain update %s", shellLit(upd))
+	}
+	if p := l.RenderChange(db.ObjectRef{Name: "c"}, db.Change{Op: db.OpUpdate, Key: key, Values: vals}); !strings.HasPrefix(p, "db.c.updateOne({_id: {b: 2, a: 1}}, [{$replaceWith:") {
+		t.Fatalf("render %s", p)
+	}
+	ins, err := insertDoc([]db.ColValue{{Column: `x."y.z"`, Kind: db.KindInt, Value: int64(1)}}, noLike)
+	if err != nil || shellLit(ins) != `{x: {"y.z": 1}}` {
+		t.Fatalf("insert %s %v", shellLit(ins), err)
+	}
+	if cell(bson.D{{Key: "b", Value: int32(1)}, {Key: "a", Value: 2.0}}) != `{"b": 1, "a": 2.0}` {
+		t.Fatalf("ordered cell %v", cell(bson.D{{Key: "b", Value: int32(1)}, {Key: "a", Value: 2.0}}))
+	}
+	if back, _ := toBSON(`{"b": 1, "a": 2.0}`, db.KindJSON, nil); shellLit(back) != "{b: 1, a: Double(2)}" {
+		t.Fatalf("back %s", shellLit(back))
+	}
+}

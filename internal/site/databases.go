@@ -290,7 +290,7 @@ SELECT n FROM customer_count;`,
 		Notes: []string{
 			"MongoDB 5.0 or newer. Transactions need a replica set or a sharded cluster.",
 			"Read-only sessions are enforced by Lumino (every statement is parsed and classified), MongoDB has no server-side read-only session.",
-			"Table columns come from the first 1000 documents of a result; the tree and JSON views show every field of every document.",
+			"Field names with dots or a leading $ and composite _id documents are edited too (update pipelines with $setField / $unsetField, MongoDB 5.0+).",
 		},
 		ExampleTitle: "MongoDB shell",
 		Example: `db.orders.find({status: "shipped", total: {$gte: 100}}).sort({created: -1}).limit(50);

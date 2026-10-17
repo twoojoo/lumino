@@ -25,6 +25,13 @@ certs() {
   )
 }
 
+# mongokey is the internal authentication key of mongo-secure.
+mongokey() {
+  [ -f "$dev/certs/mongo.key" ] && return
+  openssl rand -base64 756 > "$dev/certs/mongo.key"
+  chmod 644 "$dev/certs/mongo.key" # copied with mode 400 inside the container
+}
+
 sshkey() {
   [ -f "$dev/ssh/id_ed25519" ] && return
   ssh-keygen -q -t ed25519 -N "" -C lumino-test -f "$dev/ssh/id_ed25519"
@@ -36,6 +43,7 @@ case "${1:-up}" in
   up)
     shift || true
     certs
+    mongokey
     sshkey
     docker compose up -d --wait --wait-timeout 600 "$@" 2>&1 | grep -v "Waiting" || true
     docker compose ps --format 'table {{.Service}}\t{{.Status}}'

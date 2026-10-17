@@ -30,8 +30,10 @@ test:
 
 # conformance suite of every adapter + headless UI tests (screenshots in
 # .dev/shots) against the development databases (make db-up)
+# the output of the failed tests is kept in .dev/test-int-failures.txt
 test-int:
-	go test -p 1 -tags '$(DEV_TAGS),integration' -count=1 -timeout 1200s ./internal/...
+	go test -json -p 1 -tags '$(DEV_TAGS),integration' -count=1 -timeout 1200s ./internal/... 2>&1 | \
+		go run ./scripts/testreport -out .dev/test-int-failures.txt
 
 test-ui:
 	go test -tags '$(DEV_TAGS),integration' -count=1 -timeout 600s ./internal/ui/...
