@@ -1,0 +1,45 @@
+{{define "content"}}{{with .DB}}
+<h1>{{.Name}} GUI client: Lumino DB</h1>
+{{range .Intro}}<p>{{.}}</p>
+{{end}}
+<p class="actions"><a class="btn" href="{{$.Download}}">Download Lumino</a> <span class="muted">free, for Linux, Windows and macOS</span></p>
+
+<h2>What you get with {{.Name}}</h2>
+<ul>
+{{range .Highlights}}<li>{{.}}</li>
+{{end}}</ul>
+{{if .Notes}}
+<h2>Good to know</h2>
+<ul>
+{{range .Notes}}<li>{{.}}</li>
+{{end}}</ul>
+{{end}}
+<h2>{{.ExampleTitle}}</h2>
+<p>A script you can paste in the Lumino console and run with Ctrl+Shift+Enter, or run the statement at the caret with Ctrl+Enter (Cmd on macOS):</p>
+<pre><code>{{.Example}}</code></pre>
+
+<h2>Connection details</h2>
+<table>
+  <tbody>
+    <tr><th>Driver</th><td><a href="{{.LibURL}}">{{.Lib}}</a> (pure Go, built into Lumino)</td></tr>
+    {{if .Port}}<tr><th>Default port</th><td>{{.Port}}</td></tr>{{end}}
+    <tr><th>{{.DBLabel}}</th><td>{{if .Port}}chosen in the connection form{{else}}a database file on disk{{end}}</td></tr>
+    <tr><th>Connection URLs</th><td>{{range $i, $s := .Schemes}}{{if $i}}, {{end}}<code>{{$s}}://</code>{{end}}</td></tr>
+    <tr><th>Supported</th><td>{{range $i, $s := .Supported}}{{if $i}} · {{end}}{{$s}}{{end}}</td></tr>
+    {{if .Missing}}<tr><th>Not available</th><td>{{range $i, $s := .Missing}}{{if $i}} · {{end}}{{$s}}{{end}}</td></tr>{{end}}
+  </tbody>
+</table>
+
+<figure class="shot"><img src="{{rel "img/table.png"}}" width="1440" height="900" loading="lazy" alt="Lumino table view with inline edits"><figcaption>Table view: filter, sort and edit rows, then review the SQL before saving.</figcaption></figure>
+
+<h2>Also in Lumino</h2>
+<p>SQL console with completion and history, streaming data grid, export to CSV/JSON/SQL/Markdown, SSH tunnels, passwords in the OS
+keyring, read-only and protected production connections, optional AI assistant with read-only tools.
+See the <a href="{{rel ""}}">features</a> or <a href="{{rel "lumino-vs-dbeaver/"}}">how Lumino compares to DBeaver</a>.</p>
+
+<h2>Other databases</h2>
+<ul class="dbs">
+{{range .Related}}<li><a href="{{rel (print "databases/" .Slug "/")}}">{{.Name}}</a></li>
+{{end}}<li><a href="{{rel "databases/"}}">All databases</a></li>
+</ul>
+{{end}}{{end}}

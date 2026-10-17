@@ -1,0 +1,57 @@
+# {{.Name}}
+
+> {{.Summary}}
+
+Website: {{abs ""}} · Download: {{.Download}} · Source: {{.Repo}} · License: GPL-3.0-or-later
+
+## Features
+{{range .Features}}
+### {{.Title}}
+
+{{.Text}}
+{{end}}
+## FAQ
+{{range .FAQ}}
+**{{.Q}}**
+{{.A}}
+{{end}}
+## Lumino vs DBeaver
+
+Source: {{abs "lumino-vs-dbeaver/"}}
+
+| Topic | Lumino | DBeaver |
+|---|---|---|
+{{- range .Compare}}
+| {{.Topic}} | {{.Lumino}} | {{.Other}} |
+{{- end}}
+{{range .DBeaverQA}}
+**{{.Q}}**
+{{.A}}
+{{end}}
+## Supported databases
+{{range .DBs}}
+### {{.Name}}
+
+Source: {{abs (print "databases/" .Slug "/")}}
+
+{{range .Intro}}{{.}}
+
+{{end -}}
+Driver: {{.Lib}} ({{.LibURL}}), built in.{{if .Port}} Default port: {{.Port}}.{{end}} Connection URL schemes: {{range $i, $s := .Schemes}}{{if $i}}, {{end}}{{$s}}://{{end}}.
+
+Supported: {{range $i, $s := .Supported}}{{if $i}}; {{end}}{{$s}}{{end}}.
+{{- if .Missing}}
+Not available: {{range $i, $s := .Missing}}{{if $i}}; {{end}}{{$s}}{{end}}.{{end}}
+{{range .Highlights}}
+- {{.}}
+{{- end}}
+{{- range .Notes}}
+- Note: {{.}}
+{{- end}}
+
+{{.ExampleTitle}}:
+
+```sql
+{{.Example}}
+```
+{{end}}

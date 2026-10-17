@@ -1,0 +1,59 @@
+{{define "content"}}
+<section class="hero">
+  <img class="logo" src="{{rel "img/logo.png"}}" width="112" height="112" alt="Lumino DB logo">
+  <h1>{{.Tagline}}</h1>
+  <p class="lead">Query, browse and edit PostgreSQL, MySQL, SQLite, SQL Server, Oracle, ClickHouse, Cassandra and more from one
+  native app. No Electron, no JVM, no drivers to install. Free and open source for Linux, Windows and macOS.</p>
+  <p class="actions">
+    <a class="btn" href="{{.Download}}">Download Lumino</a>
+    <a class="btn ghost" href="{{.Repo}}">Source on GitHub</a>
+  </p>
+  <p class="muted">Linux: AppImage, .deb, .rpm, .tar.gz · Windows 10+: x64 and ARM64 · macOS 12+: Apple silicon and Intel</p>
+</section>
+
+<figure class="shot hero-shot">
+  <img src="{{rel "img/console.png"}}" width="1440" height="900" fetchpriority="high" alt="Lumino SQL console with a query and its results in the data grid">
+</figure>
+
+<section>
+  <h2>Features</h2>
+  <div class="grid">
+  {{range .Features}}<article class="card"><h3>{{.Title}}</h3><p>{{.Text}}</p></article>
+  {{end}}</div>
+</section>
+
+<section>
+  <h2>Screenshots</h2>
+  <div class="shots">
+  {{range .Shots}}<figure class="shot"><a href="{{rel (print "img/" .File)}}"><img src="{{rel (print "img/" .File)}}" width="1440" height="900" loading="lazy" alt="{{.Alt}}"></a><figcaption>{{.Alt}}</figcaption></figure>
+  {{end}}</div>
+</section>
+
+<section>
+  <h2>Supported databases</h2>
+  <p>Every driver is pure Go and compiled into Lumino. All adapters pass the same conformance suite: metadata, DDL, streaming,
+  cancel, transactions, read-only sessions, row editing and type round trips.</p>
+  <ul class="dbs">
+  {{range .DBs}}<li><a href="{{rel (print "databases/" .Slug "/")}}">{{.Name}}</a></li>
+  {{end}}</ul>
+</section>
+
+<section>
+  <h2>How it compares</h2>
+  <table>
+    <thead><tr><th></th><th>Lumino</th><th>DBeaver CE</th><th>Beekeeper Studio CE</th><th>TablePlus</th><th>DataGrip</th></tr></thead>
+    <tbody>
+      <tr><th>Runtime</th><td>native (Go, GPU UI)</td><td>JVM (Eclipse)</td><td>Electron</td><td>native</td><td>JVM</td></tr>
+      <tr><th>License</th><td>GPL-3.0</td><td>Apache-2.0</td><td>GPL-3.0</td><td>proprietary</td><td>proprietary</td></tr>
+      <tr><th>Price</th><td>free</td><td>free</td><td>free</td><td>paid</td><td>paid</td></tr>
+    </tbody>
+  </table>
+  <p><a href="{{rel "lumino-vs-dbeaver/"}}">Lumino vs DBeaver in detail →</a></p>
+</section>
+
+<section>
+  <h2>FAQ</h2>
+  {{range .FAQ}}<details><summary>{{.Q}}</summary><p>{{.A}}</p></details>
+  {{end}}
+</section>
+{{end}}
