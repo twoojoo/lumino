@@ -29,6 +29,17 @@ type session struct {
 	cur      *result
 	ms       *mongo.Session
 	readOnly bool
+	guard    db.Guard
+	js       *jsShell // runtime of dynamic statements (created on first use)
+}
+
+var _ db.Guarded = (*session)(nil)
+
+// SetGuard sets the check of the operations of dynamic statements.
+func (s *session) SetGuard(g db.Guard) {
+	s.mu.Lock()
+	s.guard = g
+	s.mu.Unlock()
 }
 
 func (s *session) db(name string) *mongo.Database {
@@ -50,12 +61,11 @@ func (s *session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	if len(args) > 0 {
 		return nil, errors.New("MongoDB statements take no bind parameters")
 	}
-	st, err := parseStatement(strings.TrimSpace(stmt))
-	if err != nil {
-		return nil, mapError(err)
-	}
-	if k := classify(st); k.Modifies() && s.readOnly {
-		return nil, fmt.Errorf("read-only session: %s statements are refused", k)
+	st, perr := parseStatement(strings.TrimSpace(stmt))
+	if perr == nil {
+		if k := classify(st); k.Modifies() && s.readOnly {
+			return nil, fmt.Errorf("read-only session: %s statements are refused", k)
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
@@ -65,7 +75,15 @@ func (s *session) Execute(ctx context.Context, stmt string, args ...any) (db.Res
 	if ms != nil {
 		ctx = mongo.NewSessionContext(ctx, ms)
 	}
-	res, err := s.run(ctx, st)
+	var res *result
+	var err error
+	if perr == nil {
+		res, err = s.run(ctx, st)
+	} else {
+		// variables, loops, functions…: JavaScript, each operation checked
+		// while it runs
+		res, err = s.shell().run(ctx, stmt)
+	}
 	if err != nil {
 		cancel()
 		return nil, mapError(err)
@@ -80,6 +98,9 @@ func (s *session) Cancel() {
 	defer s.mu.Unlock()
 	if s.cancel != nil {
 		s.cancel()
+	}
+	if s.js != nil {
+		s.js.interrupt()
 	}
 }
 
@@ -163,6 +184,42 @@ type result struct {
 	noRows   bool
 	cancel   context.CancelFunc
 	last     []bson.D // documents of the rows of the last Fetch
+	info     bson.D   // result document of a write (insertedId, matchedCount…)
+}
+
+// next returns the next document (for scripts iterating a result).
+func (r *result) next(ctx context.Context) (bson.D, bool, error) {
+	if len(r.buf) > 0 {
+		d := r.buf[0]
+		r.buf = r.buf[1:]
+		return d, true, nil
+	}
+	if r.cur == nil {
+		return nil, false, nil
+	}
+	if !r.cur.Next(ctx) {
+		err := r.cur.Err()
+		r.closeCur()
+		return nil, false, err
+	}
+	var d bson.D
+	if err := bson.Unmarshal(r.cur.Current, &d); err != nil {
+		return nil, false, err
+	}
+	return d, true, nil
+}
+
+// hasNext reports whether next would return a document (it reads the
+// next batch when needed).
+func (r *result) hasNext(ctx context.Context) (bool, error) {
+	if len(r.buf) > 0 {
+		return true, nil
+	}
+	d, ok, err := r.next(ctx)
+	if ok {
+		r.buf = append(r.buf, d)
+	}
+	return ok, err
 }
 
 var _ db.DocumentResult = (*result)(nil)
@@ -754,10 +811,22 @@ func (s *session) collMethod(ctx context.Context, st *statement) (*result, error
 		}
 		n, _ := argInt(fieldOr(d, "n"))
 		msg := "insertedId: " + strings.Join(ids, ", ")
+		info := bson.D{{Key: "acknowledged", Value: true}}
+		if c.name == "insertOne" || len(list) == 1 && c.name == "insert" {
+			info = append(info, bson.E{Key: "insertedId", Value: fieldOr(list[0].(bson.D), "_id")})
+		} else {
+			idList := bson.A{}
+			for _, d := range list {
+				idList = append(idList, fieldOr(d.(bson.D), "_id"))
+			}
+			info = append(info, bson.E{Key: "insertedIds", Value: idList})
+		}
 		if len(ids) > 1 {
 			msg = "insertedIds: " + strings.Join(ids, ", ")
 		}
-		return written(n, msg), nil
+		r := written(n, msg)
+		r.info = info
+		return r, nil
 	case "updateOne", "updateMany", "replaceOne", "update":
 		f, err := argDoc(c, 0, "the filter")
 		if err != nil {
@@ -804,15 +873,19 @@ func (s *session) collMethod(ctx context.Context, st *statement) (*result, error
 		matched, _ := argInt(fieldOr(d, "n"))
 		modified, _ := argInt(fieldOr(d, "nModified"))
 		msgs := []string{fmt.Sprintf("matched: %d, modified: %d", matched, modified)}
+		info := bson.D{{Key: "acknowledged", Value: true}, {Key: "matchedCount", Value: matched}, {Key: "modifiedCount", Value: modified}}
 		if up, ok := field(d, "upserted"); ok {
 			if a, ok := up.(bson.A); ok && len(a) > 0 {
 				if e, ok := a[0].(bson.D); ok {
 					id, _ := field(e, "_id")
 					msgs = append(msgs, "upsertedId: "+shellLit(id))
+					info = append(info, bson.E{Key: "upsertedId", Value: id})
 				}
 			}
 		}
-		return written(modified, msgs...), nil
+		r := written(modified, msgs...)
+		r.info = info
+		return r, nil
 	case "deleteOne", "deleteMany", "remove":
 		f, err := argDoc(c, 0, "the filter")
 		if err != nil {
@@ -848,7 +921,9 @@ func (s *session) collMethod(ctx context.Context, st *statement) (*result, error
 			return nil, err
 		}
 		n, _ := argInt(fieldOr(d, "n"))
-		return written(n, fmt.Sprintf("deleted: %d", n)), nil
+		r := written(n, fmt.Sprintf("deleted: %d", n))
+		r.info = bson.D{{Key: "acknowledged", Value: true}, {Key: "deletedCount", Value: n}}
+		return r, nil
 	case "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete", "findAndModify":
 		cmd := bson.D{{Key: "findAndModify", Value: coll}}
 		var opts bson.D

@@ -262,6 +262,10 @@ func mapError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	var de *db.Error
+	if errors.As(err, &de) {
+		return de // already mapped (scripts)
+	}
 	var pe *parseError
 	if errors.As(err, &pe) {
 		return &db.Error{Msg: pe.msg, PositionBytes: true, Position: pe.pos + 1, Err: err}

@@ -31,7 +31,10 @@ driver-neutral database API with one adapter per database.
   `internal/db/adapters/*`: postgres, cockroach, mysql (mysql/mariadb/tidb), sqlite (modernc), mssql,
   oracle (go-ora), clickhouse, firebird, cassandra (gocql, native session), trino, mongo (mongo-go-driver v2,
   MongoDB 5.0+ and FerretDB: databases = schemas, collections/views, fields inferred by sampling; console language =
-  mongosh statements parsed in `shell.go` and run as server commands; `ChangeApplier` edits keep BSON types). All pure Go.
+  mongosh statements parsed in `shell.go` and run as server commands, anything else (variables, loops) runs in a
+  per-session goja runtime (`js.go`) whose operations are classified with their actual arguments and checked at run
+  time: read-only sessions refuse writes, `db.Guard` (console: confirmation on protected connections; AI: refusal)
+  decides the others; `ChangeApplier` edits keep BSON types). All pure Go.
 - `internal/ui`: Gio app. `editor.go`/`editbuf.go`/`completion.go`/`findbar.go` (SQL editor),
   `grid.go` (data grid), `console.go`, `tableview.go`, `sidebar.go`, `connform.go`, `conns.go`
   (connection state + metadata cache), `aipanel.go`. Document databases (`db.DocumentLanguage`, results with

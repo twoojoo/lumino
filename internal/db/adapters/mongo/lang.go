@@ -182,7 +182,14 @@ func (*language) LexLine(line string, st db.LexState) ([]sqlx.Token, db.LexState
 
 func (*language) Tokens(text string) []sqlx.Token { return tokens(text) }
 
-var keywords = map[string]bool{"db": true, "use": true, "show": true, "new": true, "await": true}
+var keywords = func() map[string]bool {
+	m := map[string]bool{}
+	for _, k := range strings.Fields(`db use show new await let const var function return if else for while do of in
+		break continue try catch finally throw typeof instanceof this async switch case default`) {
+		m[k] = true
+	}
+	return m
+}()
 
 func (*language) Keywords() map[string]bool { return keywords }
 
@@ -222,6 +229,19 @@ func (*language) Terminate(stmt string) string {
 		return stmt
 	}
 	return stmt + ";"
+}
+
+var _ db.RuntimeClassifier = (*language)(nil)
+
+// Dynamic reports statements that are scripts (variables, loops,
+// functions): their operations are checked while they run.
+func (*language) Dynamic(stmt string) bool {
+	s := strings.TrimSpace(stmt)
+	if s == "" {
+		return false
+	}
+	_, err := parseStatement(s)
+	return err != nil
 }
 
 func (*language) Classify(stmt string) db.StmtKind {

@@ -440,8 +440,13 @@ func (t *ConsoleTab) run(all bool) {
 		return
 	}
 	lang := t.ed.lang
+	// scripts (variables, loops…) can't be classified before they run:
+	// each of their operations goes through the session guard instead
 	worst := db.StmtRead
 	for _, s := range stmts {
+		if db.IsDynamic(lang, s.Text) {
+			continue
+		}
 		if k := lang.Classify(s.Text); k > worst {
 			worst = k
 		}
@@ -468,6 +473,48 @@ func (t *ConsoleTab) run(all bool) {
 		return
 	}
 	exec()
+}
+
+// runtimeGuard checks the operations of scripts while they run: writes
+// are refused on read-only connections and confirmed on protected ones
+// (in auto-commit mode); an allowed kind stays allowed for the rest of
+// the run. It is called on the session goroutine.
+func (t *ConsoleTab) runtimeGuard(manual bool) db.Guard {
+	a := t.a
+	protected, ro, name := a.connProtected(t.connID), a.connReadOnly(t.connID), t.cs().name()
+	approved := db.StmtKind(-1)
+	return func(ctx context.Context, kind db.StmtKind, desc string) error {
+		switch {
+		case !kind.Modifies():
+			return nil
+		case ro:
+			return fmt.Errorf("blocked: %s is read-only (%s operation: %s)", name, kind, desc)
+		case !protected || manual || kind <= approved:
+			return nil
+		}
+		answer := make(chan bool, 1)
+		a.post(func() {
+			msg := fmt.Sprintf("The script runs a %s operation on the protected connection %s:\n\n%s\n\nAuto-commit is on: changes are permanent. "+
+				"Allowing it also allows the next %s operations of this run.", kind, name, desc, kind)
+			c := newConfirm(a, "Script on production", msg, true, func(bool) { answer <- true })
+			c.onCancel = func() { answer <- false }
+			if kind == db.StmtDestructive {
+				c.typeName, c.prodCtx = name, name
+			}
+			c.okLabel = "Allow"
+			a.overlay = c
+		})
+		select {
+		case ok := <-answer:
+			if !ok {
+				return errors.New("not confirmed: the script was stopped")
+			}
+			approved = max(approved, kind)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func preview(stmts []sqlx.Statement) string {
@@ -510,8 +557,14 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 		connID := t.connID
 		schema := t.schema
 		lang := t.ed.lang
+		if g, ok := s.(db.Guarded); ok {
+			g.SetGuard(t.runtimeGuard(manual))
+		}
 		go func() {
 			defer cancel()
+			if g, ok := s.(db.Guarded); ok {
+				defer g.SetGuard(nil)
+			}
 			ddl := false
 			if manual && !s.TxActive() {
 				if err := s.Begin(ctx); err != nil && !errors.Is(err, db.ErrNotSupported) {

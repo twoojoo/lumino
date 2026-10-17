@@ -149,3 +149,29 @@ func SQLDialect(l Language) (Dialect, bool) {
 	}
 	return nil, false
 }
+
+// RuntimeClassifier is implemented by languages with statements that can
+// only be classified while they run (scripts with variables and loops):
+// Dynamic reports them. Classify still returns a write for them (callers
+// that can't check at run time stay conservative); a console runs them on
+// a session whose Guard sees every operation (read-only sessions refuse
+// writes by themselves).
+type RuntimeClassifier interface {
+	Dynamic(stmt string) bool
+}
+
+// Guard decides at run time whether an operation of a dynamic statement
+// may run: kind is its classification, desc the operation as a statement
+// of the language. A non-nil error stops the script.
+type Guard func(ctx context.Context, kind StmtKind, desc string) error
+
+// Guarded is implemented by sessions running dynamic statements.
+type Guarded interface {
+	SetGuard(Guard)
+}
+
+// IsDynamic reports whether stmt is a dynamic statement of l.
+func IsDynamic(l Language, stmt string) bool {
+	rc, ok := l.(RuntimeClassifier)
+	return ok && rc.Dynamic(stmt)
+}

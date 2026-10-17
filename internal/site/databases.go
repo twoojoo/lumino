@@ -279,6 +279,7 @@ SELECT n FROM customer_count;`,
 			"Table, tree and JSON views of the documents: nested documents become address.city columns in the table, the tree and the text show every field.",
 			"Document editing by _id: edit a cell, a field of the tree or the whole document as text — changes are applied by path with $set and $unset, reviewed before they run, and values keep their BSON type.",
 			"Statements are classified before they run: deleteMany({}), drop() and $out need the typed confirmation on protected connections, read-only connections refuse writes.",
+			"JavaScript in the console — variables, loops, functions, cursor.forEach() — with the result of a script streamed into the grid; every operation a script performs is checked while it runs, so read-only connections refuse its writes and protected ones confirm them.",
 			"Transactions on replica sets and sharded clusters, SCRAM, X.509 and AWS IAM authentication, TLS and SSH tunnels.",
 		},
 		Notes: []string{

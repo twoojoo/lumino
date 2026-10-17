@@ -347,9 +347,11 @@ func RunDocuments(t *testing.T, tg Target) {
 
 	t.Run("Errors", func(t *testing.T) {
 		s := session(t, conn)
+		// not a statement of the shell syntax: run as JavaScript, which
+		// reports the line and column
 		_, err := s.Execute(ctx, "db.customers.find({name: })")
 		e := db.AsError(err)
-		if err == nil || e.Msg == "" || e.Position != len("db.customers.find({name: ")+1 {
+		if err == nil || !strings.HasPrefix(e.Msg, "SyntaxError: Unexpected token") || e.Line != 1 || e.Column != len("db.customers.find({name: ")+1 {
 			t.Fatalf("syntax error: %+v", e)
 		}
 		_, err = s.Execute(ctx, "db.customers.find({name: {$nosuchop: 1}})")
@@ -571,6 +573,147 @@ func RunDocuments(t *testing.T, tg Target) {
 		if err != nil || len(rows2) != 5 || len(cols) != 2 || rows2[0][0] != int64(tg.BigRows-1) {
 			t.Fatalf("%s: %v %d rows %v", q, cols, len(rows2), err)
 		}
+	})
+
+	t.Run("Shell", func(t *testing.T) {
+		s := session(t, conn)
+		rc, ok := lang.(db.RuntimeClassifier)
+		if !ok {
+			t.Fatal("the language has no dynamic statements")
+		}
+		run := func(src string) ([]db.Column, []db.Row, []string) {
+			t.Helper()
+			if !rc.Dynamic(src) {
+				t.Fatalf("not dynamic: %s", src)
+			}
+			res, err := s.Execute(ctx, src)
+			if err != nil {
+				t.Fatalf("%s: %v", src, err)
+			}
+			defer res.Close()
+			cols := res.Columns()
+			var rows []db.Row
+			for cols != nil {
+				r, more, err := res.Fetch(ctx, 700)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows = append(rows, r...)
+				if !more {
+					break
+				}
+			}
+			return cols, rows, res.Messages()
+		}
+		// variables survive between statements; loops write documents
+		run(`let base = 9300`)
+		_, _, msgs := run(`for (let i = 0; i < 5; i++) { db.shell_t.insertOne({_id: base + i, sq: i * i, at: new Date()}) }
+print("inserted", db.shell_t.countDocuments({}))`)
+		if len(msgs) != 1 || msgs[0] != "inserted 5" {
+			t.Fatalf("print: %v", msgs)
+		}
+		// cursor iteration in the script
+		_, rows, _ := run(`let total = 0; db.shell_t.find({sq: {$gt: 0}}).forEach(d => { total += d.sq }); total`)
+		if len(rows) != 1 || rows[0][0] != int64(30) {
+			t.Fatalf("forEach: %v", rows)
+		}
+		_, rows, _ = run(`const c = db.shell_t.find().sort({_id: 1}); const first = c.next(); [first._id, c.hasNext(), db.shell_t.findOne({_id: base + 4}).sq]`)
+		if len(rows) != 3 || rows[0][0] != int64(9300) || rows[1][0] != true || rows[2][0] != int64(16) {
+			t.Fatalf("next/hasNext/findOne: %v", rows)
+		}
+		// a cursor as the value streams like a find
+		cols, rows, _ := run(`const big = db.big.find({}, {label: 1}).sort({_id: 1}); big`)
+		if len(rows) != tg.BigRows || len(cols) != 2 || rows[0][0] != int64(0) {
+			t.Fatalf("streamed cursor: %d rows %v", len(rows), cols)
+		}
+		// write results, getSiblingDB, runCommand
+		_, rows, _ = run(`const r = db.shell_t.updateMany({sq: {$lt: 5}}, {$set: {small: true}}); [r.matchedCount, r.modifiedCount,
+			db.getSiblingDB("admin").runCommand({ping: 1}).ok, db.getName()]`)
+		if len(rows) != 4 || rows[0][0] != int64(3) || rows[1][0] != int64(3) || rows[3][0] != tg.Schema {
+			t.Fatalf("results: %v", rows)
+		}
+		_, rows, _ = run(`db.shell_t.aggregate([{$group: {_id: null, s: {$sum: "$sq"}}}]).toArray()[0].s + NumberLong(1)`)
+		if len(rows) != 1 || rows[0][0] != int64(31) {
+			t.Fatalf("aggregate: %v", rows)
+		}
+		// errors: JavaScript and server ones, with their line
+		_, err := s.Execute(ctx, "let a = 1\nundefinedFn()")
+		if e := db.AsError(err); err == nil || e.Line != 2 {
+			t.Fatalf("script error: %+v", e)
+		}
+		_, err = s.Execute(ctx, `for (const x of [1]) db.shell_t.insertOne({_id: base})`)
+		if err == nil || !strings.Contains(db.AsError(err).Msg, "duplicate key") && !strings.Contains(db.AsError(err).Msg, "Duplicate key") {
+			t.Fatalf("server error: %v", err)
+		}
+		// the guard sees every write with its actual arguments
+		var seen []string
+		s.(db.Guarded).SetGuard(func(_ context.Context, k db.StmtKind, desc string) error {
+			seen = append(seen, desc)
+			if k == db.StmtDestructive {
+				return errors.New("refused by the test guard")
+			}
+			return nil
+		})
+		run(`for (const id of [base, base + 1]) db.shell_t.updateOne({_id: id}, {$set: {seen: true}})`)
+		if _, err := s.Execute(ctx, `if (true) db.shell_t.deleteMany({})`); err == nil || !strings.Contains(err.Error(), "refused by the test guard") {
+			t.Fatalf("guard: %v", err)
+		}
+		if len(seen) != 3 || seen[0] != `db.shell_t.updateOne({_id: 9300}, {$set: {seen: true}})` || seen[2] != "db.shell_t.deleteMany({})" {
+			t.Fatalf("guard calls: %q", seen)
+		}
+		s.(db.Guarded).SetGuard(nil)
+		// a read-only session refuses writes of scripts, reads go on
+		if err := s.SetReadOnly(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range []string{`let n = 1; db.shell_t.insertOne({_id: n})`, `const c2 = db.getCollection("shell_t"); c2.drop()`,
+			`db.shell_t.aggregate([{$out: "x"}]).toArray()`, `db.runCommand({drop: "shell_t"})`, `db.shell_t.aggregate([{$merge: {into: "y"}}])`} {
+			if res, err := s.Execute(ctx, w); err == nil {
+				res.Close()
+				t.Errorf("read-only session ran %s", w)
+			} else if !strings.Contains(err.Error(), "read-only") {
+				t.Errorf("%s: %v", w, err)
+			}
+		}
+		if _, rows, _ := run(`let k = db.shell_t.countDocuments({}); k`); rows[0][0] != int64(5) {
+			t.Fatalf("read-only reads: %v", rows)
+		}
+		if err := s.SetReadOnly(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		// cancel stops loops and server operations
+		done := make(chan error, 1)
+		go func() {
+			res, err := s.Execute(ctx, "let spins = 0; while (true) { spins++ }")
+			if err == nil {
+				res.Close()
+			}
+			done <- err
+		}()
+		time.Sleep(300 * time.Millisecond)
+		s.Cancel()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("cancelled loop reported success")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("cancel didn't stop the loop")
+		}
+		// transactions span statements of scripts
+		if caps.Transactions {
+			if err := s.Begin(ctx); err != nil {
+				t.Fatal(err)
+			}
+			run(`for (let i = 0; i < 3; i++) db.shell_t.insertOne({_id: 9400 + i})`)
+			if err := s.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, rows, _ := run(`let after = db.shell_t.countDocuments({_id: {$gte: 9400}}); after`); rows[0][0] != int64(0) {
+				t.Fatalf("rolled back script writes: %v", rows)
+			}
+		}
+		run(`let cleanup = db.shell_t.drop(); cleanup`)
 	})
 
 	t.Run("Script", func(t *testing.T) {
