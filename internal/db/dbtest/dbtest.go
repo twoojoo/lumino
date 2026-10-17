@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // Target is one database under test.
@@ -23,6 +22,9 @@ type Target struct {
 	Name    string
 	Config  db.Config
 	Fixture string // SQL script creating the test objects (idempotent)
+	// Loader creates the test objects instead of Fixture (databases whose
+	// language has no scripts of DDL statements).
+	Loader func(ctx context.Context, c db.Conn) error
 	// Schema holding the fixture ("" for databases without schemas).
 	Schema  string
 	Catalog string
@@ -117,7 +119,12 @@ func Prepare(t *testing.T, tg Target) db.Conn {
 	}
 	t.Cleanup(func() { conn.Close() })
 	t.Logf("%s: %s", tg.Name, conn.ServerVersion())
-	if err := Load(ctx, conn, tg.Fixture); err != nil {
+	if tg.Loader != nil {
+		err = tg.Loader(ctx, conn)
+	} else {
+		err = Load(ctx, conn, tg.Fixture)
+	}
+	if err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
 	if tg.AfterLoad != nil {
@@ -140,7 +147,24 @@ func Run(t *testing.T, tg Target) {
 	ctx := context.Background()
 	caps := conn.Caps()
 	cat := conn.Catalog()
-	d := conn.Dialect()
+	lang := conn.Language()
+	// d is nil for databases whose language is not SQL: the checks running
+	// SQL text skip there (sqlOnly)
+	d := db.DialectOf(conn)
+	sqlOnly := func(t *testing.T) {
+		t.Helper()
+		if d == nil {
+			t.Skip("needs SQL")
+		}
+	}
+	countOf := func(t *testing.T, ref db.ObjectRef) string {
+		t.Helper()
+		q, err := lang.Count(ref, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
 
 	t.Run("Ping", func(t *testing.T) {
 		if err := conn.Ping(ctx); err != nil {
@@ -297,6 +321,7 @@ func Run(t *testing.T, tg Target) {
 		if tg.NoDDLRoundTrip {
 			t.Skip("not supported")
 		}
+		sqlOnly(t)
 		ref := tg.ref("ddl_rt")
 		before, err := cat.Table(ctx, ref)
 		if err != nil {
@@ -333,9 +358,13 @@ func Run(t *testing.T, tg Target) {
 
 	t.Run("Streaming", func(t *testing.T) {
 		s := session(t, conn)
-		q := "SELECT * FROM " + d.Qualified(tg.ref("big"))
+		var bq db.BrowseQuery
 		if !tg.NoOrderBy {
-			q += " ORDER BY " + d.Quote(tg.id("id"))
+			bq.Sort = []db.SortKey{{Field: tg.id("id")}}
+		}
+		q, err := lang.Browse(tg.ref("big"), bq)
+		if err != nil {
+			t.Fatal(err)
 		}
 		res, err := s.Execute(ctx, q)
 		if err != nil {
@@ -364,7 +393,7 @@ func Run(t *testing.T, tg Target) {
 			t.Fatalf("streamed %d rows, want %d", total, tg.BigRows)
 		}
 		// the session is usable again
-		if v := scalar(t, s, "SELECT COUNT(*) FROM "+d.Qualified(tg.ref("customers"))); v == "" {
+		if v := scalar(t, s, countOf(t, tg.ref("customers"))); v == "" {
 			t.Fatal("count failed")
 		}
 	})
@@ -395,7 +424,7 @@ func Run(t *testing.T, tg Target) {
 		case <-time.After(15 * time.Second):
 			t.Fatal("cancel didn't stop the statement")
 		}
-		if v := scalar(t, s, "SELECT COUNT(*) FROM "+d.Qualified(tg.ref("customers"))); v == "" {
+		if v := scalar(t, s, countOf(t, tg.ref("customers"))); v == "" {
 			t.Fatal("session unusable after cancel")
 		}
 	})
@@ -406,7 +435,8 @@ func Run(t *testing.T, tg Target) {
 		}
 		s := session(t, conn)
 		other := session(t, conn)
-		count := "SELECT COUNT(*) FROM " + d.Qualified(tg.ref("customers"))
+		sqlOnly(t)
+		count := countOf(t, tg.ref("customers"))
 		n0 := scalar(t, s, count)
 		if err := s.Begin(ctx); err != nil {
 			t.Fatal(err)
@@ -458,6 +488,7 @@ func Run(t *testing.T, tg Target) {
 		if !caps.ReadOnlyTx {
 			t.Skip("no read-only sessions")
 		}
+		sqlOnly(t)
 		s := session(t, conn)
 		if err := s.SetReadOnly(ctx, true); err != nil {
 			t.Fatal(err)
@@ -487,12 +518,13 @@ func Run(t *testing.T, tg Target) {
 			t.Fatalf("current schema %q, want %q", cur, tg.Schema)
 		}
 		// unqualified names resolve in it
-		if v := scalar(t, s, "SELECT COUNT(*) FROM "+d.Quote(tg.id("customers"))); v == "" {
+		if v := scalar(t, s, countOf(t, db.ObjectRef{Name: tg.id("customers"), Type: db.ObjTable})); v == "" {
 			t.Fatal("unqualified query failed")
 		}
 	})
 
 	t.Run("Errors", func(t *testing.T) {
+		sqlOnly(t)
 		s := session(t, conn)
 		_, err := s.Execute(ctx, "SELECT * FROM "+d.Qualified(tg.ref("customers"))+" WHERE nosuchcolumn_xyz = 1")
 		if err == nil {
@@ -506,7 +538,7 @@ func Run(t *testing.T, tg Target) {
 			t.Errorf("error without position: %+v", e)
 		}
 		// the session survives errors (also inside a transaction)
-		if v := scalar(t, s, "SELECT COUNT(*) FROM "+d.Qualified(tg.ref("customers"))); v == "" {
+		if v := scalar(t, s, countOf(t, tg.ref("customers"))); v == "" {
 			t.Fatal("session unusable after error")
 		}
 	})
@@ -514,7 +546,11 @@ func Run(t *testing.T, tg Target) {
 	t.Run("ValueTypes", func(t *testing.T) {
 		// every value is normalized to the documented Row value set
 		s := session(t, conn)
-		cols, rows, err := Query(ctx, s, "SELECT * FROM "+d.Qualified(tg.ref("all_types")))
+		q, err := lang.Browse(tg.ref("all_types"), db.BrowseQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, rows, err := Query(ctx, s, q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -652,7 +688,7 @@ func Load(ctx context.Context, c db.Conn, script string) error {
 		return err
 	}
 	defer s.Close()
-	for _, st := range sqlx.Split(script, c.Dialect().Lex()) {
+	for _, st := range c.Language().Split(script) {
 		res, err := s.Execute(ctx, st.Text)
 		if err != nil {
 			return fmt.Errorf("%s: %w", firstLine(st.Text), err)

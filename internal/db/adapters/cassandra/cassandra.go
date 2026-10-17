@@ -85,6 +85,18 @@ func (d *dialect) Literal(v any, k db.Kind) string {
 
 func (d *dialect) Placeholder(i int) string { return "?" }
 
+// language is CQL: SQL-like, but browse results can't be sorted (ORDER BY
+// needs a restricted partition key).
+type language struct{ *db.SQLLanguage }
+
+func newLanguage(d *dialect) *language {
+	return &language{&db.SQLLanguage{D: d, Label: "CQL"}}
+}
+
+func (l *language) SortUnsupported() string {
+	return "Cassandra sorts only by clustering columns within one partition: use a console query"
+}
+
 // NewDialect builds the CQL dialect.
 func NewDialect() *dialect {
 	d := &db.BaseDialect{
@@ -228,7 +240,7 @@ func (d Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		ver = "ScyllaDB " + scylla
 	}
 	dia := NewDialect()
-	return &conn{s: sess, cluster: cl, d: dia, ver: ver, keyspace: cfg.Database, init: cfg.InitSQL,
+	return &conn{s: sess, cluster: cl, d: dia, lang: newLanguage(dia), ver: ver, keyspace: cfg.Database, init: cfg.InitSQL,
 		cat: &catalog{s: sess, d: dia}, byKS: map[string]*gocql.Session{}}, nil
 }
 
@@ -287,6 +299,7 @@ type conn struct {
 	s        *gocql.Session
 	cluster  *gocql.ClusterConfig
 	d        *dialect
+	lang     *language
 	ver      string
 	keyspace string
 	init     string
@@ -323,7 +336,7 @@ func (c *conn) sessionFor(ks string) (*gocql.Session, error) {
 
 func (c *conn) Info() db.Info         { return Driver{}.Info() }
 func (c *conn) Caps() db.Capabilities { return caps }
-func (c *conn) Dialect() db.Dialect   { return c.d }
+func (c *conn) Language() db.Language { return c.lang }
 func (c *conn) ServerVersion() string { return c.ver }
 func (c *conn) Catalog() db.Catalog   { return c.cat }
 func (c *conn) Close() error {

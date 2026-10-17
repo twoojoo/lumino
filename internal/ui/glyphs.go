@@ -120,7 +120,7 @@ var icExpandLess = mustIcon(icons.NavigationExpandLess)
 // objIcon is the tree/tab icon of an object type.
 func objIcon(t db.ObjectType) *widget.Icon {
 	switch t {
-	case db.ObjTable:
+	case db.ObjTable, db.ObjCollection:
 		return icTable
 	case db.ObjView:
 		return icView

@@ -184,9 +184,9 @@ func TestEditorRegressQuotedQualifier(t *testing.T) {
 		{`SELECT * FROM "us`, "", "us"},
 	}
 	for _, c := range cases {
-		ctx := analyzeSQL(c.sql, len(c.sql), o, db.CommonKeywords)
-		if ctx.qualifier != c.qual || ctx.prefix != c.prefix {
-			t.Errorf("%q: qual %q prefix %q", c.sql, ctx.qualifier, ctx.prefix)
+		ctx := db.AnalyzeSQL(c.sql, len(c.sql), o, db.CommonKeywords)
+		if ctx.Qualifier != c.qual || ctx.Prefix != c.prefix {
+			t.Errorf("%q: qual %q prefix %q", c.sql, ctx.Qualifier, ctx.Prefix)
 		}
 	}
 	e := regressEditor(`SELECT u."na`)

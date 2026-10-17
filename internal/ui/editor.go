@@ -31,7 +31,7 @@ const tabWidth = 4
 
 // lineHL caches the tokens of one line and the lexer state at its start.
 type lineHL struct {
-	start, end sqlx.State
+	start, end db.LexState
 	toks       []sqlx.Token
 	dirty      bool // text changed: must be lexed again
 	ok         bool // tokens computed (possibly with a stale start state)
@@ -60,8 +60,7 @@ type CodeEditor struct {
 	measured unit.Sp
 	gutterW  int
 
-	lex     *sqlx.Options
-	dialect db.Dialect
+	lang    db.Language
 	kw      map[string]bool
 	funcs   map[string]bool
 	types   map[string]bool
@@ -108,25 +107,20 @@ func newCodeEditor(a *App, txt string) *CodeEditor {
 	for i := range e.hl {
 		e.hl[i].dirty = true
 	}
-	e.setDialect(nil)
+	e.setLanguage(nil)
 	e.find = newFindBar(e)
 	return e
 }
 
-// setDialect selects lexing rules and keyword sets.
-func (e *CodeEditor) setDialect(d db.Dialect) {
-	e.dialect = d
-	if d == nil {
-		e.lex = &sqlx.Options{}
-		e.kw = db.CommonKeywords
-		e.funcs = toSet(db.CommonFunctions)
-		e.types = map[string]bool{}
-	} else {
-		e.lex = d.Lex()
-		e.kw = d.Keywords()
-		e.funcs = toSet(d.Functions())
-		e.types = toSet(d.Types())
+// setLanguage selects lexing rules and keyword sets (nil = generic SQL).
+func (e *CodeEditor) setLanguage(l db.Language) {
+	if l == nil {
+		l = db.GenericSQL
 	}
+	e.lang = l
+	e.kw = l.Keywords()
+	e.funcs = toSet(l.Functions())
+	e.types = toSet(l.Types())
 	for i := range e.hl {
 		e.hl[i].dirty = true
 	}
@@ -341,7 +335,7 @@ func (e *CodeEditor) tokens(i int) []sqlx.Token {
 	// lex forward from the last line known to be right: a cached line is
 	// reused only when its start state still matches
 	j := e.hlValid
-	var st sqlx.State
+	var st db.LexState
 	if j > 0 {
 		st = e.hl[j-1].end
 	}
@@ -357,7 +351,7 @@ func (e *CodeEditor) tokens(i int) []sqlx.Token {
 		if e.json {
 			toks = jsonLexLine(e.buf.lines[k])
 		} else {
-			toks, end = sqlx.LexLine(e.buf.lines[k], st, e.lex)
+			toks, end = e.lang.LexLine(e.buf.lines[k], st)
 		}
 		*h = lineHL{start: st, end: end, toks: toks, ok: true}
 		st = end
@@ -931,10 +925,11 @@ func (e *CodeEditor) toggleComment() {
 		return
 	}
 	from, to := e.selLines()
+	mark := e.lang.LineComment()
 	all := true
 	for l := from; l <= to; l++ {
 		s := strings.TrimSpace(e.buf.lines[l])
-		if s != "" && !strings.HasPrefix(s, "--") {
+		if s != "" && !strings.HasPrefix(s, mark) {
 			all = false
 		}
 	}
@@ -942,15 +937,15 @@ func (e *CodeEditor) toggleComment() {
 	for l := from; l <= to; l++ {
 		s := e.buf.lines[l]
 		if all {
-			i := strings.Index(s, "--")
+			i := strings.Index(s, mark)
 			if i >= 0 {
-				rest := s[i+2:]
+				rest := s[i+len(mark):]
 				rest = strings.TrimPrefix(rest, " ")
 				s = s[:i] + rest
 			}
 		} else if strings.TrimSpace(s) != "" {
 			ind := indentOf(s)
-			s = ind + "-- " + s[len(ind):]
+			s = ind + mark + " " + s[len(ind):]
 		}
 		lines = append(lines, s)
 	}

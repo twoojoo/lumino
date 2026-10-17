@@ -14,7 +14,6 @@ import (
 
 	"github.com/twoojoo/lumino/internal/ai"
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 type chatKind int
@@ -130,7 +129,8 @@ func (p *AIPanel) targetFor(id string) (*connState, ai.ContextInfo) {
 	cs := a.connState(id)
 	ci := ai.ContextInfo{Connection: cs.name(), ReadOnly: a.connReadOnly(id), Protected: a.connProtected(id)}
 	if cs.conn != nil {
-		ci.Database, ci.Dialect = cs.conn.ServerVersion(), cs.conn.Dialect().Name()
+		lang := cs.conn.Language()
+		ci.Database, ci.Dialect, ci.Language, ci.Fence = cs.conn.ServerVersion(), lang.Name(), lang.Display(), lang.Fence()
 	}
 	var tab Tab
 	if t := a.activeTab(); t != nil && t.ConnID() == id {
@@ -138,7 +138,7 @@ func (p *AIPanel) targetFor(id string) (*connState, ai.ContextInfo) {
 	}
 	switch t := tab.(type) {
 	case *ConsoleTab:
-		ci.Schema, ci.View = t.schema, "SQL console"
+		ci.Schema, ci.View = t.schema, cs.language().Display()+" console"
 		if p.attach {
 			ci.SQL = t.ed.Text()
 			if rs := t.lastErr(); rs != nil {
@@ -555,7 +555,8 @@ func (p *AIPanel) layoutProposal(gtx C, it *chatItem) D {
 		p.notes = append(p.notes, "the user dismissed your proposed SQL")
 	}
 	accent := pal.Accent
-	if k := db.Classify(pr.SQL, &sqlx.Options{DollarQuotes: true}); k.Modifies() {
+	// classified with the rules of the connection it was proposed for
+	if k := p.app.connState(it.connID).language().Classify(pr.SQL); k.Modifies() {
 		accent = pal.Warn
 		if k == db.StmtDestructive {
 			accent = pal.Err
@@ -1017,11 +1018,13 @@ func chevronIcon(collapsed bool) *widget.Icon {
 func (a *App) askAboutSQL(connID, sql string, failed *resultSet) {
 	p := a.ai
 	p.open, p.attach = true, true
+	lang := a.connState(connID).language()
+	fence := "```" + lang.Fence() + "\n"
 	switch {
 	case failed != nil:
-		p.sendTo(connID, "Why does this statement fail and how do I fix it?\n\n```sql\n"+failed.sql+"\n```\nError: "+failed.err.Error())
+		p.sendTo(connID, "Why does this statement fail and how do I fix it?\n\n"+fence+failed.sql+"\n```\nError: "+failed.err.Error())
 	case strings.TrimSpace(sql) != "":
-		p.sendTo(connID, "Explain this SQL and suggest improvements:\n\n```sql\n"+sql+"\n```")
+		p.sendTo(connID, "Explain this "+lang.Display()+" and suggest improvements:\n\n"+fence+sql+"\n```")
 	}
 }
 

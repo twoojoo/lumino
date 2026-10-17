@@ -60,7 +60,7 @@ func cqlRegress(t *testing.T, name string) {
 			cl.Close()
 		}
 	}()
-	d := conn.Dialect()
+	d := db.DialectOf(conn)
 
 	t.Run("tuples", func(t *testing.T) {
 		cqlExec(t, s, "CREATE TABLE "+regressKS+".tup (id int PRIMARY KEY, tp tuple<int, text>, nt tuple<int, frozen<tuple<text, uuid>>>, lt list<frozen<tuple<int, text>>>)")

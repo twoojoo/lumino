@@ -13,7 +13,6 @@ import (
 	"gioui.org/widget"
 
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 	"github.com/twoojoo/lumino/internal/prefs"
 )
 
@@ -263,7 +262,7 @@ type TableTab struct {
 	grid     *DataGrid
 	value    *valuePanel
 	where    widget.Editor
-	order    []string // ORDER BY terms
+	order    []db.SortKey // sort of the browse query
 	sortCol  int
 	sortDsc  bool
 	query    string
@@ -394,7 +393,7 @@ func (t *TableTab) ensureInfo() {
 }
 
 func (t *TableTab) editable(r, c int) bool {
-	if t.data == nil || t.info == nil || t.saving || t.ref.Type != db.ObjTable || r < 0 || r >= t.data.Rows() || c < 0 || c >= len(t.data.rs.cols) || t.a.connReadOnly(t.connID) {
+	if t.data == nil || t.info == nil || t.saving || !t.ref.Type.Writable() || r < 0 || r >= t.data.Rows() || c < 0 || c >= len(t.data.rs.cols) || t.a.connReadOnly(t.connID) {
 		return false
 	}
 	caps := t.cs().caps()
@@ -411,7 +410,7 @@ func (t *TableTab) editable(r, c int) bool {
 func (t *TableTab) readOnlyReason() string {
 	caps := t.cs().caps()
 	switch {
-	case t.ref.Type != db.ObjTable:
+	case !t.ref.Type.Writable():
 		return "views are read-only"
 	case t.a.connReadOnly(t.connID):
 		return "read-only connection"
@@ -504,23 +503,19 @@ func (t *TableTab) reload() {
 		return
 	}
 	a := t.a
-	// default order: the primary key (needs the table description)
-	// (not CQL: ORDER BY needs a restricted partition key there)
-	pkOrder := t.sortCol < 0 && t.ref.Type == db.ObjTable && a.prefs.OrderByPrimaryKey() && t.cs().info().DialectName != "cql"
+	// default order: the primary key (needs the table description), where
+	// the language can sort browse results (not CQL)
+	pkOrder := t.sortCol < 0 && t.ref.Type.Writable() && a.prefs.OrderByPrimaryKey() && t.cs().language().SortUnsupported() == ""
 	if pkOrder && t.info == nil && t.infoErr == nil {
 		t.ensureInfo() // Layout calls reload again once it is loaded
 		return
 	}
 	t.order = nil
 	if t.sortCol >= 0 && t.data != nil && t.sortCol < len(t.data.rs.cols) {
-		dir := " ASC"
-		if t.sortDsc {
-			dir = " DESC"
-		}
-		t.order = []string{t.cs().dialect().Quote(t.data.rs.cols[t.sortCol].Name) + dir}
+		t.order = []db.SortKey{{Field: t.data.rs.cols[t.sortCol].Name, Desc: t.sortDsc}}
 	} else if pkOrder && t.info != nil {
 		for _, k := range t.info.PrimaryKey {
-			t.order = append(t.order, t.cs().dialect().Quote(k)+" ASC")
+			t.order = append(t.order, db.SortKey{Field: k})
 		}
 	}
 	t.running, t.loadErr, t.count = true, nil, ""
@@ -531,8 +526,11 @@ func (t *TableTab) reload() {
 		return
 	}
 	t.withSession(func(s db.Session) {
-		dia := t.cs().dialect()
-		q := dia.SelectAll(t.ref, t.where.Text(), strings.Join(t.order, ", "))
+		q, err := t.cs().language().Browse(t.ref, db.BrowseQuery{Filter: t.where.Text(), Sort: t.order})
+		if err != nil {
+			t.running, t.loadErr = false, err
+			return
+		}
 		t.query = q
 		fetch := a.prefs.Fetch()
 		go func() {
@@ -585,8 +583,8 @@ func (t *TableTab) sortBy(c int) {
 		t.a.flash("Save or revert the pending changes before sorting", true)
 		return
 	}
-	if t.cs().info().DialectName == "cql" {
-		t.a.flash("Cassandra sorts only by clustering columns within one partition: use a console query", true)
+	if why := t.cs().language().SortUnsupported(); why != "" {
+		t.a.flash(why, true)
 		return
 	}
 	switch {
@@ -606,7 +604,7 @@ func (t *TableTab) sortBy(c int) {
 // pkSortCol is the result column of a single-column primary key used as
 // the default order (-1 otherwise).
 func (t *TableTab) pkSortCol() int {
-	if t.info == nil || len(t.info.PrimaryKey) != 1 || t.data == nil || !t.a.prefs.OrderByPrimaryKey() || t.cs().info().DialectName == "cql" {
+	if t.info == nil || len(t.info.PrimaryKey) != 1 || t.data == nil || !t.a.prefs.OrderByPrimaryKey() || t.cs().language().SortUnsupported() != "" {
 		return -1
 	}
 	for i, c := range t.data.rs.cols {
@@ -689,11 +687,10 @@ func (t *TableTab) review() {
 		a.flash(err.Error(), true)
 		return
 	}
-	dia := t.cs().dialect()
+	lang := t.cs().language()
 	var b strings.Builder
 	for _, ch := range changes {
-		q, _ := db.BuildChange(dia, t.ref, ch, true)
-		b.WriteString(q + ";\n")
+		b.WriteString(lang.Terminate(lang.RenderChange(t.ref, ch)) + "\n")
 	}
 	warn := t.cs().caps().EditNeedsWarning
 	a.overlay = newSQLReview(a, t.connID, "Save changes to "+t.ref.Name, b.String(), warn, len(changes), func() { t.apply(changes) })
@@ -708,11 +705,11 @@ func (t *TableTab) apply(changes []db.Change) {
 	t.saving = true
 	t.withSession(func(s db.Session) {
 		cs := t.cs()
-		caps, dia, ref := cs.caps(), cs.dialect(), t.ref
+		conn, ref := cs.conn, t.ref
 		desc := fmt.Sprintf("Saving %d change(s) to %s", len(changes), ref.Name)
 		a.flash(desc+"…", false)
 		go func() {
-			applied, err := db.ApplyChanges(context.Background(), s, caps, dia, ref, changes)
+			applied, err := db.Apply(context.Background(), s, conn, ref, changes)
 			a.post(func() {
 				t.saving = false
 				delete(cs.tables, ref)
@@ -754,9 +751,11 @@ func (t *TableTab) countRows() {
 	// close the open cursor of the browsed rows
 	a.connectOr(t.connID, func(cs *connState) {
 		conn := cs.conn
-		q := "SELECT COUNT(*) FROM " + cs.dialect().Qualified(t.ref)
-		if w != "" {
-			q += " WHERE " + w
+		q, err := cs.language().Count(t.ref, w)
+		if err != nil {
+			t.count = ""
+			a.flash("Count: "+err.Error(), true)
+			return
 		}
 		ro := a.connReadOnly(t.connID)
 		go func() {
@@ -801,20 +800,10 @@ func (t *TableTab) countRows() {
 }
 
 // checkWhere validates the filter: one condition, nothing that changes
-// data (it is pasted into a SELECT, so "1=1; DELETE …" must not pass).
+// data (it is pasted into the browse query, so "1=1; DELETE …" must not
+// pass).
 func (t *TableTab) checkWhere(w string) error {
-	if w == "" {
-		return nil
-	}
-	lex := t.cs().dialect().Lex()
-	q := "SELECT 1 FROM t WHERE " + w
-	if st := sqlx.Split(q, lex); len(st) != 1 || st[0].Text != strings.TrimRight(strings.TrimSpace(q), ";") {
-		return errors.New("the filter must be a single condition (no ';')")
-	}
-	if k := db.Classify(q, lex); k != db.StmtRead {
-		return fmt.Errorf("the filter can't contain %s statements", k)
-	}
-	return nil
+	return t.cs().language().ValidateFilter(w)
 }
 
 // loadDDL fetches the object's DDL.
@@ -828,7 +817,7 @@ func (t *TableTab) loadDDL() {
 	a := t.a
 	a.connectOr(t.connID, func(cs *connState) {
 		conn, ref := cs.conn, t.ref
-		t.ddl.setDialect(conn.Dialect())
+		t.ddl.setLanguage(conn.Language())
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), db.MetaTimeout)
 			defer cancel()
@@ -961,7 +950,7 @@ func (t *TableTab) layoutData(gtx C) D {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx C) D { return lbl(gtx, th, fontMono, 12, pal.Keyword, "WHERE ") }),
 					layout.Flexed(1, func(gtx C) D {
-						return textField(gtx, th, &t.where, "filter, e.g. id > 10 AND name LIKE 'a%'  (Enter to apply)", true)
+						return textField(gtx, th, &t.where, t.cs().language().FilterHint(), true)
 					}),
 					layout.Rigid(func(gtx C) D {
 						if t.where.Len() == 0 {
@@ -1054,7 +1043,7 @@ func (t *TableTab) gridMenu(at image.Point) {
 	if !ok {
 		return
 	}
-	items := copyMenuItems(a, t.grid, t.data.rs.cols, t.data.Value, t.cs().dialect(), t.ref)
+	items := copyMenuItems(a, t.grid, t.data.rs.cols, t.data.Value, t.cs().language(), t.ref)
 	items = append(items, &menuItem{sep: true})
 	if t.editable(sel.r1, sel.c1) {
 		r, c := sel.r1, sel.c1
@@ -1078,11 +1067,7 @@ func (t *TableTab) gridMenu(at image.Point) {
 	items = append(items, &menuItem{icon: icFilter, label: "Filter by this value", action: func() {
 		col := t.data.rs.cols[sel.c1]
 		v := t.data.Value(sel.r1, sel.c1)
-		dia := t.cs().dialect()
-		cond := dia.Quote(col.Name) + " IS NULL"
-		if v != nil {
-			cond = dia.Quote(col.Name) + " = " + dia.Literal(v, col.Kind)
-		}
+		cond := t.cs().language().EqualsFilter(col.Name, v, col.Kind)
 		t.refresh(func() { t.where.SetText(cond) })
 	}})
 	a.overlay = &ContextMenu{app: a, at: at, items: items, sel: -1}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 const maxToolOutput = 14000
@@ -43,6 +42,10 @@ func (t *Tools) Specs() []ToolSpec {
 		return ToolSpec{Name: name, Description: desc, Properties: props, Required: req}
 	}
 	schema := strProp("Schema (database, keyspace…); omit for the current one")
+	lang := "SQL"
+	if t.Conn != nil {
+		lang = t.Conn.Language().Display()
+	}
 	specs := []ToolSpec{
 		mk("list_schemas", "List the schemas of the database.", map[string]any{}),
 		mk("list_objects", "List tables, views, functions and other objects of a schema.", map[string]any{"schema": schema}),
@@ -52,8 +55,8 @@ func (t *Tools) Specs() []ToolSpec {
 			map[string]any{"schema": schema, "name": strProp("Object name"), "type": strProp("table, view, function, procedure, sequence… (default table)")}, "name"),
 		mk("sample_rows", "A few rows of a table (sensitive columns are redacted).",
 			map[string]any{"schema": schema, "table": strProp("Table or view name"), "limit": intProp("Rows, at most 20 (default 5)")}, "table"),
-		mk("propose_sql", "Propose a SQL statement to the user (shown with an Insert button). Use it for any statement that changes data or schema, and for queries the user should run.",
-			map[string]any{"sql": strProp("The SQL statement(s)"), "reason": strProp("Short explanation")}, "sql"),
+		mk("propose_sql", "Propose a "+lang+" statement to the user (shown with an Insert button). Use it for any statement that changes data or schema, and for queries the user should run.",
+			map[string]any{"sql": strProp("The " + lang + " statement(s)"), "reason": strProp("Short explanation")}, "sql"),
 	}
 	if t.AllowQueries {
 		specs = append(specs,
@@ -119,7 +122,7 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 		}
 	}
 	cat := t.Conn.Catalog()
-	d := t.Conn.Dialect()
+	lang := t.Conn.Language()
 	switch call.Name {
 	case "list_schemas":
 		ss, err := cat.Schemas(ctx, "")
@@ -190,7 +193,11 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 			n = 5
 		}
 		n = min(n, 20)
-		return t.query(ctx, d.SelectAll(ref, "", ""), n)
+		q, err := lang.Browse(ref, db.BrowseQuery{})
+		if err != nil {
+			return "", err
+		}
+		return t.query(ctx, q, n)
 	case "run_query":
 		if !t.AllowQueries {
 			return "", errors.New("running queries is disabled in the assistant settings")
@@ -200,14 +207,14 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 		if !t.AllowQueries {
 			return "", errors.New("running queries is disabled in the assistant settings")
 		}
-		prefix := "EXPLAIN "
-		switch d.Name() {
-		case "sqlite":
-			prefix = "EXPLAIN QUERY PLAN "
-		case "oracle", "sqlserver", "firebird", "cql":
-			return "", fmt.Errorf("explain is not available for %s from the assistant", d.Name())
+		q, err := lang.Explain(a.SQL)
+		if errors.Is(err, db.ErrNotSupported) {
+			return "", fmt.Errorf("explain is not available for %s from the assistant", lang.Name())
 		}
-		return t.query(ctx, prefix+strings.TrimSuffix(strings.TrimSpace(a.SQL), ";"), 200)
+		if err != nil {
+			return "", err
+		}
+		return t.query(ctx, q, 200)
 	case "propose_sql":
 		if strings.TrimSpace(a.SQL) == "" {
 			return "", errors.New("sql is required")
@@ -226,13 +233,13 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 // the session is set read-only by the server (or, where that is not
 // available, the statement runs in a transaction rolled back afterwards).
 func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error) {
-	lex := t.Conn.Dialect().Lex()
-	stmts := sqlx.Split(sql, lex)
+	lang := t.Conn.Language()
+	stmts := lang.Split(sql)
 	if len(stmts) != 1 {
 		return "", fmt.Errorf("refused: run exactly one statement (got %d)", len(stmts))
 	}
 	sql = strings.TrimSuffix(strings.TrimSpace(stmts[0].Text), ";")
-	if k := db.Classify(sql, lex); k != db.StmtRead {
+	if k := lang.Classify(sql); k != db.StmtRead {
 		return "", fmt.Errorf("refused: this is a %s statement; only read-only queries can run (use propose_sql)", k)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -274,29 +281,11 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 	all := false
 	// only names used as columns count: not tables (FROM auth_user) nor
 	// qualifiers (auth_user.id)
-	var sig []string
-	for _, tk := range sqlx.Tokens(sql, lex) {
-		if tk.Kind != sqlx.TSpace && tk.Kind != sqlx.TComment {
-			sig = append(sig, sql[tk.Start:tk.End])
+	for _, name := range lang.ColumnNames(sql) {
+		if SensitiveColumn(name) {
+			all = true
+			break
 		}
-	}
-	for i, w := range sig {
-		name := strings.Trim(w, "\"`[]")
-		if !SensitiveColumn(name) {
-			continue
-		}
-		prev, next := "", ""
-		if i > 0 {
-			prev = strings.ToUpper(sig[i-1])
-		}
-		if i+1 < len(sig) {
-			next = sig[i+1]
-		}
-		if prev == "FROM" || prev == "JOIN" || prev == "INTO" || prev == "UPDATE" || prev == "TABLE" || next == "." {
-			continue
-		}
-		all = true
-		break
 	}
 	var b strings.Builder
 	names := make([]string, len(cols))

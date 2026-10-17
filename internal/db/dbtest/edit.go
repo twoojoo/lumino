@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // defaultSamples are written to all_types columns by name.
@@ -67,13 +66,16 @@ func rowEdit(t *testing.T, ctx context.Context, conn db.Conn, tg *Target) {
 	if !caps.Insert {
 		t.Skip("read-only database")
 	}
-	d := conn.Dialect()
+	d := db.DialectOf(conn)
+	if d == nil {
+		t.Skip("needs SQL")
+	}
 	s := session(t, conn)
 	ref := tg.ref("customers")
 	id, name, email := tg.id("id"), tg.id("name"), tg.id("email")
 	key := []db.ColValue{{Column: id, Kind: db.KindInt, Value: int64(9100)}}
 	apply := func(chs ...db.Change) error {
-		_, err := db.ApplyChanges(ctx, s, caps, d, ref, chs)
+		_, err := db.Apply(ctx, s, conn, ref, chs)
 		waitEventual(tg)
 		return err
 	}
@@ -120,12 +122,12 @@ func rowEdit(t *testing.T, ctx context.Context, conn db.Conn, tg *Target) {
 	// composite key
 	items := tg.ref("order_items")
 	ik := []db.ColValue{{Column: tg.id("order_id"), Kind: db.KindInt, Value: int64(1)}, {Column: tg.id("line_no"), Kind: db.KindInt, Value: int64(99)}}
-	if _, err := db.ApplyChanges(ctx, s, caps, d, items, []db.Change{{Op: db.OpInsert, Values: append(append([]db.ColValue{}, ik...),
+	if _, err := db.Apply(ctx, s, conn, items, []db.Change{{Op: db.OpInsert, Values: append(append([]db.ColValue{}, ik...),
 		db.ColValue{Column: tg.id("sku"), Kind: db.KindText, Value: "SKU-99"}, db.ColValue{Column: tg.id("qty"), Kind: db.KindInt, Value: int64(2)})}}); err != nil {
 		t.Fatalf("composite insert: %v", err)
 	}
 	waitEventual(tg)
-	if _, err := db.ApplyChanges(ctx, s, caps, d, items, []db.Change{{Op: db.OpUpdate, Key: ik,
+	if _, err := db.Apply(ctx, s, conn, items, []db.Change{{Op: db.OpUpdate, Key: ik,
 		Values: []db.ColValue{{Column: tg.id("qty"), Kind: db.KindInt, Value: int64(7)}}}}); err != nil {
 		t.Fatalf("composite update: %v", err)
 	}
@@ -139,7 +141,7 @@ func rowEdit(t *testing.T, ctx context.Context, conn db.Conn, tg *Target) {
 		if err := apply(db.Change{Op: db.OpDelete, Key: key}); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
-		if _, err := db.ApplyChanges(ctx, s, caps, d, items, []db.Change{{Op: db.OpDelete, Key: ik}}); err != nil {
+		if _, err := db.Apply(ctx, s, conn, items, []db.Change{{Op: db.OpDelete, Key: ik}}); err != nil {
 			t.Fatalf("composite delete: %v", err)
 		}
 		waitEventual(tg)
@@ -160,7 +162,10 @@ func typesRoundTrip(t *testing.T, ctx context.Context, conn db.Conn, tg *Target)
 	if !caps.Update {
 		t.Skip("no updates")
 	}
-	d := conn.Dialect()
+	d := db.DialectOf(conn)
+	if d == nil {
+		t.Skip("needs SQL")
+	}
 	s := session(t, conn)
 	ref := tg.ref("all_types")
 	info, err := conn.Catalog().Table(ctx, ref)
@@ -188,7 +193,7 @@ func typesRoundTrip(t *testing.T, ctx context.Context, conn db.Conn, tg *Target)
 				t.Fatalf("parse %q as %s: %v", sample, col.Kind, err)
 			}
 			ch := db.Change{Op: db.OpUpdate, Key: key, Values: []db.ColValue{{Column: col.Name, Kind: col.Kind, Value: v}}}
-			if _, err := db.ApplyChanges(ctx, s, caps, d, ref, []db.Change{ch}); err != nil {
+			if _, err := db.Apply(ctx, s, conn, ref, []db.Change{ch}); err != nil {
 				t.Fatalf("write %s (%s, kind %s) = %q: %v", col.Name, col.Type, col.Kind, sample, err)
 			}
 			waitEventual(tg)
@@ -208,7 +213,7 @@ func typesRoundTrip(t *testing.T, ctx context.Context, conn db.Conn, tg *Target)
 			waitEventual(tg)
 			if col.Nullable {
 				ch.Values[0].Value = nil
-				if _, err := db.ApplyChanges(ctx, s, caps, d, ref, []db.Change{ch}); err != nil {
+				if _, err := db.Apply(ctx, s, conn, ref, []db.Change{ch}); err != nil {
 					t.Fatalf("write NULL: %v", err)
 				}
 				waitEventual(tg)
@@ -221,7 +226,7 @@ func typesRoundTrip(t *testing.T, ctx context.Context, conn db.Conn, tg *Target)
 			textual := strings.Contains(lt, "char") || strings.Contains(lt, "text") || strings.Contains(lt, "string") || strings.Contains(lt, "clob")
 			if col.Kind == db.KindText && col.Nullable && textual {
 				ch.Values[0].Value = ""
-				if _, err := db.ApplyChanges(ctx, s, caps, d, ref, []db.Change{ch}); err != nil {
+				if _, err := db.Apply(ctx, s, conn, ref, []db.Change{ch}); err != nil {
 					t.Fatalf("write empty: %v", err)
 				}
 				waitEventual(tg)
@@ -310,11 +315,14 @@ func sameValue(k db.Kind, sample string, got any, readKind db.Kind) bool {
 }
 
 func script(t *testing.T, ctx context.Context, conn db.Conn, tg *Target) {
-	d := conn.Dialect()
+	d := db.DialectOf(conn)
+	if d == nil {
+		t.Skip("needs SQL")
+	}
 	cust := d.Qualified(tg.ref("customers"))
 	sc := "-- leading comment\nSELECT COUNT(*) FROM " + cust + ";\n/* block; comment */\nSELECT " + d.Quote(tg.id("name")) +
 		" FROM " + cust + " WHERE " + d.Quote(tg.id("name")) + " = 'a;b'" + tg.FilterSuffix + ";\n"
-	stmts := sqlx.Split(sc, d.Lex())
+	stmts := conn.Language().Split(sc)
 	if len(stmts) != 2 {
 		t.Fatalf("split into %d statements: %+v", len(stmts), stmts)
 	}

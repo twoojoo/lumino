@@ -105,10 +105,10 @@ func TestClickHouseRegressEditBigIntKey(t *testing.T) {
 		t.Errorf("result kind %v, catalog kind %v", cols[0].Kind, ti.Columns[0].Kind)
 	}
 	ch := db.Change{Op: db.OpUpdate, Key: key, Values: []db.ColValue{{Column: "v", Kind: db.KindText, Value: "new"}}}
-	if sql, _ := db.BuildChange(conn.Dialect(), ref, ch, true); !strings.Contains(sql, chBig) {
+	if sql, _ := db.BuildChange(db.DialectOf(conn), ref, ch, true); !strings.Contains(sql, chBig) {
 		t.Errorf("preview: %s", sql)
 	}
-	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), conn.Dialect(), ref, []db.Change{ch}); err != nil {
+	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), db.DialectOf(conn), ref, []db.Change{ch}); err != nil {
 		t.Fatalf("update keyed on UInt128: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -117,7 +117,7 @@ func TestClickHouseRegressEditBigIntKey(t *testing.T) {
 		t.Fatalf("after update: %v %v", rows, err)
 	}
 	del := db.Change{Op: db.OpDelete, Key: key}
-	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), conn.Dialect(), ref, []db.Change{del}); err != nil {
+	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), db.DialectOf(conn), ref, []db.Change{del}); err != nil {
 		t.Fatalf("delete keyed on UInt128: %v", err)
 	}
 }

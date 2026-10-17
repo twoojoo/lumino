@@ -59,6 +59,8 @@ type ContextInfo struct {
 	Connection string // connection name
 	Database   string // product and version
 	Dialect    string
+	Language   string // query language shown to the model ("" = SQL)
+	Fence      string // Markdown fence tag of the language ("" = sql)
 	Schema     string // current schema
 	View       string // e.g. "Console" or "Table public.users"
 	SQL        string // SQL in the editor (or the selected statement)
@@ -68,8 +70,15 @@ type ContextInfo struct {
 }
 
 func systemPrompt(ci ContextInfo) string {
+	lang, fence := ci.Language, ci.Fence
+	if lang == "" {
+		lang = "SQL"
+	}
+	if fence == "" {
+		fence = "sql"
+	}
 	var b strings.Builder
-	b.WriteString(`You are the assistant built into Lumino, a desktop database IDE. You help the user write, understand, fix and optimize SQL, and understand their database schema.
+	b.WriteString(strings.NewReplacer("SQL", lang, "fenced sql", "fenced "+fence).Replace(`You are the assistant built into Lumino, a desktop database IDE. You help the user write, understand, fix and optimize SQL, and understand their database schema.
 
 How to work:
 - Use the tools to look at the real schema (list_objects, describe_table, get_ddl, sample_rows) before writing SQL against it; never invent table or column names. Prefer a few targeted calls.
@@ -78,7 +87,7 @@ How to work:
 - Write SQL in the dialect of this database. Quote identifiers only when needed.
 - Sample rows and query results have sensitive columns redacted; never ask the user to paste credentials.
 - Answer in the user's language. Be concise and practical. Use Markdown, with SQL in fenced sql blocks.
-`)
+`))
 	fmt.Fprintf(&b, "\nCurrent UI context:\n- connection: %s\n- database: %s (dialect %s)\n", ci.Connection, ci.Database, ci.Dialect)
 	if ci.Schema != "" {
 		fmt.Fprintf(&b, "- current schema: %s\n", ci.Schema)
@@ -97,7 +106,7 @@ How to work:
 		if len(sql) > 6000 {
 			sql = sql[:6000] + "\n…"
 		}
-		fmt.Fprintf(&b, "- SQL in the editor (\"this query\" usually refers to it):\n```sql\n%s\n```\n", sql)
+		fmt.Fprintf(&b, "- %s in the editor (\"this query\" usually refers to it):\n```%s\n%s\n```\n", lang, fence, sql)
 	}
 	if ci.Error != "" {
 		fmt.Fprintf(&b, "- last error: %s\n", ci.Error)

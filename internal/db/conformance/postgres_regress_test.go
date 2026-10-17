@@ -254,7 +254,7 @@ func TestPostgresRegressTimeTZ(t *testing.T) {
 		t.Errorf("result kind %v, catalog kind %v", cols[0].Kind, ti.Columns[1].Kind)
 	}
 	v, _ := db.ParseValue("11:00:00+03", ti.Columns[1].Kind)
-	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), conn.Dialect(), ref, []db.Change{{Op: db.OpInsert, Values: []db.ColValue{
+	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), db.DialectOf(conn), ref, []db.Change{{Op: db.OpInsert, Values: []db.ColValue{
 		{Column: "id", Kind: db.KindInt, Value: int64(1)}, {Column: "t", Kind: ti.Columns[1].Kind, Value: v}}}}); err != nil {
 		t.Fatal(err)
 	}

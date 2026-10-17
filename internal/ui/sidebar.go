@@ -141,7 +141,9 @@ func (s *Sidebar) selectedSchema() string {
 	return ""
 }
 
-var folderOrder = []db.ObjectType{db.ObjTable, db.ObjView, db.ObjMatView, db.ObjFunction, db.ObjProcedure, db.ObjPackage, db.ObjSequence}
+// folderOrder is the default order of the object folders (Info.Folders
+// overrides it); objects of other types are not shown.
+var folderOrder = []db.ObjectType{db.ObjCollection, db.ObjTable, db.ObjView, db.ObjMatView, db.ObjFunction, db.ObjProcedure, db.ObjPackage, db.ObjSequence}
 
 // build flattens the tree, triggering lazy loads of expanded nodes.
 func (s *Sidebar) build() []treeRow {
@@ -267,7 +269,11 @@ func (s *Sidebar) folders(rr []treeRow, cs *connState, k metaKey, depth int, q s
 	if len(objs) == 0 {
 		return append(rr, treeRow{key: parent + "|empty", kind: nInfo, depth: depth, label: "No objects", connID: cs.id})
 	}
-	for _, t := range folderOrder {
+	order := folderOrder
+	if f := cs.info().Folders; f != nil {
+		order = f
+	}
+	for _, t := range order {
 		list := byType[t]
 		if len(list) == 0 {
 			continue
@@ -297,7 +303,7 @@ func (s *Sidebar) folders(rr []treeRow, cs *connState, k metaKey, depth int, q s
 
 func objColor(t db.ObjectType) colorNRGBA {
 	switch t {
-	case db.ObjTable:
+	case db.ObjTable, db.ObjCollection:
 		return pal.Info
 	case db.ObjView, db.ObjMatView:
 		return pal.Ok
@@ -803,28 +809,28 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		add(icRefresh, "Refresh", "F5", false, func() { s.refresh(r) })
 	case nObject:
 		ref := r.ref
-		d := cs.dialect()
+		lang, connected := cs.language(), cs.conn != nil
 		if ref.Type.Relation() {
 			add(icTable, "Open data", "⏎", false, func() { a.openObject(r.connID, ref, "data") })
 			add(icColumn, "Structure", "", false, func() { a.openObject(r.connID, ref, "structure") })
 		}
 		add(icDescribe, "DDL", "", false, func() { a.openObject(r.connID, ref, "ddl") })
 		sep()
-		if ref.Type.Relation() && d != nil {
+		if ref.Type.Relation() && connected {
 			add(icConsole, "SELECT in new console", "", false, func() {
-				a.newConsole(r.connID, ref.Schema, "SELECT * FROM "+d.Qualified(ref)+";\n")
+				a.newConsole(r.connID, ref.Schema, lang.OpenTemplate(ref)+"\n")
 			})
 			add(icConsole, "Generate INSERT / UPDATE / DELETE…", "", false, func() { a.generateDML(r.connID, ref) })
 		}
 		add(icCopyText, "Copy name", "", false, func() { a.copyLater(ref.Name) })
-		if d != nil {
-			add(icCopyText, "Copy qualified name", "", false, func() { a.copyLater(d.Qualified(ref)) })
+		if connected {
+			add(icCopyText, "Copy qualified name", "", false, func() { a.copyLater(lang.DisplayName(ref)) })
 		}
 		add(icAI, "Ask the assistant", "", false, func() { a.askAboutObject(r.connID, ref) })
 		sep()
 		add(icRefresh, "Refresh", "F5", false, func() { s.refresh(r) })
-		if ref.Type == db.ObjTable {
-			add(icClear, truncateLabel(a.connState(r.connID).info().DialectName), "", true, func() { a.dropObject(r.connID, ref, true) })
+		if _, verb, ok := lang.DropStatement(ref, true); ok && ref.Type.Writable() {
+			add(icClear, verb+"…", "", true, func() { a.dropObject(r.connID, ref, true) })
 		}
 		add(icDelete, "Drop…", "", true, func() { a.dropObject(r.connID, ref, false) })
 	case nColumn:
@@ -843,12 +849,13 @@ func (s *Sidebar) contextMenu(r treeRow) {
 	a.overlay = &ContextMenu{app: a, at: a.pointer, title: title, items: items, sel: -1}
 }
 
-// dialect returns the connection's dialect (nil when not connected).
-func (cs *connState) dialect() db.Dialect {
+// language returns the connection's language (generic SQL when not
+// connected).
+func (cs *connState) language() db.Language {
 	if cs.conn != nil {
-		return cs.conn.Dialect()
+		return cs.conn.Language()
 	}
-	return nil
+	return db.GenericSQL
 }
 
 func itoa(n int) string { return fmt.Sprint(n) }

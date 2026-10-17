@@ -433,7 +433,7 @@ func TestUIAllDatabases(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tg := dbtest.Targets()[name]
 			conn := dbtest.Prepare(t, tg)
-			d := conn.Dialect()
+			d := db.DialectOf(conn)
 			cfg := tg.Config
 			cfg.ID, cfg.Name, cfg.SavePassword = "db-"+name, name+" dev", true
 			h := newHarness(t, []db.Config{cfg}, Options{Connection: cfg.Name})
