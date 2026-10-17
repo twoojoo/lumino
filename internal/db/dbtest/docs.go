@@ -104,7 +104,8 @@ func RunDocuments(t *testing.T, tg Target) {
 		for _, c := range info.Columns {
 			kinds[c.Name] = c.Kind
 		}
-		if kinds["name"] != db.KindText || kinds["age"] != db.KindInt || kinds["tags"] != db.KindArray || kinds["address"] != db.KindJSON {
+		// nested documents are dotted fields
+		if kinds["name"] != db.KindText || kinds["age"] != db.KindInt || kinds["tags"] != db.KindArray || kinds["address.city"] != db.KindText {
 			t.Errorf("fields %+v", info.Columns)
 		}
 		if c, _ := info.Column("age"); !c.Nullable || c.Comment == "" {
@@ -372,7 +373,7 @@ func RunDocuments(t *testing.T, tg Target) {
 		}
 		want := map[string]db.Kind{"c_int": db.KindInt, "c_long": db.KindInt, "c_double": db.KindFloat, "c_dec": db.KindDecimal,
 			"c_bool": db.KindBool, "c_date": db.KindTimestampTZ, "c_oid": db.KindObjectID, "c_str": db.KindText, "c_bin": db.KindBytes,
-			"c_uuid": db.KindUUID, "c_obj": db.KindJSON, "c_arr": db.KindArray}
+			"c_uuid": db.KindUUID, "c_obj.b": db.KindText, "c_obj.n": db.KindInt, "c_obj.a": db.KindArray, "c_arr": db.KindArray}
 		vals := map[string]any{}
 		for i, c := range cols {
 			if k, ok := want[c.Name]; ok && c.Kind != k {
@@ -491,6 +492,87 @@ func RunDocuments(t *testing.T, tg Target) {
 		is(`{c_bool: false}`)
 	})
 
+	t.Run("Documents", func(t *testing.T) {
+		s := session(t, conn)
+		q, _ := lang.Browse(ref("customers"), db.BrowseQuery{Sort: []db.SortKey{{Field: "_id"}}})
+		res, err := s.Execute(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Close()
+		rows, _, err := res.Fetch(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dr, ok := res.(db.DocumentResult)
+		if !ok {
+			t.Fatal("no documents")
+		}
+		docs := dr.Documents()
+		if len(docs) != len(rows) || len(rows) != 3 {
+			t.Fatalf("%d documents for %d rows", len(docs), len(rows))
+		}
+		addr, ok := docs[0].Field("address")
+		if !ok || !addr.IsObject() || len(addr.Children) != 2 {
+			t.Fatalf("nested document %+v", docs[0])
+		}
+		if note, ok := docs[2].Field("note"); !ok || note.Lit != `"it's; fine"` {
+			t.Errorf("field only in document 3: %+v", note)
+		}
+		dl := lang.(db.DocumentLanguage)
+		// editing the text of the document: per-path $set and $unset
+		text := dl.FormatDocument(docs[0])
+		edited := strings.Replace(text, `"London"`, `"Paris"`, 1)
+		edited = strings.Replace(edited, `age: 36,`, `age: 37, since: ISODate("2020-01-01T00:00:00Z"),`, 1)
+		edited = strings.Replace(edited, `zip: "N1"`, `zip: "N1", geo: {lat: 48.8}`, 1)
+		key, vals, err := dl.DocumentChanges(docs[0], edited)
+		if err != nil || len(vals) != 4 {
+			t.Fatalf("changes %v %v\n%s", vals, err, edited)
+		}
+		res.Close()
+		// a removed field
+		vals = append(vals, db.ColValue{Column: "tags", Value: db.Unset})
+		if _, err := db.Apply(ctx, s, conn, ref("customers"), []db.Change{{Op: db.OpUpdate, Key: key, Values: vals}}); err != nil {
+			t.Fatal(err)
+		}
+		if v := count(t, s, "customers", `{_id: 1, "address.city": "Paris", "address.zip": "N1", "address.geo.lat": 48.8, age: 37,
+			since: {$type: "date"}, tags: {$exists: false}}`); v != "1" {
+			t.Fatalf("document edit not applied: %s", v)
+		}
+		// a flattened column is a path
+		if _, err := db.Apply(ctx, s, conn, ref("customers"), []db.Change{{Op: db.OpUpdate, Key: key,
+			Values: []db.ColValue{{Column: "address.city", Kind: db.KindText, Value: "London"}}}}); err != nil {
+			t.Fatal(err)
+		}
+		if v := count(t, s, "customers", `{_id: 1, "address.city": "London", "address.zip": "N1"}`); v != "1" {
+			t.Fatalf("path edit: %s", v)
+		}
+		// insert from text and from dotted grid columns
+		nd, err := dl.NewDocument(`{_id: 9200, name: "doc", email: "doc@example.com", address: {city: "Rome"}}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grid := []db.ColValue{{Column: "_id", Kind: db.KindInt, Value: int64(9201)}, {Column: "address.city", Kind: db.KindText, Value: "Oslo"},
+			{Column: "email", Kind: db.KindText, Value: "grid@example.com"}}
+		if _, err := db.Apply(ctx, s, conn, ref("customers"), []db.Change{{Op: db.OpInsert, Values: nd}, {Op: db.OpInsert, Values: grid}}); err != nil {
+			t.Fatal(err)
+		}
+		if v := count(t, s, "customers", `{_id: {$in: [9200, 9201]}, "address.city": {$in: ["Rome", "Oslo"]}}`); v != "2" {
+			t.Fatalf("inserts: %s", v)
+		}
+		exec(t, s, `db.customers.deleteMany({_id: {$in: [9200, 9201]}})`)
+		exec(t, s, `db.customers.updateOne({_id: 1}, {$set: {age: 36, tags: ["a", "b"]}, $unset: {since: "", "address.geo": ""}})`)
+		// projection, sort document and limit of the query bar
+		q, err = lang.Browse(ref("big"), db.BrowseQuery{Projection: "{label: 1}", Sort: mustSort(t, dl, "{_id: -1}"), Limit: 5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, rows2, err := Query(ctx, s, q)
+		if err != nil || len(rows2) != 5 || len(cols) != 2 || rows2[0][0] != int64(tg.BigRows-1) {
+			t.Fatalf("%s: %v %d rows %v", q, cols, len(rows2), err)
+		}
+	})
+
 	t.Run("Script", func(t *testing.T) {
 		sc := "// leading comment\ndb.customers.countDocuments({});\n/* block; comment */\ndb.customers.find({name: 'a;b'})\n  .limit(1)\nshow collections"
 		stmts := lang.Split(sc)
@@ -546,4 +628,13 @@ func boolStr(b bool) string {
 		return "unique"
 	}
 	return ""
+}
+
+func mustSort(t *testing.T, dl db.DocumentLanguage, s string) []db.SortKey {
+	t.Helper()
+	k, err := dl.ParseSort(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }

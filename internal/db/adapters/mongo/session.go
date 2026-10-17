@@ -162,6 +162,18 @@ type result struct {
 	msgs     []string
 	noRows   bool
 	cancel   context.CancelFunc
+	last     []bson.D // documents of the rows of the last Fetch
+}
+
+var _ db.DocumentResult = (*result)(nil)
+
+// Documents returns the whole documents of the last fetched rows.
+func (r *result) Documents() []db.DocNode {
+	out := make([]db.DocNode, len(r.last))
+	for i, d := range r.last {
+		out[i] = docNode("", d)
+	}
+	return out
 }
 
 func (r *result) Columns() []db.Column {
@@ -179,8 +191,10 @@ func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
 		return nil, false, nil
 	}
 	var rows []db.Row
+	r.last = r.last[:0]
 	for len(rows) < n && len(r.buf) > 0 {
 		rows = append(rows, row(r.buf[0], r.cols))
+		r.last = append(r.last, r.buf[0])
 		r.buf = r.buf[1:]
 	}
 	for len(rows) < n && r.cur != nil {
@@ -197,6 +211,7 @@ func (r *result) Fetch(ctx context.Context, n int) ([]db.Row, bool, error) {
 			return rows, false, err
 		}
 		rows = append(rows, row(d, r.cols))
+		r.last = append(r.last, d)
 	}
 	return rows, len(r.buf) > 0 || r.cur != nil, nil
 }

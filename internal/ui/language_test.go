@@ -34,14 +34,14 @@ func (docLang) InsertText(ref db.ObjectRef, cols []db.Column, row db.Row) string
 
 func (docLang) InsertFormat() (string, string) { return "insertOne", ".js" }
 
-func newDocEditor(txt string) *CodeEditor {
+func newDocLangEditor(txt string) *CodeEditor {
 	e := regressEditor(txt)
 	e.setLanguage(docLang{db.GenericSQL})
 	return e
 }
 
 func TestLanguageEditorFollowsLanguage(t *testing.T) {
-	e := newDocEditor("a\nb")
+	e := newDocLangEditor("a\nb")
 	e.SelectRange(0, 3)
 	e.toggleComment()
 	if e.Text() != "// a\n// b" {
@@ -67,7 +67,7 @@ func TestLanguageEditorFollowsLanguage(t *testing.T) {
 }
 
 func TestLanguageCompletionQuotes(t *testing.T) {
-	e := newDocEditor("db.my")
+	e := newDocLangEditor("db.my")
 	e.Completer = func(*CodeEditor) *compRequest {
 		return &compRequest{items: []compItem{{label: "my coll", kind: "table"}}}
 	}

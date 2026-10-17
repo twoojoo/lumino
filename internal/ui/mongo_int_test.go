@@ -109,6 +109,193 @@ func TestUIMongo(t *testing.T) {
 		t.Fatal("SQL filter accepted")
 	}
 
+	count := func(filter string) string {
+		t.Helper()
+		s, err := conn.Session(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		_, rows, err := dbtest.Query(context.Background(), s, "db.customers.countDocuments("+filter+")")
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("count %s: %v", filter, err)
+		}
+		return db.FormatValue(rows[0][0], db.KindInt)
+	}
+	loaded := func(what string) {
+		t.Helper()
+		h.waitFor(what, func() bool { return tt.data != nil && !tt.running && !tt.saving || tt.loadErr != nil })
+		if tt.loadErr != nil {
+			t.Fatalf("%s: %v", what, tt.loadErr)
+		}
+	}
+	applyReview := func(want string) {
+		t.Helper()
+		rev, ok := a.overlay.(*SQLReview)
+		if !ok {
+			t.Fatalf("no review for %q: %T (status %q)", want, a.overlay, a.status)
+		}
+		if !strings.Contains(rev.ed.Text(), want) {
+			t.Fatalf("review %q misses %q", rev.ed.Text(), want)
+		}
+		rev.done = true
+		rev.apply()
+		h.waitFor("saved", func() bool { return !tt.saving && !tt.running && tt.data != nil })
+		a.overlay = nil
+	}
+	rowOf := func(id int64) int {
+		t.Helper()
+		for r := 0; r < tt.data.Rows(); r++ {
+			if tt.data.Value(r, 0) == id {
+				return r
+			}
+		}
+		t.Fatalf("document %d not loaded", id)
+		return -1
+	}
+
+	// query bar: projection, sort document and limit; nested documents are
+	// dotted columns
+	tt.refresh(func() {
+		tt.where.SetText("")
+		tt.proj.SetText("{name: 1, address: 1}")
+		tt.sortEd.SetText("{age: -1}")
+		tt.limit.SetText("2")
+	})
+	loaded("query bar")
+	var names []string
+	for _, c := range tt.data.rs.cols {
+		names = append(names, c.Name)
+	}
+	if tt.data.Rows() != 2 || tt.data.Value(0, 0) != int64(2) || strings.Join(names, ",") != "_id,name,address.city,address.zip" {
+		t.Fatalf("query bar: %d rows, first %v, columns %v (%s)", tt.data.Rows(), tt.data.Value(0, 0), names, tt.query)
+	}
+	h.frame()
+	h.shot("mongo-7-querybar")
+	tt.refresh(func() { tt.proj.SetText(""); tt.sortEd.SetText(""); tt.limit.SetText("") })
+	loaded("all documents")
+
+	// a nested field edited in the grid is set by path
+	city := -1
+	for i, c := range tt.data.rs.cols {
+		if c.Name == "address.city" {
+			city = i
+		}
+	}
+	tt.setText(rowOf(1), city, "Paris", false)
+	tt.review()
+	applyReview(`$set: {"address.city": "Paris"}`)
+	if v := count(`{_id: 1, "address.city": "Paris", "address.zip": "N1"}`); v != "1" {
+		t.Fatalf("path edit: %s", v)
+	}
+
+	// tree view: edit a value and remove a field by path
+	tt.mode = viewTree
+	h.frame()
+	h.shot("mongo-8-tree")
+	line := func(id int64, path string) docLine {
+		t.Helper()
+		r := rowOf(id)
+		for _, l := range tt.docs.lines(tt.data.rs) {
+			if l.row == r && l.path == path {
+				return l
+			}
+		}
+		t.Fatalf("no tree line %d %s", id, path)
+		return docLine{}
+	}
+	action := func(l docLine, label string) {
+		t.Helper()
+		for _, it := range tt.docMenu(l.row, l.path, l.node) {
+			if it.label == label {
+				it.action()
+				return
+			}
+		}
+		t.Fatalf("no %q action for %s", label, l.path)
+	}
+	tt.docs.expanded[line(1, "address").key] = true
+	action(line(1, "address.zip"), "Edit value…")
+	de, ok := a.overlay.(*DocEditor)
+	if !ok || de.ed.Text() != `"N1"` {
+		t.Fatalf("value editor: %T", a.overlay)
+	}
+	de.ed.SetText(`"E1"`)
+	de.submit()
+	applyReview(`$set: {"address.zip": "E1"}`)
+	action(line(1, "tags"), "Remove field")
+	applyReview(`$unset: {tags: ""}`)
+	if v := count(`{_id: 1, "address.zip": "E1", tags: {$exists: false}}`); v != "1" {
+		t.Fatalf("tree edits: %s", v)
+	}
+
+	// JSON view and the document editor
+	tt.mode = viewJSON
+	h.frame()
+	if !strings.Contains(tt.docs.json.Text(), "city: \"Paris\"") {
+		t.Fatalf("json view: %q", tt.docs.json.Text())
+	}
+	h.shot("mongo-9-json")
+	tt.editDocument(rowOf(2))
+	de, ok = a.overlay.(*DocEditor)
+	if !ok || !strings.Contains(de.ed.Text(), `name: "Linus"`) {
+		t.Fatalf("document editor: %T", a.overlay)
+	}
+	h.frame()
+	h.shot("mongo-10-doc-editor")
+	de.ed.SetText(strings.Replace(strings.Replace(de.ed.Text(), `"Linus"`, `"Linus T."`, 1), "age: 54", `age: 55, langs: ["C"]`, 1))
+	de.submit()
+	applyReview(`$set: {name: "Linus T.", age: 55, langs: ["C"]}`)
+	if v := count(`{_id: 2, name: "Linus T.", age: 55, langs: "C"}`); v != "1" {
+		t.Fatalf("document edit: %s", v)
+	}
+	// a changed _id is refused
+	tt.editDocument(rowOf(2))
+	de = a.overlay.(*DocEditor)
+	de.ed.SetText(strings.Replace(de.ed.Text(), "_id: 2", "_id: 20", 1))
+	de.submit()
+	if de.done || !strings.Contains(de.err, "_id") {
+		t.Fatalf("_id change: %q", de.err)
+	}
+	a.overlay = nil
+
+	// insert a document, then delete it from the tree
+	tt.mode = viewTree
+	tt.insertDocument()
+	de = a.overlay.(*DocEditor)
+	de.ed.SetText(`{_id: 77, name: "new", email: "new@example.com", when: ISODate("2026-01-01T00:00:00Z")}`)
+	de.submit()
+	applyReview(`insertOne({_id: 77, name: "new"`)
+	if v := count(`{_id: 77, when: {$type: "date"}}`); v != "1" {
+		t.Fatalf("insert: %s", v)
+	}
+	action(line(77, ""), "Delete document")
+	applyReview(`deleteOne({_id: 77})`)
+	if v := count(`{_id: 77}`); v != "0" {
+		t.Fatalf("delete: %s", v)
+	}
+	tt.mode = viewTable
+
+	// console results as a tree
+	a.tabIdx = a.findTab(func(x Tab) bool { return x == c })
+	c.ed.SetText("db.customers.find({}).sort({_id: 1})")
+	c.run(false)
+	h.waitFor("console docs", func() bool { return !c.running && len(c.results) == 1 && c.results[0].hasDocs() })
+	c.resMode = viewTree
+	h.frame()
+	h.shot("mongo-11-console-tree")
+	c.resMode = viewJSON
+	h.frame()
+	if !strings.Contains(c.docs.json.Text(), `"Linus T."`) {
+		t.Fatalf("console json: %q", c.docs.json.Text())
+	}
+	a.tabIdx = a.findTab(func(x Tab) bool { return x == tt })
+
+	// navigator labels of the language
+	if open, tmpl := conn.Language().MenuLabels(); !strings.HasPrefix(open, "Find") || !strings.Contains(tmpl, "insert") {
+		t.Fatalf("labels %q %q", open, tmpl)
+	}
+
 	tt.show("structure")
 	h.waitFor("structure", func() bool { return tt.info != nil })
 	h.shot("mongo-4-structure")

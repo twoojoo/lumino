@@ -1,6 +1,7 @@
 package mongo
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -165,7 +166,10 @@ func classify(st *statement) db.StmtKind {
 // language is the console language of MongoDB connections.
 type language struct{}
 
-var _ db.Language = (*language)(nil)
+var _ db.DocumentLanguage = (*language)(nil)
+
+// Language returns the console language (it needs no connection).
+func Language() db.DocumentLanguage { return &language{} }
 
 func (*language) Name() string    { return "mongo" }
 func (*language) Display() string { return "MongoDB shell" }
@@ -317,19 +321,202 @@ func (l *language) Browse(ref db.ObjectRef, q db.BrowseQuery) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s := collExpr(ref) + ".find(" + f + ")"
-	if len(q.Sort) > 0 {
-		d := bson.D{}
-		for _, k := range q.Sort {
-			dir := int32(1)
-			if k.Desc {
-				dir = -1
-			}
-			d = append(d, bson.E{Key: k.Field, Value: dir})
+	s := collExpr(ref) + ".find(" + f
+	if p := strings.TrimSpace(q.Projection); p != "" {
+		if err := l.ValidateProjection(p); err != nil {
+			return "", err
 		}
-		s += ".sort(" + shellLit(d) + ")"
+		s += ", " + p
+	}
+	s += ")"
+	if len(q.Sort) > 0 {
+		s += ".sort(" + l.FormatSort(q.Sort) + ")"
+	}
+	if q.Limit > 0 {
+		s += ".limit(" + strconv.FormatInt(q.Limit, 10) + ")"
 	}
 	return s, nil
+}
+
+func (*language) ValidateProjection(text string) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if _, err := parseDocument(text); err != nil {
+		return fmt.Errorf("projection: %w", err)
+	}
+	return nil
+}
+
+func (*language) ParseSort(text string) ([]db.SortKey, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	d, err := parseDocument(text)
+	if err != nil {
+		return nil, fmt.Errorf("sort: %w", err)
+	}
+	var out []db.SortKey
+	for _, e := range d {
+		n, ok := toFloat(e.Value)
+		if !ok || n != 1 && n != -1 {
+			return nil, fmt.Errorf("sort: %s must be 1 or -1", e.Key)
+		}
+		out = append(out, db.SortKey{Field: e.Key, Desc: n < 0})
+	}
+	return out, nil
+}
+
+func (*language) FormatSort(keys []db.SortKey) string {
+	d := bson.D{}
+	for _, k := range keys {
+		dir := int32(1)
+		if k.Desc {
+			dir = -1
+		}
+		d = append(d, bson.E{Key: k.Field, Value: dir})
+	}
+	return shellLit(d)
+}
+
+func (*language) Operators() []string { return operators }
+
+func (*language) FilterLabel() string { return "Filter" }
+
+func (*language) MenuLabels() (string, string) {
+	return "Find in new console", "Generate insert / update / delete…"
+}
+
+// FormatDocument writes a document as indented shell text.
+func (*language) FormatDocument(d db.DocNode) string {
+	var b strings.Builder
+	writeNode(&b, d, 0)
+	return b.String()
+}
+
+// inline reports whether a node fits on one line (no nested documents,
+// short).
+func inline(n db.DocNode) bool {
+	if len(n.Children) == 0 {
+		return true
+	}
+	size := 0
+	for _, c := range n.Children {
+		if len(c.Children) > 0 || c.IsObject() {
+			return false
+		}
+		size += len(c.Lit) + len(c.Name) + 2
+	}
+	return n.IsArray() && size < 60
+}
+
+func writeNode(b *strings.Builder, n db.DocNode, depth int) {
+	switch {
+	case n.IsObject() && len(n.Children) == 0:
+		b.WriteString("{}")
+	case n.IsArray() && inline(n):
+		b.WriteString("[")
+		for i, c := range n.Children {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(c.Lit)
+		}
+		b.WriteString("]")
+	case n.IsObject() || n.IsArray():
+		open, end := "{", "}"
+		if n.IsArray() {
+			open, end = "[", "]"
+		}
+		pad := strings.Repeat("  ", depth+1)
+		b.WriteString(open + "\n")
+		for i, c := range n.Children {
+			b.WriteString(pad)
+			if n.IsObject() {
+				b.WriteString(key(c.Name) + ": ")
+			}
+			writeNode(b, c, depth+1)
+			if i < len(n.Children)-1 {
+				b.WriteString(",")
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString(strings.Repeat("  ", depth) + end)
+	default:
+		b.WriteString(n.Lit)
+	}
+}
+
+// DocumentChanges diffs an edited document with the original, field by
+// field into nested documents: changed or new fields are set by path,
+// missing ones removed. Arrays and values of other types are replaced
+// whole; the _id can't change.
+func (l *language) DocumentChanges(orig db.DocNode, edited string) ([]db.ColValue, []db.ColValue, error) {
+	id, ok := orig.Field("_id")
+	if !ok {
+		return nil, nil, errors.New("the document has no _id: it can't be updated")
+	}
+	key := []db.ColValue{{Column: "_id", Kind: id.Kind, Value: db.Raw(id.Lit)}}
+	before, err := parseDocument(l.FormatDocument(orig))
+	if err != nil {
+		return nil, nil, fmt.Errorf("original document: %w", err)
+	}
+	after, err := parseDocument(edited)
+	if err != nil {
+		return nil, nil, err
+	}
+	if nid, ok := field(after, "_id"); !ok || shellLit(nid) != id.Lit {
+		return nil, nil, errors.New("the _id can't be changed (insert a copy and delete the original)")
+	}
+	var vals []db.ColValue
+	var diff func(prefix string, a, b bson.D) error
+	diff = func(prefix string, a, b bson.D) error {
+		for _, e := range b {
+			if prefix == "" && e.Key == "_id" {
+				continue
+			}
+			if !plainKeys(bson.D{e}) {
+				return fmt.Errorf("field %q can't be edited by path: change it in the console", prefix+e.Key)
+			}
+			p := prefix + e.Key
+			av, had := field(a, e.Key)
+			ad, aIsDoc := av.(bson.D)
+			bd, bIsDoc := e.Value.(bson.D)
+			switch {
+			case !had:
+				vals = append(vals, db.ColValue{Column: p, Kind: kindOf(e.Value), Value: db.Raw(shellLit(e.Value))})
+			case aIsDoc && bIsDoc && len(ad) > 0 && len(bd) > 0 && plainKeys(ad) && plainKeys(bd):
+				if err := diff(p+".", ad, bd); err != nil {
+					return err
+				}
+			case shellLit(av) != shellLit(e.Value):
+				vals = append(vals, db.ColValue{Column: p, Kind: kindOf(e.Value), Value: db.Raw(shellLit(e.Value))})
+			}
+		}
+		for _, e := range a {
+			if _, ok := field(b, e.Key); !ok {
+				vals = append(vals, db.ColValue{Column: prefix + e.Key, Value: db.Unset})
+			}
+		}
+		return nil
+	}
+	if err := diff("", before, after); err != nil {
+		return nil, nil, err
+	}
+	return key, vals, nil
+}
+
+// NewDocument reads a document to insert.
+func (*language) NewDocument(text string) ([]db.ColValue, error) {
+	d, err := parseDocument(text)
+	if err != nil {
+		return nil, err
+	}
+	vals := make([]db.ColValue, 0, len(d))
+	for _, e := range d {
+		vals = append(vals, db.ColValue{Column: e.Key, Kind: kindOf(e.Value), Value: db.Raw(shellLit(e.Value))})
+	}
+	return vals, nil
 }
 
 // filterText validates a filter and returns its text ("{}" for none).
@@ -428,10 +615,10 @@ func (l *language) Templates(ref db.ObjectRef, info *db.TableInfo) string {
 	doc := bson.D{}
 	set := bson.D{}
 	for _, c := range info.Columns {
-		if c.Name == "_id" || strings.Contains(c.Name, ".") {
+		if c.Name == "_id" {
 			continue
 		}
-		doc = append(doc, bson.E{Key: c.Name, Value: sample(c)})
+		doc = setPath(doc, c.Name, sample(c)) // dotted columns: nested documents
 		if len(set) < 3 {
 			set = append(set, bson.E{Key: c.Name, Value: sample(c)})
 		}
@@ -467,14 +654,69 @@ func changeDoc(vals []db.ColValue) bson.D {
 	return d
 }
 
+// insertDoc builds the document of an insert: dotted columns become
+// nested documents, empty cells and removed fields are left out.
+func insertDoc(vals []db.ColValue, like func(string) any) (bson.D, error) {
+	d := bson.D{}
+	for _, cv := range vals {
+		if cv.Value == nil || cv.Value == db.Unset {
+			continue
+		}
+		v, err := toBSON(cv.Value, cv.Kind, like(cv.Column))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", cv.Column, err)
+		}
+		if _, top := field(d, cv.Column); top || !strings.Contains(cv.Column, ".") {
+			d = append(d, bson.E{Key: cv.Column, Value: v})
+			continue
+		}
+		d = setPath(d, cv.Column, v)
+	}
+	return d, nil
+}
+
+// updateDoc builds {$set: …, $unset: …} of an update by path. like
+// returns the stored value of a path (its type is kept).
+func updateDoc(vals []db.ColValue, like func(string) any) (bson.D, error) {
+	set, unset := bson.D{}, bson.D{}
+	for _, cv := range vals {
+		if cv.Value == db.Unset {
+			unset = append(unset, bson.E{Key: cv.Column, Value: ""})
+			continue
+		}
+		v, err := toBSON(cv.Value, cv.Kind, like(cv.Column))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", cv.Column, err)
+		}
+		set = append(set, bson.E{Key: cv.Column, Value: v})
+	}
+	upd := bson.D{}
+	if len(set) > 0 {
+		upd = append(upd, bson.E{Key: "$set", Value: set})
+	}
+	if len(unset) > 0 {
+		upd = append(upd, bson.E{Key: "$unset", Value: unset})
+	}
+	return upd, nil
+}
+
+func noLike(string) any { return nil }
+
 func (l *language) RenderChange(ref db.ObjectRef, ch db.Change) string {
 	coll := collExpr(ref)
 	switch ch.Op {
 	case db.OpInsert:
-		return coll + ".insertOne(" + shellLit(changeDoc(ch.Values)) + ")"
+		d, err := insertDoc(ch.Values, noLike)
+		if err != nil {
+			return "// " + err.Error()
+		}
+		return coll + ".insertOne(" + shellLit(d) + ")"
 	case db.OpUpdate:
-		// a NULL cell sets null (the field stays)
-		upd := bson.D{{Key: "$set", Value: changeDoc(ch.Values)}}
+		// a NULL cell sets null (the field stays); removed fields are $unset
+		upd, err := updateDoc(ch.Values, noLike)
+		if err != nil {
+			return "// " + err.Error()
+		}
 		return coll + ".updateOne(" + shellLit(changeDoc(ch.Key)) + ", " + shellLit(upd) + ")"
 	}
 	return coll + ".deleteOne(" + shellLit(changeDoc(ch.Key)) + ")"

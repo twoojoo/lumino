@@ -23,6 +23,10 @@ type SortKey struct {
 type BrowseQuery struct {
 	Filter string
 	Sort   []SortKey
+	// Projection and Limit are used by document languages (see
+	// DocumentLanguage); "" / 0 = all fields, no limit.
+	Projection string
+	Limit      int64
 }
 
 // CompletionRef is an object referenced by a statement.
@@ -87,6 +91,8 @@ type Language interface {
 	EqualsFilter(field string, v any, k Kind) string
 	// FilterHint is the placeholder of the filter field.
 	FilterHint() string
+	// FilterLabel names the filter field ("WHERE", "Filter").
+	FilterLabel() string
 	// SortUnsupported explains why browse results can't be sorted by
 	// arbitrary fields ("" = they can, including by primary key).
 	SortUnsupported() string
@@ -98,6 +104,9 @@ type Language interface {
 	// DropStatement drops (or empties, with truncate) an object; verb
 	// names the action. ok is false when the object can't be dropped.
 	DropStatement(ref ObjectRef, truncate bool) (stmt, verb string, ok bool)
+	// MenuLabels are the navigator actions opening OpenTemplate and
+	// Templates in a new console.
+	MenuLabels() (open, templates string)
 	// Templates renders statement templates (insert/update/delete…) of a
 	// table.
 	Templates(ref ObjectRef, info *TableInfo) string

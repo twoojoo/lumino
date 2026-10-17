@@ -817,10 +817,11 @@ func (s *Sidebar) contextMenu(r treeRow) {
 		add(icDescribe, "DDL", "", false, func() { a.openObject(r.connID, ref, "ddl") })
 		sep()
 		if ref.Type.Relation() && connected {
-			add(icConsole, "SELECT in new console", "", false, func() {
+			openLabel, tmplLabel := lang.MenuLabels()
+			add(icConsole, openLabel, "", false, func() {
 				a.newConsole(r.connID, ref.Schema, lang.OpenTemplate(ref)+"\n")
 			})
-			add(icConsole, "Generate INSERT / UPDATE / DELETE…", "", false, func() { a.generateDML(r.connID, ref) })
+			add(icConsole, tmplLabel, "", false, func() { a.generateDML(r.connID, ref) })
 		}
 		add(icCopyText, "Copy name", "", false, func() { a.copyLater(ref.Name) })
 		if connected {

@@ -92,6 +92,12 @@ type CodeEditor struct {
 	ErrLine          int // line with the last error (-1 = none)
 	ErrCol           int
 
+	// SingleLine: a one-line field (query bars): Enter calls OnSubmit,
+	// pasted line breaks become spaces, no gutter; Hint shows when empty.
+	SingleLine bool
+	OnSubmit   func()
+	Hint       string
+
 	// owner hooks
 	OnCommand     func(cmd string) bool
 	OnChange      func()
@@ -543,6 +549,13 @@ func (e *CodeEditor) onEdit(ev key.EditEvent) {
 		e.replaceRange(a, z, s, false)
 		return
 	}
+	if e.SingleLine && strings.ContainsAny(s, "\r\n") {
+		if s == "\n" {
+			e.submit()
+			return
+		}
+		s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+	}
 	switch s {
 	case "\n":
 		e.newline()
@@ -575,6 +588,20 @@ func (e *CodeEditor) onEdit(ev key.EditEvent) {
 	} else if e.comp != nil {
 		e.comp = nil
 	}
+}
+
+// submit runs OnSubmit (single-line fields).
+func (e *CodeEditor) submit() {
+	e.comp = nil
+	if e.OnSubmit != nil {
+		e.OnSubmit()
+	}
+}
+
+// lineHeight is the height of one line at the current font size.
+func (e *CodeEditor) lineHeight(gtx C) int {
+	e.measure(gtx)
+	return e.lineH
 }
 
 // newline inserts a line break keeping the indentation.
@@ -656,6 +683,9 @@ func (e *CodeEditor) onKey(gtx C, k key.Event) {
 			if e.OnCommand != nil {
 				e.OnCommand(cmd)
 			}
+		} else if e.SingleLine {
+			e.submit()
+			e.skipNL = true
 		} else {
 			e.newline()
 			e.skipNL = true
@@ -1106,7 +1136,12 @@ func (e *CodeEditor) onPointer(gtx C, pe pointer.Event, size image.Point) {
 	}
 }
 
-func (e *CodeEditor) contentH() int { return e.buf.lineCount()*e.lineH + e.lineH*3 }
+func (e *CodeEditor) contentH() int {
+	if e.SingleLine {
+		return e.lineH
+	}
+	return e.buf.lineCount()*e.lineH + e.lineH*3
+}
 
 func (e *CodeEditor) scrollBarJump(y, h int) {
 	total := e.contentH()
@@ -1124,6 +1159,9 @@ func (e *CodeEditor) Layout(gtx C) D {
 
 	digits := len(itoa(e.buf.lineCount()))
 	e.gutterW = int(float32(max(3, digits))*e.charW) + gtx.Dp(28)
+	if e.SingleLine {
+		e.gutterW = gtx.Dp(8)
+	}
 
 	// pointer + keyboard area
 	area := clip.Rect{Max: size}.Push(gtx.Ops)
@@ -1227,9 +1265,16 @@ func (e *CodeEditor) Layout(gtx C) D {
 		e.drawLine(gtx, th, ln, line, textX, y, size.X)
 	}
 
+	if e.SingleLine && e.Hint != "" && e.buf.lineCount() == 1 && e.buf.lines[0] == "" {
+		st := op.Offset(image.Pt(textX, e.ascent)).Push(gtx.Ops)
+		g := gtx
+		g.Constraints = layout.Exact(image.Pt(max(0, size.X-textX), e.lineH))
+		lbl(g, th, fontMono, e.size*0.92, pal.TextDim, e.Hint)
+		st.Pop()
+	}
 	// gutter
 	fillRect(gtx, pal.CodeBg, image.Rect(0, 0, e.gutterW-gtx.Dp(8), size.Y))
-	for ln := first; ln <= last; ln++ {
+	for ln := first; ln <= last && !e.SingleLine; ln++ {
 		y := ln*e.lineH - e.scrollY
 		c := withAlpha(pal.TextDim, 0x90)
 		if ln == e.caret.line {

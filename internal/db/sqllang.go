@@ -127,6 +127,12 @@ func (l *SQLLanguage) FilterHint() string {
 
 func (l *SQLLanguage) SortUnsupported() string { return "" }
 
+func (l *SQLLanguage) FilterLabel() string { return "WHERE" }
+
+func (l *SQLLanguage) MenuLabels() (string, string) {
+	return "SELECT in new console", "Generate INSERT / UPDATE / DELETE…"
+}
+
 func (l *SQLLanguage) DisplayName(ref ObjectRef) string { return l.D.Qualified(ref) }
 
 func (l *SQLLanguage) OpenTemplate(ref ObjectRef) string {
