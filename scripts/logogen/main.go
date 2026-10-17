@@ -1,156 +1,115 @@
-// Command logogen draws the Lumino logo artwork (packaging/logo-source.png,
-// 1024×1024 RGBA): a rounded Ayu tile with a database cylinder lit by a
-// spark. Run it, then `make icons`.
+// Command logogen turns a logo artwork into packaging/logo-source.png
+// (1024×1024 RGBA): the rounded tile of -src is cut out of its flat black
+// surround (made transparent) and centered in the same 64 px safe-area
+// margin the icons always had. Run it, then `make icons`.
 //
-//	go run ./scripts/logogen
+//	go run ./scripts/logogen -src path/to/artwork.png
 package main
 
 import (
 	"flag"
 	"image"
-	"image/color"
-	"image/draw"
+	_ "image/jpeg"
 	"image/png"
 	"log"
-	"math"
 	"os"
 
-	"golang.org/x/image/vector"
+	"golang.org/x/image/draw"
 )
 
-const S = 1024
+const (
+	S      = 1024 // output size
+	margin = 64   // transparent safe area around the tile
+	black  = 10   // max channel (0–255) of a surround pixel
+)
 
-func rgb(c uint32, a uint8) color.NRGBA {
-	return color.NRGBA{uint8(c >> 16), uint8(c >> 8), uint8(c), a}
-}
-
-// fill rasterizes a path and paints it with c (or a vertical gradient).
-func fill(dst *image.NRGBA, build func(r *vector.Rasterizer), src image.Image) {
-	r := vector.NewRasterizer(S, S)
-	build(r)
-	r.Draw(dst, dst.Bounds(), src, image.Point{})
-}
-
-func roundRect(r *vector.Rasterizer, x0, y0, x1, y1, rad float32) {
-	k := float32(0.5523) * rad
-	r.MoveTo(x0+rad, y0)
-	r.LineTo(x1-rad, y0)
-	r.CubeTo(x1-rad+k, y0, x1, y0+rad-k, x1, y0+rad)
-	r.LineTo(x1, y1-rad)
-	r.CubeTo(x1, y1-rad+k, x1-rad+k, y1, x1-rad, y1)
-	r.LineTo(x0+rad, y1)
-	r.CubeTo(x0+rad-k, y1, x0, y1-rad+k, x0, y1-rad)
-	r.LineTo(x0, y0+rad)
-	r.CubeTo(x0, y0+rad-k, x0+rad-k, y0, x0+rad, y0)
-	r.ClosePath()
-}
-
-// ellipseArc adds an elliptical arc (angles in radians) to the path.
-func ellipse(r *vector.Rasterizer, cx, cy, rx, ry float32, from, to float64, move bool) {
-	steps := 64
-	for i := 0; i <= steps; i++ {
-		a := from + (to-from)*float64(i)/float64(steps)
-		x := cx + rx*float32(math.Cos(a))
-		y := cy + ry*float32(math.Sin(a))
-		if i == 0 && move {
-			r.MoveTo(x, y)
-		} else {
-			r.LineTo(x, y)
+// cutout returns the tile of art (whatever is not reachable from the image
+// border through near-black pixels) on a transparent S×S canvas.
+func cutout(art image.Image) *image.NRGBA {
+	b := art.Bounds()
+	w, h := b.Dx(), b.Dy()
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(src, src.Rect, art, b.Min, draw.Src)
+	dark := func(i int) bool {
+		p := src.Pix[i*4 : i*4+4]
+		return p[3] == 0 || max(p[0], p[1], p[2]) <= black
+	}
+	// flood fill the surround from every border pixel
+	out := make([]bool, w*h)
+	var stack []int
+	push := func(x, y int) {
+		if x < 0 || y < 0 || x >= w || y >= h {
+			return
+		}
+		if i := y*w + x; !out[i] && dark(i) {
+			out[i] = true
+			stack = append(stack, i)
 		}
 	}
-}
-
-type vgrad struct {
-	top, bottom color.NRGBA
-	y0, y1      float64
-}
-
-func (g vgrad) ColorModel() color.Model { return color.NRGBAModel }
-func (g vgrad) Bounds() image.Rectangle { return image.Rect(-1e9, -1e9, 1e9, 1e9) }
-func (g vgrad) At(x, y int) color.Color {
-	t := math.Max(0, math.Min(1, (float64(y)-g.y0)/(g.y1-g.y0)))
-	m := func(a, b uint8) uint8 { return uint8(float64(a) + (float64(b)-float64(a))*t) }
-	return color.NRGBA{m(g.top.R, g.bottom.R), m(g.top.G, g.bottom.G), m(g.top.B, g.bottom.B), m(g.top.A, g.bottom.A)}
+	for x := 0; x < w; x++ {
+		push(x, 0)
+		push(x, h-1)
+	}
+	for y := 0; y < h; y++ {
+		push(0, y)
+		push(w-1, y)
+	}
+	for len(stack) > 0 {
+		i := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		x, y := i%w, i/w
+		push(x+1, y)
+		push(x-1, y)
+		push(x, y+1)
+		push(x, y-1)
+	}
+	tile := image.Rectangle{}
+	for i, o := range out {
+		if o {
+			copy(src.Pix[i*4:i*4+4], []uint8{0, 0, 0, 0})
+		} else {
+			tile = tile.Union(image.Rect(i%w, i/w, i%w+1, i/w+1))
+		}
+	}
+	dst := image.NewNRGBA(image.Rect(0, 0, S, S))
+	if tile.Empty() {
+		return dst
+	}
+	// fit the tile in the safe area, keeping its aspect ratio
+	side := S - 2*margin
+	tw, th := side, side
+	if tile.Dx() > tile.Dy() {
+		th = side * tile.Dy() / tile.Dx()
+	} else {
+		tw = side * tile.Dx() / tile.Dy()
+	}
+	at := image.Rect((S-tw)/2, (S-th)/2, (S-tw)/2+tw, (S-th)/2+th)
+	draw.CatmullRom.Scale(dst, at, src, tile, draw.Src, nil)
+	return dst
 }
 
 func main() {
+	in := flag.String("src", "", "logo artwork (rounded tile on a black or transparent surround)")
 	out := flag.String("out", "packaging/logo-source.png", "output PNG")
 	flag.Parse()
-	img := image.NewNRGBA(image.Rect(0, 0, S, S))
-	// tile
-	fill(img, func(r *vector.Rasterizer) { roundRect(r, 64, 64, S-64, S-64, 210) },
-		vgrad{rgb(0x242936, 255), rgb(0x0b0e14, 255), 64, S - 64})
-	// glow behind the cylinder
-	glow := image.NewNRGBA(img.Bounds())
-	for y := 0; y < S; y++ {
-		for x := 0; x < S; x++ {
-			d := math.Hypot(float64(x-512), float64(y-560)) / 360
-			if d < 1 {
-				a := uint8(70 * (1 - d) * (1 - d))
-				glow.SetNRGBA(x, y, rgb(0xe6b450, a))
-			}
-		}
+	if *in == "" {
+		log.Fatal("-src is required")
 	}
-	mask := image.NewAlpha(img.Bounds())
-	mr := vector.NewRasterizer(S, S)
-	roundRect(mr, 64, 64, S-64, S-64, 210)
-	mr.Draw(mask, mask.Bounds(), image.Opaque, image.Point{})
-	draw.DrawMask(img, img.Bounds(), glow, image.Point{}, mask, image.Point{}, draw.Over)
-
-	cx, rx, ry := float32(512), float32(250), float32(78)
-	gold := vgrad{rgb(0xffcc66, 255), rgb(0xe08a1e, 255), 300, 820}
-	// three stacked drums, bottom first
-	for i, top := range []float32{640, 500, 360} {
-		h := float32(118)
-		fill(img, func(r *vector.Rasterizer) {
-			ellipse(r, cx, top, rx, ry, math.Pi, 0, true)       // back of the top rim
-			r.LineTo(cx+rx, top+h)                              // right side
-			ellipse(r, cx, top+h, rx, ry, 0, math.Pi, false)     // front of the bottom rim
-			r.LineTo(cx-rx, top)
-			r.ClosePath()
-		}, gold)
-		// band separator shadow
-		fill(img, func(r *vector.Rasterizer) {
-			ellipse(r, cx, top+h, rx, ry, 0, math.Pi, true)
-			ellipse(r, cx, top+h-10, rx, ry, math.Pi, 0, false)
-			r.ClosePath()
-		}, image.NewUniform(rgb(0x8a4b10, 150)))
-		_ = i
-	}
-	// top face
-	fill(img, func(r *vector.Rasterizer) { ellipse(r, cx, 360, rx, ry, 0, 2*math.Pi, true); r.ClosePath() },
-		vgrad{rgb(0xfff0c0, 255), rgb(0xffd173, 255), 282, 438})
-	fill(img, func(r *vector.Rasterizer) { ellipse(r, cx, 360, rx-36, ry-16, 0, 2*math.Pi, true); r.ClosePath() },
-		image.NewUniform(rgb(0xffffff, 60)))
-	// spark (4-point star) top right
-	star := func(x, y, R, rIn float32, c color.NRGBA) {
-		fill(img, func(r *vector.Rasterizer) {
-			for i := 0; i < 8; i++ {
-				a := float64(i) * math.Pi / 4
-				rad := R
-				if i%2 == 1 {
-					rad = rIn
-				}
-				px, py := x+rad*float32(math.Sin(a)), y-rad*float32(math.Cos(a))
-				if i == 0 {
-					r.MoveTo(px, py)
-				} else {
-					r.LineTo(px, py)
-				}
-			}
-			r.ClosePath()
-		}, image.NewUniform(c))
-	}
-	star(770, 250, 120, 26, rgb(0x73d0ff, 255))
-	star(770, 250, 60, 13, rgb(0xffffff, 230))
-	star(690, 170, 42, 10, rgb(0x95e6cb, 230))
-
-	f, err := os.Create(*out)
+	f, err := os.Open(*in)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
-	if err := png.Encode(f, img); err != nil {
+	art, _, err := image.Decode(f)
+	f.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+	o, err := os.Create(*out)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer o.Close()
+	if err := png.Encode(o, cutout(art)); err != nil {
 		log.Fatal(err)
 	}
 }

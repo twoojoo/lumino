@@ -1,7 +1,7 @@
 // Command icongen builds every icon file from the logo artwork
 // (packaging/logo-source.png, 1024×1024 RGBA): PNGs 16–1024 for Linux,
-// lumino.ico (Windows) and lumino.icns (macOS) in -out, and the tile-only
-// logo the UI draws in -ui.
+// lumino.ico (Windows) and lumino.icns (macOS) in -out, the tile-only
+// logo the UI draws in -ui and the website's logo and favicon in -site.
 //
 //	go run ./scripts/icongen
 package main
@@ -94,6 +94,7 @@ func main() {
 	src := flag.String("src", "packaging/logo-source.png", "1024×1024 logo artwork")
 	out := flag.String("out", "packaging/icons", "output directory")
 	ui := flag.String("ui", "internal/ui/assets", "UI assets directory")
+	site := flag.String("site", "internal/site/static/img", "website images directory")
 	flag.Parse()
 	f, err := os.Open(*src)
 	if err != nil {
@@ -104,7 +105,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, d := range []string{*out, *ui} {
+	for _, d := range []string{*out, *ui, *site} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			log.Fatal(err)
 		}
@@ -114,6 +115,12 @@ func main() {
 	for _, s := range sizes {
 		pngs[s] = encode(resize(art, s))
 		if err := os.WriteFile(filepath.Join(*out, fmt.Sprintf("lumino-%d.png", s)), pngs[s], 0o644); err != nil {
+			log.Fatal(err)
+		}
+	}
+	// website: favicon, header brand (32dp at 2x), home page / og:image
+	for name, s := range map[string]int{"favicon-32.png": 32, "logo-64.png": 64, "logo.png": 256} {
+		if err := os.WriteFile(filepath.Join(*site, name), pngs[s], 0o644); err != nil {
 			log.Fatal(err)
 		}
 	}
