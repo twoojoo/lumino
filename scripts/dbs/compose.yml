@@ -129,6 +129,27 @@ services:
         exec docker-entrypoint.sh cassandra -f
     ports: ["127.0.0.1:55043:9042"]
 
+  # single-node replica set (transactions, change streams); the health
+  # check initiates it. Clients connect directly (directConnection).
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: ["127.0.0.1:55017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval",
+        "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: '127.0.0.1:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # MongoDB-compatible, no transactions; SCRAM user lumino / lumino
+  ferretdb:
+    image: ghcr.io/ferretdb/ferretdb-eval:2
+    environment:
+      POSTGRES_USER: lumino
+      POSTGRES_PASSWORD: lumino
+    ports: ["127.0.0.1:55018:27017"]
+
   trino:
     image: trinodb/trino:476
     ports: ["127.0.0.1:55080:8080"]

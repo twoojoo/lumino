@@ -16,6 +16,7 @@ import (
 	"gioui.org/widget"
 
 	"github.com/twoojoo/lumino/internal/db"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mongo"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/postgres"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
 	"github.com/twoojoo/lumino/internal/prefs"
@@ -303,5 +304,32 @@ func TestFormsRegressTipLblPassThrough(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("right-click on the label did not reach the row")
+	}
+}
+
+func TestFormsMongoURL(t *testing.T) {
+	d := newTestConnDialog(t, nil, "postgres", "")
+	if err := d.fromURL("mongodb://ada:s%40cret@127.0.0.1:55017,127.0.0.1:55018/shop?replicaSet=rs0&authSource=admin"); err != nil {
+		t.Fatal(err)
+	}
+	if d.info().ID != "mongodb" || d.host.Text() != "127.0.0.1:55017,127.0.0.1:55018" || d.port.Text() != "" ||
+		d.user.Text() != "ada" || d.password.Text() != "s@cret" || d.database.Text() != "shop" ||
+		d.params.Text() != "authSource=admin\nreplicaSet=rs0" {
+		t.Fatalf("form: %q %q %q %q %q", d.host.Text(), d.port.Text(), d.user.Text(), d.database.Text(), d.params.Text())
+	}
+	c, err := d.config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Driver != "mongodb" || c.Param("replicaSet") != "rs0" || c.Host != "127.0.0.1:55017,127.0.0.1:55018" {
+		t.Fatalf("config %+v", c)
+	}
+	if err := d.fromURL("mongodb+srv://cluster0.example.net/"); err != nil || !strings.Contains(d.params.Text(), "srv=true") ||
+		tlsModes[d.tlsMode] != "verify-full" {
+		t.Fatalf("srv: %v %q", err, d.params.Text())
+	}
+	// other schemes still go through dburl
+	if err := d.fromURL("postgres://u@h:5433/x"); err != nil || d.info().ID != "postgres" || d.port.Text() != "5433" {
+		t.Fatalf("postgres: %v", err)
 	}
 }

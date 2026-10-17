@@ -29,6 +29,8 @@ const (
 	KindJSON
 	KindUUID
 	KindArray
+	// KindObjectID is a MongoDB ObjectId (24 hex digits as a string).
+	KindObjectID
 )
 
 func (k Kind) String() string {
@@ -61,6 +63,8 @@ func (k Kind) String() string {
 		return "uuid"
 	case KindArray:
 		return "array"
+	case KindObjectID:
+		return "objectid"
 	}
 	return "other"
 }

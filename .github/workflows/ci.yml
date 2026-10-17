@@ -52,7 +52,7 @@ jobs:
       # Oracle Free and Cassandra are too heavy for hosted runners: they run
       # in the local suite (make db-up)
       - name: development databases
-        run: make db-up DBS="postgres cockroach mysql mariadb tidb mssql clickhouse firebird scylla trino bastion"
+        run: make db-up DBS="postgres cockroach mysql mariadb tidb mssql clickhouse firebird scylla mongo ferretdb trino bastion"
       # headless Gio renders through EGL; Xvfb + Mesa llvmpipe provide it
       - run: xvfb-run -a make test-int GIO_TAGS=
       - if: always()

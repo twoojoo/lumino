@@ -112,6 +112,11 @@ func newCodeEditor(a *App, txt string) *CodeEditor {
 	return e
 }
 
+// isKeyword reports whether w is a keyword: SQL keyword sets are upper
+// case (matched in any case), case-sensitive languages list them as
+// written.
+func (e *CodeEditor) isKeyword(w string) bool { return e.kw[strings.ToUpper(w)] || e.kw[w] }
+
 // setLanguage selects lexing rules and keyword sets (nil = generic SQL).
 func (e *CodeEditor) setLanguage(l db.Language) {
 	if l == nil {
@@ -414,10 +419,10 @@ func (e *CodeEditor) tokColor(line string, toks []sqlx.Token, i int) colorNRGBA 
 			next++
 		}
 		call := next < len(toks) && toks[next].Kind == sqlx.TPunct && line[toks[next].Start] == '('
-		if call && (e.funcs[lw] || !e.kw[strings.ToUpper(w)]) {
+		if call && (e.funcs[lw] || !e.isKeyword(w)) {
 			return pal.Func
 		}
-		if e.kw[strings.ToUpper(w)] {
+		if e.isKeyword(w) {
 			return pal.Keyword
 		}
 		if e.types[lw] {

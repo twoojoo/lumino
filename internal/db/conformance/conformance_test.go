@@ -11,6 +11,7 @@ import (
 	_ "github.com/twoojoo/lumino/internal/db/adapters/clickhouse"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/cockroach"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/firebird"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/mongo"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/mssql"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/mysql"
 	_ "github.com/twoojoo/lumino/internal/db/adapters/oracle"
@@ -35,3 +36,7 @@ func TestFirebird(t *testing.T)   { run(t, "firebird") }
 func TestTrino(t *testing.T)      { run(t, "trino") }
 func TestScylla(t *testing.T)     { run(t, "scylla") }
 func TestCassandra(t *testing.T)  { run(t, "cassandra") }
+
+// document databases: the document suite
+func TestMongoDB(t *testing.T)  { dbtest.RunDocuments(t, dbtest.Targets()["mongo"]) }
+func TestFerretDB(t *testing.T) { dbtest.RunDocuments(t, dbtest.Targets()["ferretdb"]) }

@@ -79,6 +79,14 @@ func (i Info) Has(f Field) bool {
 	return false
 }
 
+// URLParser is implemented by drivers parsing their own connection URLs
+// (pasted in the connection form) instead of the generic dburl parser.
+type URLParser interface {
+	// ParseURL returns the connection described by u; ok is false when
+	// the scheme is not the driver's.
+	ParseURL(u string) (cfg Config, ok bool, err error)
+}
+
 // Driver opens connections to one kind of database.
 type Driver interface {
 	Info() Info

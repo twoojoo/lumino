@@ -264,6 +264,54 @@ SET TERM ; ^
 SELECT n FROM customer_count;`,
 	},
 	{
+		Slug: "mongodb", Driver: "mongodb", Name: "MongoDB",
+		Title:       "MongoDB GUI client and shell editor — Lumino DB",
+		Description: "Lumino is a free, native MongoDB GUI: mongosh console with completion, collections and views, inferred fields, indexes, type-safe document editing.",
+		Lib:         "mongodb/mongo-go-driver", LibURL: "https://github.com/mongodb/mongo-go-driver",
+		Intro: []string{
+			"Lumino talks to MongoDB with the official Go driver. Databases show up like schemas, with their collections and views; the fields of a collection are inferred from a sample of its documents.",
+			"The console runs mongosh statements — db.orders.find({…}).sort({…}), aggregate, insertOne, updateMany, createIndex, runCommand, use, show — with ObjectId(), ISODate(), NumberDecimal() and the other shell helpers. Results stream into the grid as you scroll.",
+			"Paste a mongodb:// or mongodb+srv:// connection string to fill the connection form.",
+		},
+		Highlights: []string{
+			"Collections, views, time series and capped collections in the navigator; inferred fields with their BSON types, indexes and validators.",
+			"Filter the data view with a query document ({status: \"A\", qty: {$lt: 30}}), sort by any field, count matches.",
+			"Document editing by _id: values keep their BSON type (an int stays an int, a long a long), nested documents and arrays are edited as Extended JSON.",
+			"Statements are classified before they run: deleteMany({}), drop() and $out need the typed confirmation on protected connections, read-only connections refuse writes.",
+			"Transactions on replica sets and sharded clusters, SCRAM, X.509 and AWS IAM authentication, TLS and SSH tunnels.",
+		},
+		Notes: []string{
+			"MongoDB 5.0 or newer. Transactions need a replica set or a sharded cluster.",
+			"Read-only sessions are enforced by Lumino (every statement is parsed and classified), MongoDB has no server-side read-only session.",
+			"Fields first seen after the first 1000 documents of a result are not shown as columns.",
+		},
+		ExampleTitle: "MongoDB shell",
+		Example: `db.orders.find({status: "shipped", total: {$gte: 100}}).sort({created: -1}).limit(50);
+db.orders.aggregate([{$group: {_id: "$customer", spent: {$sum: "$total"}}}, {$sort: {spent: -1}}]);
+db.customers.updateOne({_id: ObjectId("65f1c0a2e4b0a1b2c3d4e5f6")}, {$set: {email: "ada@example.com"}});`,
+	},
+	{
+		Slug: "ferretdb", Driver: "mongodb", Name: "FerretDB",
+		Title:       "FerretDB GUI client — Lumino DB",
+		Description: "Browse, query and edit FerretDB with Lumino, a free native MongoDB-compatible client for Linux, Windows and macOS.",
+		Lib:         "mongodb/mongo-go-driver", LibURL: "https://github.com/mongodb/mongo-go-driver",
+		Intro: []string{
+			"FerretDB speaks the MongoDB wire protocol on top of PostgreSQL. Lumino's MongoDB connection type is tested against it in the same conformance suite as MongoDB.",
+			"Use the MongoDB connection type with the FerretDB host, port, user and password, or paste its mongodb:// URL.",
+		},
+		Highlights: []string{
+			"Databases, collections and inferred fields in the navigator.",
+			"mongosh statements in the console, with results streamed into the grid.",
+			"Document editing by _id with a review of the generated statements.",
+		},
+		Notes: []string{
+			"FerretDB has no transactions: edits are applied one document at a time.",
+		},
+		ExampleTitle: "MongoDB shell",
+		Example: `db.events.find({type: "signup"}).sort({at: -1}).limit(20);
+db.events.countDocuments({at: {$gte: ISODate("2026-01-01")}});`,
+	},
+	{
 		Slug: "cassandra", Driver: "cassandra", Name: "Apache Cassandra",
 		Title:       "Apache Cassandra GUI client and CQL editor — Lumino DB",
 		Description: "Lumino is a free, native Cassandra GUI: CQL editor with completion, keyspaces, tables, materialized views, paging through large partitions, row editing.",

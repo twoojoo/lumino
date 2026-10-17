@@ -275,6 +275,23 @@ func (d *ConnDialog) config() (db.Config, error) {
 
 // fromURL fills the form from a connection URL.
 func (d *ConnDialog) fromURL(s string) error {
+	// drivers with their own URL syntax (several hosts, mongodb+srv…)
+	for i, dr := range d.drivers {
+		p, ok := dr.(db.URLParser)
+		if !ok {
+			continue
+		}
+		cfg, ok, err := p.ParseURL(s)
+		if !ok {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		d.drv = i
+		d.fillFrom(cfg)
+		return nil
+	}
 	u, err := dburl.Parse(strings.TrimSpace(s))
 	if err != nil {
 		return err
@@ -335,6 +352,38 @@ func (d *ConnDialog) fromURL(s string) error {
 		d.advanced = true
 	}
 	return nil
+}
+
+// fillFrom sets the address, credentials, TLS and parameters fields from
+// a parsed connection.
+func (d *ConnDialog) fillFrom(c db.Config) {
+	d.host.SetText(c.Host)
+	d.port.SetText("")
+	if c.Port > 0 {
+		d.port.SetText(strconv.Itoa(c.Port))
+	}
+	d.user.SetText(c.User)
+	if c.Password != "" {
+		d.password.SetText(c.Password)
+	}
+	d.database.SetText(c.Database)
+	for k, mode := range tlsModes {
+		if mode == c.TLS.Mode {
+			d.tlsMode = k
+		}
+	}
+	d.caFile.SetText(c.TLS.CAFile)
+	d.certFile.SetText(c.TLS.CertFile)
+	d.keyFile.SetText(c.TLS.KeyFile)
+	var ps []string
+	for k, v := range c.Params {
+		ps = append(ps, k+"="+v)
+	}
+	sort.Strings(ps)
+	d.params.SetText(strings.Join(ps, "\n"))
+	if len(ps) > 0 || c.TLS.Enabled() {
+		d.advanced = true
+	}
 }
 
 func (d *ConnDialog) Done() bool { return d.done }

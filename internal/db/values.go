@@ -275,6 +275,14 @@ func ParseValue(s string, k Kind) (any, error) {
 			return nil, fmt.Errorf("invalid JSON")
 		}
 		return t, nil
+	case KindObjectID:
+		if len(t) != 24 {
+			return nil, fmt.Errorf("%q is not an ObjectId (24 hex digits)", s)
+		}
+		if _, err := hex.DecodeString(t); err != nil {
+			return nil, fmt.Errorf("%q is not an ObjectId (24 hex digits)", s)
+		}
+		return strings.ToLower(t), nil
 	}
 	return s, nil
 }
