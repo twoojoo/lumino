@@ -177,28 +177,28 @@ func TestFormsRegressPickerIndex(t *testing.T) {
 func TestFormsRegressDropAndTruncate(t *testing.T) {
 	ref := db.ObjectRef{Schema: "main", Name: "t", Type: db.ObjTable}
 	for _, id := range []string{"sqlite", "firebird"} {
-		d := &db.BaseDialect{ID: id, QuoteL: `"`, QuoteR: `"`}
-		stmt, verb := dropStatement(d, ref, true)
-		if !strings.HasPrefix(stmt, "DELETE FROM ") || verb != "Delete all rows" || truncateLabel(id) != "Delete all rows…" {
+		d := db.NewSQLLanguage(&db.BaseDialect{ID: id, QuoteL: `"`, QuoteR: `"`})
+		stmt, verb, _ := d.DropStatement(ref, true)
+		if !strings.HasPrefix(stmt, "DELETE FROM ") || verb != "Delete all rows" {
 			t.Fatalf("%s: %q %q", id, stmt, verb)
 		}
 	}
-	pg := &db.BaseDialect{ID: "postgres", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower, Params: db.ParamDollar}
-	if stmt, _ := dropStatement(pg, ref, true); stmt != "TRUNCATE TABLE main.t" {
+	pg := db.NewSQLLanguage(&db.BaseDialect{ID: "postgres", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower, Params: db.ParamDollar})
+	if stmt, verb, _ := pg.DropStatement(ref, true); stmt != "TRUNCATE TABLE main.t" || verb != "Truncate" {
 		t.Fatalf("pg truncate: %q", stmt)
 	}
-	cql := &db.BaseDialect{ID: "cql", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower}
+	cql := db.NewSQLLanguage(&db.BaseDialect{ID: "cql", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower})
 	fn := db.ObjectRef{Schema: "ks", Name: "f", Type: db.ObjFunction, Signature: "(int)"}
-	if stmt, _ := dropStatement(cql, fn, false); stmt != "DROP FUNCTION ks.f(int)" {
+	if stmt, _, _ := cql.DropStatement(fn, false); stmt != "DROP FUNCTION ks.f(int)" {
 		t.Fatalf("cql drop function: %q", stmt)
 	}
-	if stmt, _ := dropStatement(pg, fn, false); stmt != "DROP FUNCTION ks.f(int)" {
+	if stmt, _, _ := pg.DropStatement(fn, false); stmt != "DROP FUNCTION ks.f(int)" {
 		t.Fatalf("pg drop function: %q", stmt)
 	}
 }
 
 func TestFormsRegressDMLPlaceholdersSequential(t *testing.T) {
-	pg := &db.BaseDialect{ID: "postgres", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower, Params: db.ParamDollar}
+	pg := db.NewSQLLanguage(&db.BaseDialect{ID: "postgres", QuoteL: `"`, QuoteR: `"`, Fold: db.FoldLower, Params: db.ParamDollar})
 	info := &db.TableInfo{
 		Columns: []db.TableColumn{
 			{Name: "id", PrimaryKeyNo: 1},
@@ -208,7 +208,7 @@ func TestFormsRegressDMLPlaceholdersSequential(t *testing.T) {
 		},
 		PrimaryKey: []string{"id"},
 	}
-	sql := dmlTemplates(pg, db.ObjectRef{Name: "t", Type: db.ObjTable}, info)
+	sql := pg.Templates(db.ObjectRef{Name: "t", Type: db.ObjTable}, info)
 	for _, want := range []string{
 		"VALUES ($1, $2, $3)",
 		"SET a = $1,\n    b = $2\nWHERE id = $3",
@@ -228,8 +228,8 @@ func TestFormsRegressWithTerminator(t *testing.T) {
 		"BEGIN NULL; END;\n/":         "BEGIN NULL; END;\n/",
 		"CREATE PROCEDURE p AS x\nGO": "CREATE PROCEDURE p AS x\nGO",
 	} {
-		if got := withTerminator(in); got != want {
-			t.Errorf("withTerminator(%q) = %q, want %q", in, got, want)
+		if got := db.GenericSQL.Terminate(in); got != want {
+			t.Errorf("Terminate(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

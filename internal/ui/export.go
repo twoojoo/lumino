@@ -21,16 +21,28 @@ import (
 	"gioui.org/widget/material"
 
 	"github.com/twoojoo/lumino/internal/db"
-	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
-// exportFormats lists the file formats (id, label, extension).
+// exportFormats lists the file formats (id, label, extension); the label
+// and extension of "insert" come from the connection's language.
 var exportFormats = [][3]string{
 	{"csv", "CSV", ".csv"},
 	{"tsv", "TSV", ".tsv"},
 	{"json", "JSON", ".json"},
-	{"sql", "SQL INSERT", ".sql"},
+	{"insert", "SQL INSERT", ".sql"},
 	{"markdown", "Markdown", ".md"},
+}
+
+// exportFormatsFor is exportFormats for a language.
+func exportFormatsFor(l db.Language) [][3]string {
+	out := make([][3]string, len(exportFormats))
+	copy(out, exportFormats)
+	for i, f := range out {
+		if f[0] == "insert" && l != nil {
+			out[i][1], out[i][2] = l.InsertFormat()
+		}
+	}
+	return out
 }
 
 // rowWriter streams rows in a format.
@@ -38,15 +50,20 @@ type rowWriter struct {
 	w      *bufio.Writer
 	format string
 	cols   []db.Column
-	d      db.Dialect
+	lang   db.Language
 	ref    db.ObjectRef
 	csv    *csv.Writer
 	names  []string // JSON keys (duplicate column names made unique)
 	n      int
 }
 
-func newRowWriter(w io.Writer, format string, cols []db.Column, d db.Dialect, ref db.ObjectRef, header bool) (*rowWriter, error) {
-	rw := &rowWriter{w: bufio.NewWriterSize(w, 256*1024), format: format, cols: cols, d: d, ref: ref}
+// newRowWriter writes rows in format; lang renders "insert" (nil = generic
+// SQL).
+func newRowWriter(w io.Writer, format string, cols []db.Column, lang db.Language, ref db.ObjectRef, header bool) (*rowWriter, error) {
+	if lang == nil {
+		lang = db.GenericSQL
+	}
+	rw := &rowWriter{w: bufio.NewWriterSize(w, 256*1024), format: format, cols: cols, lang: lang, ref: ref}
 	switch format {
 	case "csv", "tsv", "tsv-noheader":
 		rw.csv = csv.NewWriter(rw.w)
@@ -89,7 +106,7 @@ func newRowWriter(w io.Writer, format string, cols []db.Column, d db.Dialect, re
 			}
 		}
 		fmt.Fprintf(rw.w, "| %s |\n| %s |\n", strings.Join(names, " | "), strings.Join(seps, " | "))
-	case "sql":
+	case "insert":
 	default:
 		return nil, fmt.Errorf("unknown format %q", format)
 	}
@@ -182,20 +199,12 @@ func (rw *rowWriter) write(row []any) error {
 			}
 		}
 		fmt.Fprintf(rw.w, "| %s |\n", strings.Join(cells, " | "))
-	case "sql":
-		d := rw.d
-		if d == nil {
-			d = &db.BaseDialect{QuoteL: `"`, QuoteR: `"`}
+	case "insert":
+		q := rw.lang.InsertText(rw.ref, rw.cols, row)
+		if q == "" {
+			return fmt.Errorf("row %d: can't build an insert statement", rw.n+1)
 		}
-		vals := make([]db.ColValue, len(row))
-		for i, v := range row {
-			vals[i] = db.ColValue{Column: rw.cols[i].Name, Kind: rw.cols[i].Kind, Value: v}
-		}
-		q, _ := db.StandardChange(d, rw.ref, db.Change{Op: db.OpInsert, Values: vals}, true)
-		if strings.TrimSpace(q) == "" {
-			return fmt.Errorf("row %d: can't build an INSERT", rw.n+1)
-		}
-		rw.w.WriteString(q + ";\n")
+		rw.w.WriteString(q + "\n")
 	}
 	rw.n++
 	return nil
@@ -215,8 +224,8 @@ func (rw *rowWriter) close() error {
 }
 
 // writeRows writes a block of rows (clipboard copies).
-func writeRows(w io.Writer, format string, cols []db.Column, rows [][]any, d db.Dialect, ref db.ObjectRef, header bool) error {
-	rw, err := newRowWriter(w, format, cols, d, ref, header)
+func writeRows(w io.Writer, format string, cols []db.Column, rows [][]any, lang db.Language, ref db.ObjectRef, header bool) error {
+	rw, err := newRowWriter(w, format, cols, lang, ref, header)
 	if err != nil {
 		return err
 	}
@@ -247,17 +256,18 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 
 // ExportDialog exports a result to a file or the clipboard.
 type ExportDialog struct {
-	app    *App
-	connID string
-	rs     *resultSet
-	query  string // statement re-run for "all rows" ("" = not possible)
-	ref    db.ObjectRef
-	schema string // session schema of the console ("all rows" re-runs there)
-	format int
-	all    bool
-	path   widget.Editor
-	done   bool
-	d      dialog
+	app     *App
+	connID  string
+	rs      *resultSet
+	query   string // statement re-run for "all rows" ("" = not possible)
+	ref     db.ObjectRef
+	schema  string // session schema of the console ("all rows" re-runs there)
+	format  int
+	formats [][3]string // exportFormatsFor the connection
+	all     bool
+	path    widget.Editor
+	done    bool
+	d       dialog
 
 	running  bool
 	written  atomic.Int64
@@ -273,13 +283,13 @@ type ExportDialog struct {
 // newExportDialog exports rs; table (optional) names the INSERT target and
 // enables re-running the browse query.
 func newExportDialog(a *App, connID string, rs *resultSet, table *db.ObjectRef) *ExportDialog {
-	d := &ExportDialog{app: a, connID: connID, rs: rs, fmtBtns: make([]widget.Clickable, len(exportFormats))}
+	cs := a.connState(connID)
+	d := &ExportDialog{app: a, connID: connID, rs: rs, fmtBtns: make([]widget.Clickable, len(exportFormats)), formats: exportFormatsFor(cs.language())}
 	d.ref = db.ObjectRef{Name: "exported"}
 	if table != nil {
 		d.ref = *table
 	}
-	cs := a.connState(connID)
-	if lex := cs.dialectLex(); db.Classify(rs.sql, lex) == db.StmtRead {
+	if cs.language().Classify(rs.sql) == db.StmtRead {
 		d.query = rs.sql
 	}
 	// re-running is needed only when the cursor has more rows
@@ -289,19 +299,12 @@ func newExportDialog(a *App, connID string, rs *resultSet, table *db.ObjectRef) 
 	return d
 }
 
-func (cs *connState) dialectLex() *sqlx.Options {
-	if d := cs.dialect(); d != nil {
-		return d.Lex()
-	}
-	return &sqlx.Options{}
-}
-
 func (d *ExportDialog) setPath() {
 	name := d.ref.Name
 	if name == "" || name == "exported" {
 		name = "result"
 	}
-	name += "-" + time.Now().Format("20060102-150405") + exportFormats[d.format][2]
+	name += "-" + time.Now().Format("20060102-150405") + d.formats[d.format][2]
 	d.path.SetText(filepath.Join(downloadsDir(), name))
 }
 
@@ -331,7 +334,7 @@ func (d *ExportDialog) start() {
 			return
 		}
 	}
-	format := exportFormats[d.format][0]
+	format := d.formats[d.format][0]
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel, d.running, d.result = cancel, true, ""
 	d.written.Store(0)
@@ -363,9 +366,9 @@ func (d *ExportDialog) start() {
 				defer file.Close()
 				f = file
 			}
-			var dia db.Dialect
+			var dia db.Language
 			if conn != nil {
-				dia = conn.Dialect()
+				dia = conn.Language()
 			}
 			if !all {
 				rw, err := newRowWriter(f, format, cols, dia, ref, true)
@@ -437,7 +440,7 @@ func (d *ExportDialog) start() {
 			}
 			if toClip {
 				a.copyLaterMsg(strings.TrimSuffix(clip.b.String(), "\n"),
-					fmt.Sprintf("Copied %d rows to the clipboard (%s)", d.written.Load(), exportFormats[d.format][1]))
+					fmt.Sprintf("Copied %d rows to the clipboard (%s)", d.written.Load(), d.formats[d.format][1]))
 			} else {
 				a.flash(fmt.Sprintf("Exported %d rows to %s", d.written.Load(), path), false)
 			}
@@ -476,8 +479,8 @@ func (d *ExportDialog) Layout(gtx C) D {
 			d.done = true
 		}
 	}
-	labels := make([]string, len(exportFormats))
-	for i, f := range exportFormats {
+	labels := make([]string, len(d.formats))
+	for i, f := range d.formats {
 		labels[i] = f[1]
 	}
 	return d.d.layout(gtx, th, 560, icExport, "Export", func(gtx C) D {

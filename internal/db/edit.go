@@ -193,6 +193,19 @@ func ApplyChanges(ctx context.Context, s Session, caps Capabilities, d Dialect, 
 	return out, nil
 }
 
+// Apply applies grid edits on a session of c: natively when the session
+// implements ChangeApplier, otherwise as SQL statements (ApplyChanges).
+func Apply(ctx context.Context, s Session, c Conn, ref ObjectRef, changes []Change) ([]ApplyResult, error) {
+	if ca, ok := s.(ChangeApplier); ok {
+		return ca.ApplyChanges(ctx, ref, changes)
+	}
+	d := DialectOf(c)
+	if d == nil {
+		return nil, fmt.Errorf("%s: %w", c.Info().Name, ErrNotSupported)
+	}
+	return ApplyChanges(ctx, s, c.Caps(), d, ref, changes)
+}
+
 // savepointSQL returns the statement for a savepoint step (save, rollback,
 // release; "" when the dialect has no release).
 func savepointSQL(d Dialect, step string) string {

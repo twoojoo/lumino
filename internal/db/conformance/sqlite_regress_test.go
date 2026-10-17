@@ -92,7 +92,7 @@ func TestSQLiteRegressDateEdit(t *testing.T) {
 		('2024-01-02', '2024-01-02T08:30:00', '2024-01-02 10:00:00+02:00', 'b'),
 		('2024-01-03', '2024-01-03 10:00', NULL, 'c')`)
 	ref := db.ObjectRef{Schema: "main", Name: "ev", Type: db.ObjTable}
-	d, caps := conn.Dialect(), conn.Caps()
+	d, caps := db.DialectOf(conn), conn.Caps()
 	texts := func() map[string][3]any {
 		_, rows, err := dbtest.Query(ctx, s, "SELECT n, d || '', ts || '', tm || '' FROM ev")
 		if err != nil {

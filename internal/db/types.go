@@ -100,6 +100,8 @@ const (
 	ObjPackage   ObjectType = "package"
 	ObjSchema    ObjectType = "schema"
 	ObjCatalog   ObjectType = "catalog"
+	// ObjCollection is a collection of documents (document databases).
+	ObjCollection ObjectType = "collection"
 )
 
 // Plural is the folder title of a type in the navigation tree.
@@ -125,12 +127,20 @@ func (t ObjectType) Plural() string {
 		return "Types"
 	case ObjPackage:
 		return "Packages"
+	case ObjCollection:
+		return "Collections"
 	}
 	return string(t)
 }
 
 // Relation reports whether the object holds rows (can be browsed).
-func (t ObjectType) Relation() bool { return t == ObjTable || t == ObjView || t == ObjMatView }
+func (t ObjectType) Relation() bool {
+	return t == ObjTable || t == ObjView || t == ObjMatView || t == ObjCollection
+}
+
+// Writable reports whether rows of the object can be edited in place
+// (tables, collections; not views).
+func (t ObjectType) Writable() bool { return t == ObjTable || t == ObjCollection }
 
 // ObjectRef identifies a catalog object. Catalog is empty for databases
 // without a catalog level; Schema is empty for databases without schemas

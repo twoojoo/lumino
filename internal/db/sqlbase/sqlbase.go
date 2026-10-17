@@ -79,15 +79,28 @@ type Conn struct {
 	InitSQL string
 	// OnClose runs after the pool is closed (tunnels, temp files).
 	OnClose []func()
+	// Lang overrides the language (nil = db.SQLLanguage over D).
+	Lang db.Language
 
 	closeOnce sync.Once
+	langOnce  sync.Once
 }
 
 var _ db.Conn = (*Conn)(nil)
 
-func (c *Conn) Info() db.Info                  { return c.Inf }
-func (c *Conn) Caps() db.Capabilities          { return c.Cap }
-func (c *Conn) Dialect() db.Dialect            { return c.D }
+func (c *Conn) Info() db.Info         { return c.Inf }
+func (c *Conn) Caps() db.Capabilities { return c.Cap }
+func (c *Conn) Dialect() db.Dialect   { return c.D }
+
+func (c *Conn) Language() db.Language {
+	c.langOnce.Do(func() {
+		if c.Lang == nil {
+			c.Lang = db.NewSQLLanguage(c.D)
+		}
+	})
+	return c.Lang
+}
+
 func (c *Conn) ServerVersion() string          { return c.Version }
 func (c *Conn) Catalog() db.Catalog            { return c.Cat }
 func (c *Conn) Ping(ctx context.Context) error { return c.mapErr(c.DB.PingContext(ctx)) }

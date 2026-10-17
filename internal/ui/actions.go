@@ -96,11 +96,14 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 		return
 	}
 	cs := a.connState(connID)
-	d := cs.dialect()
-	if d == nil {
+	if cs.conn == nil {
 		return
 	}
-	stmt, verb := dropStatement(d, ref, truncate)
+	stmt, verb, ok := cs.language().DropStatement(ref, truncate)
+	if !ok {
+		a.flash("This object can't be dropped from here", true)
+		return
+	}
 	title := verb + " " + string(ref.Type)
 	if truncate {
 		title = verb + " of " + string(ref.Type)
@@ -140,42 +143,6 @@ func (a *App) dropObject(connID string, ref db.ObjectRef, truncate bool) {
 	a.overlay = c
 }
 
-// truncateUnsupported lists the dialects without TRUNCATE TABLE: emptying
-// a table there is a DELETE without WHERE.
-var truncateUnsupported = map[string]bool{"sqlite": true, "firebird": true}
-
-// truncateLabel is the context menu label of "empty this table" for a
-// dialect name ("Truncate…" or "Delete all rows…").
-func truncateLabel(dialect string) string {
-	if truncateUnsupported[dialect] {
-		return "Delete all rows…"
-	}
-	return "Truncate…"
-}
-
-// dropStatement builds the DROP (or TRUNCATE / DELETE-all) statement of an
-// object and the verb shown in the confirmation.
-func dropStatement(d db.Dialect, ref db.ObjectRef, truncate bool) (stmt, verb string) {
-	switch {
-	case truncate && truncateUnsupported[d.Name()]:
-		return "DELETE FROM " + d.Qualified(ref), "Delete all rows"
-	case truncate:
-		return "TRUNCATE TABLE " + d.Qualified(ref), "Truncate"
-	case ref.Type == db.ObjMatView:
-		stmt = "DROP MATERIALIZED VIEW " + d.Qualified(ref)
-	case ref.Type == db.ObjFunction || ref.Type == db.ObjProcedure:
-		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
-		// the signature picks the overload (PostgreSQL, CockroachDB,
-		// Cassandra UDFs); adapters without overloads leave it empty
-		if ref.Signature != "" {
-			stmt += ref.Signature
-		}
-	default:
-		stmt = "DROP " + strings.ToUpper(string(ref.Type)) + " " + d.Qualified(ref)
-	}
-	return stmt, "Drop"
-}
-
 // generateDML opens a console with INSERT/UPDATE/DELETE templates.
 func (a *App) generateDML(connID string, ref db.ObjectRef) {
 	cs := a.connState(connID)
@@ -184,47 +151,9 @@ func (a *App) generateDML(connID string, ref db.ObjectRef) {
 			a.flash(err.Error(), true)
 			return
 		}
-		b := dmlTemplates(cs.dialect(), ref, info)
+		b := cs.language().Templates(ref, info)
 		a.newConsole(connID, ref.Schema, b)
 	})
-}
-
-// dmlTemplates renders SELECT/INSERT/UPDATE/DELETE templates of a table.
-// Placeholders are numbered sequentially per statement (skipped generated
-// columns must not leave gaps: PostgreSQL rejects $1, $3).
-func dmlTemplates(d db.Dialect, ref db.ObjectRef, info *db.TableInfo) string {
-	var cols, params, sets []string
-	for _, c := range info.Columns {
-		if c.Generated != "" {
-			continue
-		}
-		cols = append(cols, d.Quote(c.Name))
-		params = append(params, d.Placeholder(len(params)+1))
-		if c.PrimaryKeyNo == 0 {
-			sets = append(sets, d.Quote(c.Name)+" = "+d.Placeholder(len(sets)+1))
-		}
-	}
-	next := len(sets) // UPDATE: the key placeholders follow the SET ones
-	var keys, delKeys []string
-	for i, k := range info.PrimaryKey {
-		keys = append(keys, d.Quote(k)+" = "+d.Placeholder(next+i+1))
-		delKeys = append(delKeys, d.Quote(k)+" = "+d.Placeholder(i+1))
-	}
-	where := strings.Join(keys, " AND ")
-	delWhere := strings.Join(delKeys, " AND ")
-	if where == "" {
-		where = "/* no primary key: add a condition */"
-		delWhere = where
-	}
-	name := d.Qualified(ref)
-	var b strings.Builder
-	fmt.Fprintf(&b, "SELECT %s\nFROM %s;\n\n", strings.Join(cols, ", "), name)
-	fmt.Fprintf(&b, "INSERT INTO %s (%s)\nVALUES (%s);\n\n", name, strings.Join(cols, ", "), strings.Join(params, ", "))
-	if len(sets) > 0 {
-		fmt.Fprintf(&b, "UPDATE %s\nSET %s\nWHERE %s;\n\n", name, strings.Join(sets, ",\n    "), where)
-	}
-	fmt.Fprintf(&b, "DELETE FROM %s\nWHERE %s;\n", name, delWhere)
-	return b.String()
 }
 
 // ---- SQL review (grid edits) ----
@@ -248,8 +177,8 @@ func newSQLReview(a *App, connID, title, sql, warn string, n int, apply func()) 
 	r := &SQLReview{app: a, connID: connID, title: title, warn: warn, n: n, apply: apply}
 	r.ed = newCodeEditor(a, sql)
 	r.ed.ReadOnly = true
-	if d := a.connState(connID).dialect(); d != nil {
-		r.ed.setDialect(d)
+	if cs := a.connState(connID); cs.conn != nil {
+		r.ed.setLanguage(cs.language())
 	}
 	r.ed.SetCaretOffset(0)
 	r.typed.SingleLine = true
@@ -361,28 +290,10 @@ func (a *App) insertInConsole(connID, sql, schema string) {
 		if strings.TrimSpace(ed.Text()) != "" {
 			prefix = "\n\n"
 		}
-		ed.Insert(prefix + withTerminator(sql))
+		ed.Insert(prefix + t.ed.lang.Terminate(sql))
 		return
 	}
-	a.newConsole(connID, schema, withTerminator(sql)+"\n")
-}
-
-// withTerminator trims a statement and appends ";" unless it already ends
-// with one (PL/SQL "END;" must not become "END;;") or with a block
-// terminator line ("/" in Oracle scripts, "GO" in SQL Server ones).
-func withTerminator(sql string) string {
-	sql = strings.TrimSpace(sql)
-	if sql == "" || strings.HasSuffix(sql, ";") {
-		return sql
-	}
-	last := sql
-	if i := strings.LastIndexByte(sql, '\n'); i >= 0 {
-		last = sql[i+1:]
-	}
-	if last = strings.TrimSpace(last); last == "/" || strings.EqualFold(last, "go") {
-		return sql
-	}
-	return sql + ";"
+	a.newConsole(connID, schema, a.connState(connID).language().Terminate(sql)+"\n")
 }
 
 // SaveQueryDialog names a saved query.

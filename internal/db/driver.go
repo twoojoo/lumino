@@ -64,6 +64,9 @@ type Info struct {
 	Schemes []string
 	// DialectName selects highlighting/keywords (postgres, mysql, …).
 	DialectName string
+	// Folders orders the object types in the navigation tree (nil = the
+	// default order of SQL databases); types not listed follow.
+	Folders []ObjectType
 }
 
 // Has reports whether the connection form shows f.
@@ -125,7 +128,9 @@ type Conn interface {
 	Info() Info
 	// Caps may differ from Info().Caps depending on the server version.
 	Caps() Capabilities
-	Dialect() Dialect
+	// Language is the query language (SQLLanguage over the dialect for
+	// SQL databases; DialectOf returns that dialect).
+	Language() Language
 	ServerVersion() string
 	Ping(ctx context.Context) error
 	Catalog() Catalog

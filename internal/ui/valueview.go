@@ -571,7 +571,7 @@ func (v *valuePanel) editorBox(gtx C, th *material.Theme, hint string) D {
 // ---- copy menu (shared by result grids) ----
 
 // copyMenuItems builds "Copy as …" items for the grid selection.
-func copyMenuItems(a *App, g *DataGrid, cols []db.Column, value func(r, c int) any, d db.Dialect, ref db.ObjectRef) []*menuItem {
+func copyMenuItems(a *App, g *DataGrid, cols []db.Column, value func(r, c int) any, lang db.Language, ref db.ObjectRef) []*menuItem {
 	sel, ok := g.Selection()
 	if !ok {
 		return nil
@@ -595,7 +595,7 @@ func copyMenuItems(a *App, g *DataGrid, cols []db.Column, value func(r, c int) a
 		return func() {
 			cs, rows := collect()
 			var b bytes.Buffer
-			if err := writeRows(&b, f, cs, rows, d, ref, true); err != nil {
+			if err := writeRows(&b, f, cs, rows, lang, ref, true); err != nil {
 				a.flash("Copy: "+err.Error(), true)
 				return
 			}
@@ -607,7 +607,16 @@ func copyMenuItems(a *App, g *DataGrid, cols []db.Column, value func(r, c int) a
 		{icon: icCopyText, label: "Copy with headers", hint: shortcutLabel("Shift C"), action: format("tsv")},
 		{icon: icCopyText, label: "Copy as CSV", action: format("csv")},
 		{icon: icCopyText, label: "Copy as JSON", action: format("json")},
-		{icon: icCopyText, label: "Copy as SQL INSERT", action: format("sql")},
+		{icon: icCopyText, label: "Copy as " + insertLabel(lang), action: format("insert")},
 		{icon: icCopyText, label: "Copy as Markdown", action: format("markdown")},
 	}
+}
+
+// insertLabel names the insert format of a language ("SQL INSERT").
+func insertLabel(l db.Language) string {
+	if l == nil {
+		l = db.GenericSQL
+	}
+	label, _ := l.InsertFormat()
+	return label
 }

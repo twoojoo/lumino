@@ -156,7 +156,7 @@ func mysqlBit(t *testing.T, conn db.Conn) {
 		vals = append(vals, db.ColValue{Column: cols[i].Name, Kind: cols[i].Kind, Value: v})
 	}
 	key := []db.ColValue{{Column: "id", Kind: db.KindInt, Value: int64(1)}}
-	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), conn.Dialect(), ref, []db.Change{{Op: db.OpUpdate, Key: key, Values: vals}}); err != nil {
+	if _, err := db.ApplyChanges(ctx, s, conn.Caps(), db.DialectOf(conn), ref, []db.Change{{Op: db.OpUpdate, Key: key, Values: vals}}); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	row, cols = read()

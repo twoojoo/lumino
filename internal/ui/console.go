@@ -63,7 +63,7 @@ type ConsoleTab struct {
 	stmtVer  int
 	stmts    []sqlx.Statement
 	stmtText string
-	dialect  db.Dialect
+	lang     db.Language // the connection's (nil until connected)
 
 	runBtn, scriptBtn, stopBtn, commitBtn, rollbackBtn, schemaBtn widget.Clickable
 	histBtn, saveBtn, aiBtn, fetchAllBtn, exportBtn, valueBtn     widget.Clickable
@@ -258,9 +258,9 @@ func (t *ConsoleTab) withSession(then func(db.Session), failed func(error)) {
 		conn, gen := cs.conn, cs.gen
 		schema := t.schema
 		ro := a.connReadOnly(t.connID)
-		t.dialect = conn.Dialect()
-		t.ed.setDialect(t.dialect)
-		t.stmts = nil // split again with the dialect's rules
+		t.lang = conn.Language()
+		t.ed.setLanguage(t.lang)
+		t.stmts = nil // split again with the language's rules
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), db.ConnectTimeout)
 			defer cancel()
@@ -342,7 +342,7 @@ func (t *ConsoleTab) statements() []sqlx.Statement {
 	if t.stmtVer != t.ed.buf.version || t.stmts == nil {
 		t.stmtVer = t.ed.buf.version
 		t.stmtText = t.ed.Text()
-		t.stmts = sqlx.Split(t.stmtText, t.ed.lex)
+		t.stmts = t.ed.lang.Split(t.stmtText)
 	}
 	return t.stmts
 }
@@ -384,7 +384,7 @@ func (t *ConsoleTab) window(before, after int) (string, int) {
 func (t *ConsoleTab) targets(all bool) []sqlx.Statement {
 	if sel := t.ed.Selected(); strings.TrimSpace(sel) != "" {
 		a, _ := t.ed.SelectionOffsets()
-		st := sqlx.Split(sel, t.ed.lex)
+		st := t.ed.lang.Split(sel)
 		for i := range st {
 			st[i].Start += a
 			st[i].End += a
@@ -412,13 +412,13 @@ func (t *ConsoleTab) run(all bool) {
 		a.flash("A statement is already running (Esc / Stop to cancel it)", true)
 		return
 	}
-	if t.dialect == nil {
+	if t.lang == nil {
 		// split with the database's rules ($$ bodies, DELIMITER, GO…):
 		// connect first
 		a.connectOr(t.connID, func(cs *connState) {
-			if t.dialect == nil {
-				t.dialect = cs.conn.Dialect()
-				t.ed.setDialect(t.dialect)
+			if t.lang == nil {
+				t.lang = cs.conn.Language()
+				t.ed.setLanguage(t.lang)
 				t.stmts = nil
 			}
 			t.run(all)
@@ -434,13 +434,10 @@ func (t *ConsoleTab) run(all bool) {
 		a.flash("Nothing to run", false)
 		return
 	}
-	lex := t.ed.lex
-	if t.dialect != nil {
-		lex = t.dialect.Lex()
-	}
+	lang := t.ed.lang
 	worst := db.StmtRead
 	for _, s := range stmts {
-		if k := db.Classify(s.Text, lex); k > worst {
+		if k := lang.Classify(s.Text); k > worst {
 			worst = k
 		}
 	}
@@ -507,7 +504,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 		fetch := a.prefs.Fetch()
 		connID := t.connID
 		schema := t.schema
-		lex := t.ed.lex
+		lang := t.ed.lang
 		go func() {
 			defer cancel()
 			ddl := false
@@ -552,7 +549,7 @@ func (t *ConsoleTab) execute(stmts []sqlx.Statement) {
 				if res != nil {
 					rs.notices = res.Messages()
 				}
-				if k := db.Classify(st.Text, lex); k == db.StmtDDL || k == db.StmtDestructive {
+				if k := lang.Classify(st.Text); k == db.StmtDDL || k == db.StmtDestructive {
 					ddl = true
 				}
 				entry := history.Entry{At: rs.started, SQL: st.Text, Millis: rs.elapsed.Milliseconds(), Rows: int64(len(rs.rows)), Schema: schema}
@@ -777,11 +774,11 @@ func (t *ConsoleTab) pickSchema() {
 
 // Layout draws the console.
 func (t *ConsoleTab) Layout(gtx C) D {
-	if t.dialect == nil {
+	if t.lang == nil {
 		// highlighting and completion follow the database once connected
 		if cs := t.cs(); cs.status == stReady && cs.conn != nil {
-			t.dialect = cs.conn.Dialect()
-			t.ed.setDialect(t.dialect)
+			t.lang = cs.conn.Language()
+			t.ed.setLanguage(t.lang)
 			t.stmts = nil
 		}
 	}
@@ -1242,7 +1239,7 @@ func (t *ConsoleTab) gridMenu(at image.Point) {
 		return
 	}
 	a := t.a
-	items := copyMenuItems(a, t.grid, rs.cols, func(r, c int) any { return rs.Value(r, c) }, t.dialect, db.ObjectRef{Name: "result"})
+	items := copyMenuItems(a, t.grid, rs.cols, func(r, c int) any { return rs.Value(r, c) }, t.lang, db.ObjectRef{Name: "result"})
 	items = append(items, &menuItem{sep: true},
 		&menuItem{icon: icDescribe, label: "Show value", action: func() { t.value.open = true }},
 		&menuItem{icon: icExport, label: "Export…", action: func() {
@@ -1262,7 +1259,7 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		return t.keywordItems(nil)
 	}
 	text, rel := t.window(300, 100)
-	stmts := sqlx.Split(text, e.lex)
+	stmts := e.lang.Split(text)
 	i := sqlx.StatementAt(stmts, text, rel)
 	if i >= 0 && rel >= stmts[i].Start && rel <= stmts[i].End+1 {
 		end := min(len(text), max(stmts[i].End, rel))
@@ -1272,7 +1269,7 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		l := e.buf.lines[e.caret.line]
 		text, rel = l, e.caret.col
 	}
-	ctx := analyzeSQL(text, rel, e.lex, e.kw)
+	ctx := e.lang.CompletionContext(text, rel)
 	schema := t.schema
 	if schema == "" {
 		schema = cs.defaultSchema("")
@@ -1310,20 +1307,20 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		}
 		return nil
 	}
-	if ctx.qualifier != "" {
+	if ctx.Qualifier != "" {
 		// alias/table columns
-		for _, r := range ctx.refs {
-			if strings.EqualFold(r.alias, ctx.qualifier) || r.alias == "" && strings.EqualFold(r.name, ctx.qualifier) {
-				for _, c := range tableCols(r.schema, r.name) {
-					items = append(items, compItem{label: c, kind: "column", detail: r.name})
+		for _, r := range ctx.Refs {
+			if strings.EqualFold(r.Alias, ctx.Qualifier) || r.Alias == "" && strings.EqualFold(r.Name, ctx.Qualifier) {
+				for _, c := range tableCols(r.Schema, r.Name) {
+					items = append(items, compItem{label: c, kind: "column", detail: r.Name})
 				}
 				return &compRequest{items: items}
 			}
 		}
 		// schema.tables
-		kk := metaKey{schema: ctx.qualifier}
+		kk := metaKey{schema: ctx.Qualifier}
 		for _, s := range cs.schemas[""] {
-			if strings.EqualFold(s.Name, ctx.qualifier) {
+			if strings.EqualFold(s.Name, ctx.Qualifier) {
 				kk.schema = s.Name
 			}
 		}
@@ -1333,13 +1330,13 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		}
 		if len(items) == 0 {
 			// table.column without alias
-			for _, c := range tableCols("", ctx.qualifier) {
-				items = append(items, compItem{label: c, kind: "column", detail: ctx.qualifier})
+			for _, c := range tableCols("", ctx.Qualifier) {
+				items = append(items, compItem{label: c, kind: "column", detail: ctx.Qualifier})
 			}
 		}
 		return &compRequest{items: items}
 	}
-	if ctx.expectTable {
+	if ctx.ExpectObject {
 		for name := range comp {
 			items = append(items, compItem{label: name, kind: "table", detail: schema})
 		}
@@ -1350,12 +1347,12 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		}
 		return &compRequest{items: items}
 	}
-	for _, r := range ctx.refs {
-		if r.alias != "" {
-			items = append(items, compItem{label: r.alias, kind: "alias", detail: r.name})
+	for _, r := range ctx.Refs {
+		if r.Alias != "" {
+			items = append(items, compItem{label: r.Alias, kind: "alias", detail: r.Name})
 		}
-		for _, c := range tableCols(r.schema, r.name) {
-			items = append(items, compItem{label: c, kind: "column", detail: r.name})
+		for _, c := range tableCols(r.Schema, r.Name) {
+			items = append(items, compItem{label: c, kind: "column", detail: r.Name})
 		}
 	}
 	for name := range comp {

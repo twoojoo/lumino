@@ -95,7 +95,7 @@ func mcrRun(t *testing.T, name string) {
 	}
 	mysqlExec(t, s, "DROP TABLE mcr_cat.t")
 	mysqlExec(t, s, "USE mcr_other")
-	for _, st := range sqlx.Split(ddl, conn.Dialect().Lex()) {
+	for _, st := range sqlx.Split(ddl, db.DialectOf(conn).Lex()) {
 		mysqlExec(t, s, st.Text)
 	}
 	ti2, err := conn.Catalog().Table(ctx, ref)

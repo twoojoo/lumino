@@ -80,7 +80,7 @@ func TestMSSQLRegressDatetimeKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			ref := db.ObjectRef{Schema: "lumino_regress", Name: "dtk", Type: db.ObjTable}
-			d := conn.Dialect()
+			d := db.DialectOf(conn)
 			for _, r := range rows {
 				key := []db.ColValue{{Column: "k", Kind: cols[0].Kind, Value: r[0]}}
 				// filter by this value
@@ -103,7 +103,7 @@ func TestMSSQLRegressDatetimeKey(t *testing.T) {
 		})
 	}
 	// literal of a value with sub-millisecond precision
-	if got := conn.Dialect().Literal(time.Date(2024, 2, 29, 13, 14, 15, 3333300, time.UTC), db.KindTimestamp); got != "'2024-02-29T13:14:15.0033333'" {
+	if got := db.DialectOf(conn).Literal(time.Date(2024, 2, 29, 13, 14, 15, 3333300, time.UTC), db.KindTimestamp); got != "'2024-02-29T13:14:15.0033333'" {
 		t.Errorf("literal %s", got)
 	}
 }

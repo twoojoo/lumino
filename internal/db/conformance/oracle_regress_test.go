@@ -39,7 +39,7 @@ func TestOracleRegressDateKey(t *testing.T) {
 	drop := func() {
 		_, _, _ = dbtest.Query(ctx, s, "BEGIN EXECUTE IMMEDIATE 'DROP TABLE lumino_regress_dk PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;")
 	}
-	d := conn.Dialect()
+	d := db.DialectOf(conn)
 	ref := db.ObjectRef{Schema: tg.Schema, Name: "LUMINO_REGRESS_DK", Type: db.ObjTable}
 	for _, c := range []struct{ typ, v1, v2 string }{
 		{"DATE", "DATE '2024-02-29' + 13/24 + 14/1440", "DATE '2024-07-01'"},
