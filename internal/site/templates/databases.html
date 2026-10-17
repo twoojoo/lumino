@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>Supported databases</h1>
+<p class="lead">Lumino ships a pure-Go adapter for each database: no JDBC, ODBC or client libraries to install. Each one passes
+the same conformance suite (metadata, DDL round trip, streaming, cancel, transactions, read-only sessions, row editing, type round trips).</p>
+<table>
+  <thead><tr><th>Database</th><th>Default port</th><th>Driver</th><th>URL schemes</th></tr></thead>
+  <tbody>
+  {{range .DBs}}<tr><th><a href="{{rel (print "databases/" .Slug "/")}}">{{.Name}}</a></th><td>{{if .Port}}{{.Port}}{{else}}file{{end}}</td><td><a href="{{.LibURL}}">{{.Lib}}</a></td><td>{{range $i, $s := .Schemes}}{{if $i}}, {{end}}<code>{{$s}}://</code>{{end}}</td></tr>
+  {{end}}</tbody>
+</table>
+{{end}}

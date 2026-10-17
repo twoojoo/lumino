@@ -1,0 +1,25 @@
+# {{.Name}}
+
+> {{.Summary}}
+
+- Free software, GNU GPL 3.0 or later; no paid edition.
+- Platforms: Linux (AppImage, .deb, .rpm, .tar.gz), Windows 10+ (x64, ARM64), macOS 12+ (Apple silicon, Intel).
+- Download: {{.Download}}
+- Source code: {{.Repo}}
+- Full text of this site in one file: {{abs "llms-full.txt"}}
+
+## Pages
+
+- [Home]({{abs ""}}): features, screenshots, FAQ
+- [Supported databases]({{abs "databases/"}}): ports, drivers and connection URL schemes
+- [Lumino vs DBeaver]({{abs "lumino-vs-dbeaver/"}}): factual comparison with DBeaver Community Edition
+
+## Databases
+{{range .DBs}}
+- [{{.Name}}]({{abs (print "databases/" .Slug "/")}}): {{.Description}}
+{{- end}}
+
+## Optional
+
+- [Releases and signature verification](https://github.com/twoojoo/lumino#verifying-a-download): packages, SHA256SUMS signed with ed25519
+- [README]({{.Repo}}#readme): build from source, development

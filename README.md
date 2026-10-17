@@ -10,6 +10,8 @@ binary for Linux, Windows and macOS.
 [![release](https://img.shields.io/github/v/release/twoojoo/lumino?label=download)](https://github.com/twoojoo/lumino/releases/latest)
 [![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
+**Website: [twoojoo.github.io/lumino](https://twoojoo.github.io/lumino/)**
+
 ## Databases
 
 PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, SQLite, SQL Server, Oracle, ClickHouse, Firebird,
@@ -115,6 +117,7 @@ make db-up      # disposable databases (docker compose, 127.0.0.1:55xxx)
 make run        # dev build: development databases only, settings in .dev/config
 make test       # unit tests
 make test-int   # conformance suite of every adapter + headless UI tests (.dev/shots)
+make site       # website (GitHub Pages) in dist/site; make site-shots renews its screenshots
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to send changes and [SECURITY.md](SECURITY.md) to report a

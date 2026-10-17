@@ -13,7 +13,7 @@ DEV_TAGS := $(if $(GIO_TAGS),$(GIO_TAGS)$(comma))dev
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 
 .PHONY: build build-dev run test test-int test-ui db-up db-down \
-	icons notices package-linux package-windows package-macos
+	icons notices package-linux package-windows package-macos site site-shots
 
 build:
 	go build -tags '$(GIO_TAGS)' -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o lumino ./cmd/lumino
@@ -41,6 +41,16 @@ db-up:
 
 db-down:
 	./scripts/dbs/dbs.sh down
+
+# ---- website (GitHub Pages, published by .github/workflows/pages.yml) ----
+# static site in dist/site; preview: python3 -m http.server -d dist/site
+site:
+	go run ./scripts/sitegen -out dist/site
+
+# screenshots of the website (internal/site/static/img), headless, from SQLite
+site-shots:
+	LUMINO_SITE_SHOTS=$(CURDIR)/internal/site/static/img go test -tags '$(DEV_TAGS),integration' -count=1 \
+		-run TestUISiteScreenshots ./internal/ui/
 
 # ---- release packages (dist/) ----
 

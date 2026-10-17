@@ -1,0 +1,47 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<meta name="description" content="{{.Description}}">
+{{if eq .Path "404.html"}}<meta name="robots" content="noindex">{{else}}<link rel="canonical" href="{{abs .Path}}">{{end}}
+<meta name="theme-color" content="#0b0e14">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{.Name}}">
+<meta property="og:title" content="{{.Title}}">
+<meta property="og:description" content="{{.Description}}">
+<meta property="og:url" content="{{abs .Path}}">
+<meta property="og:image" content="{{abs "img/console.png"}}">
+<meta property="og:image:alt" content="Lumino SQL console with query results">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{.Title}}">
+<meta name="twitter:description" content="{{.Description}}">
+<meta name="twitter:image" content="{{abs "img/console.png"}}">
+<link rel="icon" type="image/png" sizes="32x32" href="{{rel "img/favicon-32.png"}}">
+<link rel="apple-touch-icon" href="{{rel "img/logo.png"}}">
+<link rel="alternate" type="text/plain" title="llms.txt" href="{{rel "llms.txt"}}">
+<link rel="stylesheet" href="{{rel "style.css"}}">
+{{.JSONLD}}</head>
+<body>
+<header class="top">
+  <a class="brand" href="{{rel ""}}"><img src="{{rel "img/logo-64.png"}}" width="32" height="32" alt=""> Lumino DB</a>
+  <nav>
+    <a href="{{rel "databases/"}}">Databases</a>
+    <a href="{{rel "lumino-vs-dbeaver/"}}">vs DBeaver</a>
+    <a href="{{.Repo}}">GitHub</a>
+    <a class="btn small" href="{{.Download}}">Download</a>
+  </nav>
+</header>
+{{if .Crumbs}}<nav class="crumbs" aria-label="Breadcrumb"><a href="{{rel ""}}">Home</a>{{range .Crumbs}} › <a href="{{rel .Path}}">{{.Name}}</a>{{end}}</nav>{{end}}
+<main>
+{{template "content" .}}
+</main>
+<footer>
+  <p>{{.Name}} is free software under the <a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU GPL 3.0 or later</a>.
+  <a href="{{.Repo}}">Source code</a> · <a href="{{.Download}}">Releases</a> · <a href="{{rel "databases/"}}">Databases</a> · <a href="{{rel "lumino-vs-dbeaver/"}}">Lumino vs DBeaver</a> · <a href="{{rel "llms.txt"}}">llms.txt</a></p>
+  <p class="muted">DBeaver, PostgreSQL, MySQL, Oracle, SQL Server and other names are trademarks of their respective owners. Lumino is not affiliated with them.</p>
+</footer>
+</body>
+</html>
+{{end}}
