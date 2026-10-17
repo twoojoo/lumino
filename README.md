@@ -7,7 +7,7 @@ Studio, written in Go with a GPU-rendered [Gio](https://gioui.org) UI. No Electr
 binary for Linux, Windows and macOS.
 
 [![ci](https://github.com/twoojoo/lumino/actions/workflows/ci.yml/badge.svg)](https://github.com/twoojoo/lumino/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/twoojoo/lumino-releases?label=download)](https://github.com/twoojoo/lumino-releases/releases/latest)
+[![release](https://img.shields.io/github/v/release/twoojoo/lumino?label=download)](https://github.com/twoojoo/lumino/releases/latest)
 [![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
 ## Databases
@@ -39,7 +39,7 @@ Cassandra / ScyllaDB and Trino — all with pure-Go drivers, all covered by the 
 ## Install
 
 Download the latest package from
-[Releases](https://github.com/twoojoo/lumino-releases/releases/latest):
+[Releases](https://github.com/twoojoo/lumino/releases/latest):
 
 | OS | Package |
 |---|---|
@@ -48,8 +48,31 @@ Download the latest package from
 | macOS 12+ (Apple silicon and Intel) | `.dmg` or `.zip` |
 
 Lumino updates itself (Preferences → Updates) and installs only releases whose checksums are signed
-with the Lumino release key; `.deb`/`.rpm` installs are updated through the package manager. See the
-[releases repository](https://github.com/twoojoo/lumino-releases) to verify a download by hand.
+with the Lumino release key; `.deb`/`.rpm` installs are updated through the package manager.
+Third-party licenses: `THIRD_PARTY_NOTICES.txt` in every package and release.
+
+### Verifying a download
+
+`SHA256SUMS.txt` lists the checksum of every file and is signed with the Lumino release key
+(ed25519, `SHA256SUMS.txt.sig`, base64). Public key:
+
+```
+CK1TEM6TZg/WTFIoj/e46uM9J5TtSx7RFQ5P6fUXFGE=
+```
+
+The self-updater refuses any file that doesn't match a checksum signed with this key. To check by
+hand: `sha256sum -c SHA256SUMS.txt --ignore-missing`, then verify the signature with any ed25519
+tool, e.g. in Python with `cryptography`:
+
+```python
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+key = Ed25519PublicKey.from_public_bytes(base64.b64decode("CK1TEM6TZg/WTFIoj/e46uM9J5TtSx7RFQ5P6fUXFGE="))
+key.verify(base64.b64decode(open("SHA256SUMS.txt.sig").read()), open("SHA256SUMS.txt", "rb").read())
+print("signature ok")
+```
+
+### Building from source
 
 To build from source you need Go (version in `go.mod`) and, on Linux, the Wayland/X11/EGL development
 headers listed in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`GIO_LINUX_DEPS`):

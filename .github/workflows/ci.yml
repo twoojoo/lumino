@@ -216,8 +216,6 @@ jobs:
           go run ./scripts/signsums sign dist/SHA256SUMS.txt
           pub="$(sed -n 's/^var PublicKey = "\(.*\)"/\1/p' internal/update/update.go)"
           go run ./scripts/signsums verify "$pub" dist/SHA256SUMS.txt
-      # release notes come from this (source) repository's history; its PR
-      # and changelog links stay valid in the releases repository
       - name: release notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -225,18 +223,11 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" \
             --jq .body > notes.md
           cat notes.md
-      # packages go to the public releases repository (the app updates from
-      # there); RELEASES_TOKEN: fine-grained token, Contents read/write on
-      # that repository only
+      # the app updates from this repository's latest release (internal/update)
       - name: publish
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-          RELEASES_REPO: twoojoo/lumino-releases
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::secret RELEASES_TOKEN is missing (Contents write on $RELEASES_REPO)"
-            exit 1
-          fi
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$RELEASES_REPO" --target main \
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Lumino ${GITHUB_REF_NAME#v}" --notes-file notes.md \
             $([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease)
