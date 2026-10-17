@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/ai"
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/ai"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 // unreadable writes content to name in dir and removes read permission.

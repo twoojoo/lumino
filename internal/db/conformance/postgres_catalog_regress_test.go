@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 func pgcTable(t *testing.T, conn db.Conn, schema, name string) *db.TableInfo {

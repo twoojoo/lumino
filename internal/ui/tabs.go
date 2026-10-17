@@ -11,8 +11,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/widget"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 // Tab is a main-area page bound to a connection.

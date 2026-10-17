@@ -216,15 +216,14 @@ jobs:
           go run ./scripts/signsums sign dist/SHA256SUMS.txt
           pub="$(sed -n 's/^var PublicKey = "\(.*\)"/\1/p' internal/update/update.go)"
           go run ./scripts/signsums verify "$pub" dist/SHA256SUMS.txt
-      # release notes come from this (private) repository's history
+      # release notes come from this (source) repository's history; its PR
+      # and changelog links stay valid in the releases repository
       - name: release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" \
             --jq .body > notes.md
-          # links into the private repo are useless to the public
-          sed -i -E '/\*\*Full Changelog\*\*/d; s# in https://github.com/[^ )]*/pull/[0-9]+##g; s/ by @[A-Za-z0-9-]+//g' notes.md
           cat notes.md
       # packages go to the public releases repository (the app updates from
       # there); RELEASES_TOKEN: fine-grained token, Contents read/write on

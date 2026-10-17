@@ -1,7 +1,8 @@
 # Lumino releases
 
-Downloads of **Lumino**, a fast, native database IDE. This repository only hosts
-release packages; the source code is not public.
+Downloads of **Lumino DB**, a fast, native, open-source database IDE. This
+repository only hosts release packages; the source code (GPL-3.0-or-later) is
+at [twoojoo/lumino](https://github.com/twoojoo/lumino).
 
 Get the latest version from [Releases](https://github.com/twoojoo/lumino-releases/releases/latest):
 

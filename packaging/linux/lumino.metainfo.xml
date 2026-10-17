@@ -2,8 +2,12 @@
 <component type="desktop-application">
   <id>io.github.twoojoo.lumino</id>
   <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
   <name>Lumino</name>
   <summary>Fast, native database IDE</summary>
+  <developer id="io.github.twoojoo">
+    <name>twoojoo</name>
+  </developer>
   <description>
     <p>
       Lumino is a fast, native desktop IDE for databases: PostgreSQL, MySQL,
@@ -15,10 +19,22 @@
   </description>
   <launchable type="desktop-id">lumino.desktop</launchable>
   <url type="homepage">https://github.com/twoojoo/lumino</url>
+  <url type="bugtracker">https://github.com/twoojoo/lumino/issues</url>
+  <url type="vcs-browser">https://github.com/twoojoo/lumino</url>
   <provides>
     <binary>lumino</binary>
   </provides>
   <categories>
     <category>Development</category>
+    <category>Database</category>
   </categories>
+  <keywords>
+    <keyword>database</keyword>
+    <keyword>SQL</keyword>
+    <keyword>SQL client</keyword>
+    <keyword>PostgreSQL</keyword>
+    <keyword>MySQL</keyword>
+    <keyword>SQLite</keyword>
+    <keyword>DBeaver</keyword>
+  </keywords>
 </component>

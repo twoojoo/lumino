@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
 )
 
 // sequence reads the options of a sequence.

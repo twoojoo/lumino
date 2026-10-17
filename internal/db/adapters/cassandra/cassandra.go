@@ -18,8 +18,8 @@ import (
 
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func init() { db.Register(Driver{}) }

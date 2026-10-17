@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // jsonLexLine tokenizes one line of JSON for highlighting. JSON strings

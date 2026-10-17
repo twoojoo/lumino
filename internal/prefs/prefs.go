@@ -14,7 +14,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // SavedQuery is a named query of a connection ("" = any connection).

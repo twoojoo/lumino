@@ -15,11 +15,11 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/giovanni/lumino/internal/db"
-	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
-	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/db"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/postgres"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 // newTestConnDialog builds a ConnDialog on a driver without opening the UI.

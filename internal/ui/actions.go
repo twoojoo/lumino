@@ -18,11 +18,11 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/desktop"
-	"github.com/giovanni/lumino/internal/history"
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/desktop"
+	"github.com/twoojoo/lumino/internal/history"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 func opInvalidateIn(gtx C, d time.Duration) op.InvalidateCmd {

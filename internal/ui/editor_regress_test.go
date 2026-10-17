@@ -7,8 +7,8 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/layout"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // regressEditor is an editor with a fixed completer (no App needed for

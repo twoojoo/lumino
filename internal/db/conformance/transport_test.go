@@ -12,9 +12,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
-	"github.com/giovanni/lumino/internal/db/sshtunnel"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db/sshtunnel"
 )
 
 func devPath(p ...string) string {

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // reserved words that must be quoted as identifiers (PostgreSQL reserved

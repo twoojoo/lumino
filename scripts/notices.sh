@@ -43,7 +43,7 @@ The source code of the MPL-2.0 libraries listed below is available,
 unmodified, at the URLs given with each of them.
 
 HDR
-  ignore=(--ignore github.com/giovanni/lumino)
+  ignore=(--ignore github.com/twoojoo/lumino)
   for m in "${MANUAL[@]}"; do ignore+=(--ignore "${m%%|*}"); done
   GOFLAGS=-mod=mod go run "$GO_LICENSES" report "${ignore[@]}" \
     --template packaging/notices.tpl ./cmd/lumino 2>/dev/null

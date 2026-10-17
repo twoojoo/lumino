@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/ai"
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/ai"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // askAboutObject targets the connection of the object, not the current one.

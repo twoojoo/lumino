@@ -15,10 +15,10 @@ import (
 	"gioui.org/widget/material"
 	"github.com/xo/dburl"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/knownhosts"
-	"github.com/giovanni/lumino/internal/safety"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/knownhosts"
+	"github.com/twoojoo/lumino/internal/safety"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 var tlsModes = []string{"", "disable", "require", "verify-ca", "verify-full"}

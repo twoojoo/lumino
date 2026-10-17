@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
 )
 
 // Catalog reads pg_catalog. CockroachDB reuses most of it.

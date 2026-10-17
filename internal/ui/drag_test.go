@@ -8,7 +8,7 @@ import (
 	"gioui.org/f32"
 	"gioui.org/io/pointer"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // findCursor moves the pointer along a line (x varies when vertical is

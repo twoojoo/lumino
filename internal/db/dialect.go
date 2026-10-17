@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 // Dialect captures the SQL syntax differences between databases.

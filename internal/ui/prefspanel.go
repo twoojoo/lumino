@@ -8,8 +8,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/giovanni/lumino/internal/prefs"
-	"github.com/giovanni/lumino/internal/secrets"
+	"github.com/twoojoo/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/secrets"
 )
 
 // PrefsPanel edits appearance, data and update preferences.

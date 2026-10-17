@@ -5,9 +5,9 @@ package safety
 import (
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
-	_ "github.com/giovanni/lumino/internal/db/adapters/postgres"
-	_ "github.com/giovanni/lumino/internal/db/adapters/sqlite"
+	"github.com/twoojoo/lumino/internal/db"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/postgres"
+	_ "github.com/twoojoo/lumino/internal/db/adapters/sqlite"
 )
 
 func TestDevGuard(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/giovanni/lumino/internal/db/sshtunnel"
+	"github.com/twoojoo/lumino/internal/db/sshtunnel"
 )
 
 // OpenOptions are environment hooks for Open.

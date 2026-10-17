@@ -16,11 +16,11 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
-	"github.com/giovanni/lumino/internal/history"
-	"github.com/giovanni/lumino/internal/notify"
-	"github.com/giovanni/lumino/internal/prefs"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/history"
+	"github.com/twoojoo/lumino/internal/notify"
+	"github.com/twoojoo/lumino/internal/prefs"
 )
 
 // ConsoleTab is a SQL console: an editor bound to a dedicated session,

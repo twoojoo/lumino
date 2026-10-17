@@ -14,9 +14,9 @@ import (
 	go_ora "github.com/sijms/go-ora/v2"
 	"github.com/sijms/go-ora/v2/network"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func init() { db.Register(Driver{}) }

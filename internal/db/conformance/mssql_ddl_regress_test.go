@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
 )
 
 // mdrRoundTrip checks the DDL contains every fragment, drops the table,

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db"
 )
 
 // resultSet is the output of one statement: rows streamed from an open

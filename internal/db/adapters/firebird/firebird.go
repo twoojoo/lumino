@@ -15,9 +15,9 @@ import (
 
 	"github.com/nakagami/firebirdsql"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlbase"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func init() { db.Register(Driver{}) }

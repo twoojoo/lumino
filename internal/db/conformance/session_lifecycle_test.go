@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovanni/lumino/internal/db/sqlbase"
+	"github.com/twoojoo/lumino/internal/db/sqlbase"
 )
 
 // TestSessionLifecycle covers session regressions found in review (on

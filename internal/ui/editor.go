@@ -23,8 +23,8 @@ import (
 	"gioui.org/widget/material"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 const tabWidth = 4

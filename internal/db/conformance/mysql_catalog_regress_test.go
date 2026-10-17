@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovanni/lumino/internal/db"
-	"github.com/giovanni/lumino/internal/db/dbtest"
-	"github.com/giovanni/lumino/internal/db/sqlx"
+	"github.com/twoojoo/lumino/internal/db"
+	"github.com/twoojoo/lumino/internal/db/dbtest"
+	"github.com/twoojoo/lumino/internal/db/sqlx"
 )
 
 func TestMySQLCatalogRegress(t *testing.T)   { mcrRun(t, "mysql") }
