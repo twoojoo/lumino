@@ -1026,6 +1026,71 @@ print("inserted", db.shell_t.countDocuments({}))`)
 		exec(t, s, `db.grow_t.drop()`)
 	})
 
+	t.Run("Advisor", func(t *testing.T) {
+		if tg.Name == "ferretdb" {
+			t.Skip("FerretDB has no $indexStats, $collStats or profiler")
+		}
+		tools := conn.(db.DocumentTools)
+		dl := lang.(db.DocumentLanguage)
+		s := session(t, conn)
+		r := ref("advisor_t")
+		exec(t, s, `db.advisor_t.drop()`)
+		exec(t, s, `for (let i = 0; i < 200; i++) db.advisor_t.insertOne({a: i % 10, b: i, c: i, x: i})`)
+		for _, ix := range []string{`db.advisor_t.createIndex({a: 1})`, `db.advisor_t.createIndex({a: 1, b: 1})`,
+			`db.advisor_t.createIndex({a: 1, b: 1}, {name: "ab_sparse", sparse: true})`, `db.advisor_t.createIndex({c: 1})`} {
+			exec(t, s, ix)
+		}
+		exec(t, s, `db.advisor_t.find({a: 1, b: 11}).hint("a_1_b_1")`)
+		us, err := tools.IndexUsage(ctx, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]db.IndexUsage{}
+		for _, u := range us {
+			got[u.Name] = u
+		}
+		if len(us) != 5 || got["a_1_b_1"].Ops < 1 || !strings.HasPrefix(got["a_1"].Issue, "prefix of a_1_b_1") ||
+			got["ab_sparse"].Issue != "same keys as a_1_b_1, which covers every document" || !strings.HasPrefix(got["c_1"].Issue, "never used") ||
+			got["_id_"].Issue != "" || got["c_1"].Size <= 0 {
+			t.Fatalf("index usage %+v", us)
+		}
+		exec(t, s, mustAdmin(t, dl, "hideIndex", r, "c_1"))
+		us, _ = tools.IndexUsage(ctx, r)
+		for _, u := range us {
+			if u.Name == "c_1" && !u.Hidden {
+				t.Fatal("index not hidden")
+			}
+		}
+		exec(t, s, mustAdmin(t, dl, "unhideIndex", r, "c_1"))
+		st, err := tools.CollectionStats(ctx, r)
+		if err != nil || st.Documents != 200 || st.Indexes != 5 || st.DataSize <= 0 || st.IndexSize <= 0 || st.AvgDocSize <= 0 {
+			t.Fatalf("collection stats %+v %v", st, err)
+		}
+		// profiler: a scan recorded with an index suggested
+		exec(t, s, mustAdmin(t, dl, "setProfiler", db.ObjectRef{Schema: tg.Schema}, "2", "0"))
+		defer exec(t, s, mustAdmin(t, dl, "setProfiler", db.ObjectRef{Schema: tg.Schema}, "0", "100"))
+		if p, err := tools.Profiler(ctx, tg.Schema); err != nil || p.Level != 2 {
+			t.Fatalf("profiler %+v %v", p, err)
+		}
+		exec(t, s, `db.advisor_t.find({x: 150}).sort({b: -1})`)
+		qs, err := tools.SlowQueries(ctx, tg.Schema, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found *db.SlowQuery
+		for i, q := range qs {
+			if q.NS == tg.Schema+".advisor_t" && strings.Contains(q.Command, "x: 150") {
+				found = &qs[i]
+				break
+			}
+		}
+		if found == nil || found.Suggestion == nil || found.Suggestion.Keys != "{x: 1, b: -1}" || found.DocsExamined != 200 || found.Plan != "COLLSCAN" {
+			t.Fatalf("slow query %+v", found)
+		}
+		exec(t, s, found.Suggestion.Statement)
+		exec(t, s, `db.advisor_t.drop()`)
+	})
+
 	t.Run("Script", func(t *testing.T) {
 		sc := "// leading comment\ndb.customers.countDocuments({});\n/* block; comment */\ndb.customers.find({name: 'a;b'})\n  .limit(1)\nshow collections"
 		stmts := lang.Split(sc)

@@ -179,6 +179,22 @@ func (*language) AdminStatement(op string, ref db.ObjectRef, args ...string) (st
 			cmd = "revokeRolesFromUser"
 		}
 		return fmt.Sprintf("%s.runCommand({%s: %s, roles: %s})", dbExpr(ref.Schema), cmd, strconv.Quote(arg(0)), roles), nil
+	case "hideIndex", "unhideIndex":
+		if strings.TrimSpace(arg(0)) == "" {
+			return "", errors.New("index name missing")
+		}
+		return fmt.Sprintf("%s.runCommand({collMod: %s, index: {name: %s, hidden: %t}})",
+			dbExpr(ref.Schema), strconv.Quote(ref.Name), strconv.Quote(arg(0)), op == "hideIndex"), nil
+	case "setProfiler":
+		level, err := strconv.Atoi(strings.TrimSpace(arg(0)))
+		if err != nil || level < 0 || level > 2 {
+			return "", errors.New("profiling level: 0 (off), 1 (slow operations) or 2 (all)")
+		}
+		ms, err := strconv.Atoi(strings.TrimSpace(arg(1)))
+		if err != nil || ms < 0 {
+			return "", errors.New("slow threshold: milliseconds")
+		}
+		return fmt.Sprintf("%s.runCommand({profile: %d, slowms: %d})", dbExpr(ref.Schema), level, ms), nil
 	case "killOp":
 		if _, err := parseValue(arg(0)); err != nil {
 			return "", fmt.Errorf("operation id: %w", err)

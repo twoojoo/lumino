@@ -811,6 +811,7 @@ func (s *Sidebar) contextMenu(r treeRow) {
 			dbRef := db.ObjectRef{Schema: r.ref.Schema}
 			add(icPerson, "Users and roles…", "", false, func() { a.openUsers(r.connID, dbRef.Schema) })
 			add(icEye, "Watch changes", "", false, func() { a.openWatch(r.connID, dbRef) })
+			add(icHistory, "Slow queries", "", false, func() { a.openProfiler(r.connID, dbRef.Schema) })
 		}
 		add(icRefresh, "Refresh", "F5", false, func() { s.refresh(r) })
 		add(icCopyText, "Copy name", "", false, func() { a.copyLater(r.label) })
@@ -841,6 +842,7 @@ func (s *Sidebar) contextMenu(r treeRow) {
 			add(icTree, "Aggregation pipeline…", "", false, func() { a.openPipeline(r.connID, ref, "") })
 			if ref.Type == db.ObjCollection {
 				add(icColumn, "Analyze schema", "", false, func() { a.openObject(r.connID, ref, "schema") })
+				add(icIndex, "Statistics and index advisor", "", false, func() { a.openObject(r.connID, ref, "stats") })
 				add(icEye, "Watch changes", "", false, func() { a.openWatch(r.connID, ref) })
 				if !a.connReadOnly(r.connID) {
 					add(icDownload, "Import…", "", false, func() { a.openImport(r.connID, ref, nil) })

@@ -47,7 +47,8 @@ driver-neutral database API with one adapter per database.
   tree/JSON views (`docview.go`), document editing by path (`tabledocs.go`, `doceditor.go`). Management features
   through `db.DocumentTools` (adapter `tools.go`) and `DocumentLanguage.AdminStatement` (`admin.go`, reviewed and run
   under the policies by `reviewRun`, `docadmin.go`): schema view, indexes, validation, explain (`doctable.go`), pipeline
-  builder (`pipeline.go`), change streams and server activity (`livetabs.go`), users, import, SQL translation
+  builder (`pipeline.go`), collection stats + index advisor + profiler slow queries (`advisor.go`, adapter
+  `advisor.go`), change streams and server activity (`livetabs.go`), users, import, SQL translation
   (`docdialogs.go`, adapter `sqltranslate.go`), document exports (`export.go` docs-* formats).
 - `internal/prefs` (settings, no secrets), `internal/secrets` (OS keyring), `internal/history`,
   `internal/knownhosts` (SSH TOFU), `internal/ai` (assistant: providers, read-only DB tools, proposals).

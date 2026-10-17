@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Document databases: whole documents next to the (flattened) rows, and
@@ -215,6 +216,63 @@ type DocumentTools interface {
 	// one line: small longs read back as ints), "ejson-canonical" (every
 	// type kept) or "bson".
 	ExportDocument(d DocNode, format string) ([]byte, error)
+	// CollectionStats reads the sizes of a collection.
+	CollectionStats(ctx context.Context, ref ObjectRef) (*CollectionStats, error)
+	// IndexUsage lists the indexes of a collection with their use since
+	// the server started and the problems found (unused, duplicate,
+	// prefix of another index).
+	IndexUsage(ctx context.Context, ref ObjectRef) ([]IndexUsage, error)
+	// Profiler reads the profiling level of a database; SlowQueries the
+	// operations it recorded (newest first), with an index suggested for
+	// the ones scanning or sorting.
+	Profiler(ctx context.Context, dbName string) (*ProfilerStatus, error)
+	SlowQueries(ctx context.Context, dbName string, limit int) ([]SlowQuery, error)
+}
+
+// CollectionStats are the sizes of a collection (bytes).
+type CollectionStats struct {
+	Documents   int64
+	DataSize    int64 // uncompressed documents
+	StorageSize int64 // on disk, documents
+	IndexSize   int64 // on disk, all indexes
+	TotalSize   int64
+	AvgDocSize  int64
+	Indexes     int
+	Capped      bool
+}
+
+// IndexUsage is an index with its use and the problems found.
+type IndexUsage struct {
+	Name   string
+	Keys   string // key pattern, as written in the language
+	Ops    int64  // accesses since Since
+	Since  time.Time
+	Size   int64
+	Unique bool
+	Hidden bool
+	// Issue: "" or why the index looks useless (never used, duplicate
+	// of another one, prefix of another one).
+	Issue string
+}
+
+// ProfilerStatus is the profiling level of a database.
+type ProfilerStatus struct {
+	Level  int // 0 off, 1 slow operations, 2 all
+	SlowMs int64
+}
+
+// SlowQuery is an operation recorded by the profiler.
+type SlowQuery struct {
+	At           time.Time
+	NS           string
+	Op           string
+	Millis       int64
+	DocsExamined int64
+	KeysExamined int64
+	Returned     int64
+	Plan         string
+	Command      string
+	Suggestion   *IndexSuggestion
 }
 
 // Field paths of documents: names joined by dots; a name containing a dot

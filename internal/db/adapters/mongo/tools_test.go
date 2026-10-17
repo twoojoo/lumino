@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -226,5 +227,77 @@ func TestQuotedPaths(t *testing.T) {
 	}
 	if back, _ := toBSON(`{"b": 1, "a": 2.0}`, db.KindJSON, nil); shellLit(back) != "{b: 1, a: Double(2)}" {
 		t.Fatalf("back %s", shellLit(back))
+	}
+}
+
+func TestIndexAdvisor(t *testing.T) {
+	k := func(kv ...any) bson.D {
+		d := bson.D{}
+		for i := 0; i < len(kv); i += 2 {
+			d = append(d, bson.E{Key: kv[i].(string), Value: kv[i+1]})
+		}
+		return d
+	}
+	specs := map[string]bson.D{
+		"_id_":         {{Key: "key", Value: k("_id", int32(1))}},
+		"a_1":          {{Key: "key", Value: k("a", int32(1))}},
+		"a_1_b_1":      {{Key: "key", Value: k("a", int32(1), "b", int32(1))}},
+		"a_1_b_1_copy": {{Key: "key", Value: k("a", int32(1), "b", int32(1))}},
+		"email_1":      {{Key: "key", Value: k("email", int32(1))}, {Key: "unique", Value: true}},
+		"c_1":          {{Key: "key", Value: k("c", int32(1))}},
+		"d_1":          {{Key: "key", Value: k("d", int32(1))}},
+		"d_sparse":     {{Key: "key", Value: k("d", int32(1))}, {Key: "sparse", Value: true}},
+	}
+	since := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	us := []db.IndexUsage{{Name: "_id_", Ops: 0}, {Name: "a_1", Ops: 9}, {Name: "a_1_b_1", Ops: 3}, {Name: "a_1_b_1_copy", Ops: 1},
+		{Name: "email_1", Ops: 0}, {Name: "c_1", Ops: 0, Since: since}, {Name: "d_1", Ops: 4}, {Name: "d_sparse", Ops: 2}}
+	indexIssues(us, specs)
+	got := map[string]string{}
+	for _, u := range us {
+		got[u.Name] = u.Issue
+	}
+	want := map[string]string{
+		"_id_": "", "a_1": "prefix of a_1_b_1 (which serves the same queries)", "a_1_b_1": "",
+		"a_1_b_1_copy": "duplicate of a_1_b_1", "email_1": "", "c_1": "never used since 2026-01-02 03:04", "d_1": "", "d_sparse": "same keys as d_1, which covers every document",
+	}
+	for n, w := range want {
+		if got[n] != w {
+			t.Errorf("%s: %q, want %q", n, got[n], w)
+		}
+	}
+	if prefixOf(k("a", int32(1)), k("a", int32(-1), "b", int32(1))) {
+		t.Error("directions differ")
+	}
+	for _, c := range []struct {
+		cmd  bson.D
+		want string
+	}{
+		{k("find", "c", "filter", k("a", int32(1)), "sort", k("b", int32(-1))), `{find: "", filter: {a: 1}, sort: {b: -1}}`},
+		{k("count", "c", "query", k("a", int32(1))), `{find: "", filter: {a: 1}}`},
+		{k("aggregate", "c", "pipeline", bson.A{k("$match", k("x", int32(2)))}), `{find: "", filter: {x: 2}}`},
+		{k("q", k("z", int32(1)), "u", k("$set", k("y", int32(1)))), `{find: "", filter: {z: 1}}`},
+	} {
+		f, ok := profiledFind(c.cmd)
+		if !ok || shellLit(f) != c.want {
+			t.Errorf("%s: %s", shellLit(c.cmd), shellLit(f))
+		}
+	}
+	if _, ok := profiledFind(k("aggregate", "c", "pipeline", bson.A{k("$group", k("_id", nil))})); ok {
+		t.Error("aggregate without $match")
+	}
+	l := &language{}
+	for op, want := range map[string]string{
+		"hideIndex":   `db.getSiblingDB("shop").runCommand({collMod: "orders", index: {name: "a_1", hidden: true}})`,
+		"unhideIndex": `db.getSiblingDB("shop").runCommand({collMod: "orders", index: {name: "a_1", hidden: false}})`,
+	} {
+		if s, err := l.AdminStatement(op, db.ObjectRef{Schema: "shop", Name: "orders"}, "a_1"); err != nil || s != want || l.Classify(s) != db.StmtDDL {
+			t.Errorf("%s: %s %v", op, s, err)
+		}
+	}
+	if s, err := l.AdminStatement("setProfiler", db.ObjectRef{Schema: "shop"}, "1", "50"); err != nil || s != `db.getSiblingDB("shop").runCommand({profile: 1, slowms: 50})` || l.Classify(s) != db.StmtWrite {
+		t.Errorf("profiler: %s %v", s, err)
+	}
+	if _, err := l.AdminStatement("setProfiler", db.ObjectRef{Schema: "shop"}, "3", "50"); err == nil {
+		t.Error("bad level accepted")
 	}
 }
