@@ -5,7 +5,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # main pushes disabled for now (re-add `branches: [main]` to re-enable)
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
