@@ -225,3 +225,19 @@ func TestDevBuildsNeverCheck(t *testing.T) {
 		t.Fatalf("dev build checked: %v %v", r, err)
 	}
 }
+
+// Releases are published on the source repository; the public key must match
+// the one documented in README.md for manual verification.
+func TestDefaultURL(t *testing.T) {
+	t.Setenv("LUMINO_UPDATE_URL", "")
+	if got, want := URL(), "https://api.github.com/repos/twoojoo/lumino/releases/latest"; got != want {
+		t.Fatalf("URL() = %q, want %q", got, want)
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), PublicKey) {
+		t.Fatal("README.md does not document the release public key")
+	}
+}
