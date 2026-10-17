@@ -38,6 +38,6 @@ driver-neutral database API with one adapter per database.
 - Self-update (`internal/update`) installs only releases whose SHA256SUMS.txt verifies with the built-in
   ed25519 public key; the private key is `.dev/update-signing.key` locally and the `UPDATE_SIGNING_KEY`
   repo secret in CI. Never print, commit or regenerate it. Dev builds never update.
-- Packages are published to the public repo `twoojoo/lumino-releases` (creating it is the user's call).
+- Packages are published as GitHub releases of this repo (`twoojoo/lumino`, tag `v*` → CI job `release`).
 - `make package-linux|windows|macos`, icons from `packaging/logo-source.png` (`go run ./scripts/logogen`,
   then `make icons`).
