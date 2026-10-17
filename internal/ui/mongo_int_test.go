@@ -319,3 +319,107 @@ func TestUIMongo(t *testing.T) {
 	})
 	h.shot("mongo-6-tree")
 }
+
+// TestUIMongoShell runs scripts in the console: results stream into the
+// grid, writes of scripts are confirmed while they run on a protected
+// connection and refused on a read-only one.
+func TestUIMongoShell(t *testing.T) {
+	tg := dbtest.Targets()["mongo"]
+	conn := dbtest.Prepare(t, tg)
+	cfg := tg.Config
+	cfg.ID, cfg.Name, cfg.SavePassword = "db-mongo-shell", "mongo shell", true
+	h := newHarness(t, []db.Config{cfg}, Options{Connection: cfg.Name})
+	a := h.a
+	h.waitFor("console", func() bool { return h.console() != nil && a.connState(cfg.ID).status == stReady })
+	c := h.console()
+	count := func(filter string) string {
+		t.Helper()
+		s, err := conn.Session(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		_, rows, err := dbtest.Query(context.Background(), s, "db.shell_ui.countDocuments("+filter+")")
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("count: %v", err)
+		}
+		return db.FormatValue(rows[0][0], db.KindInt)
+	}
+	runAll := func(src string, n int) {
+		t.Helper()
+		c.ed.SetText(src)
+		c.run(true)
+		h.waitFor("script", func() bool { return !c.running && len(c.results) == n })
+	}
+	runAll("db.shell_ui.drop()\nfor (let i = 0; i < 1500; i++) {\n  db.shell_ui.insertOne({_id: i, half: i % 2 == 0})\n}\nconst evens = db.shell_ui.find({half: true}).sort({_id: -1})\nevens", 4)
+	rs := c.results[3]
+	if rs.err != nil || !rs.isQuery || len(rs.rows) == 0 || !rs.hasDocs() || rs.rows[0][0] != int64(1498) {
+		t.Fatalf("cursor result: %v %d rows", rs.err, len(rs.rows))
+	}
+	h.waitFor("fetch all", func() bool {
+		if rs.more && !rs.fetching {
+			rs.fetchMore(a, a.prefs.Fetch(), true, nil)
+		}
+		return !rs.more && !rs.fetching
+	})
+	if len(rs.rows) != 750 {
+		t.Fatalf("streamed %d documents", len(rs.rows))
+	}
+	h.shot("mongo-12-script")
+
+	// protected connection: the first write asks, the answer holds for the run
+	stored, _ := a.prefs.Conn(cfg.ID)
+	prot := true
+	stored.Protected = &prot
+	c.manual = false
+	c.ed.SetText("for (const id of [1, 3, 5]) db.shell_ui.updateOne({_id: id}, {$set: {seen: true}})")
+	c.run(false)
+	var cf *Confirm
+	h.waitFor("runtime confirmation", func() bool { cf, _ = a.overlay.(*Confirm); return cf != nil })
+	if !strings.Contains(cf.msg, "db.shell_ui.updateOne({_id: 1}, {$set: {seen: true}})") || cf.typeName != "" {
+		t.Fatalf("confirmation: %q", cf.msg)
+	}
+	h.frame()
+	h.shot("mongo-13-runtime-confirm")
+	cf.done = true
+	cf.onOK(nil)
+	a.overlay = nil
+	h.waitFor("allowed", func() bool { return !c.running })
+	if v := count("{seen: true}"); v != "3" || c.results[0].err != nil {
+		t.Fatalf("allowed writes: %s %v", v, c.results[0].err)
+	}
+	// a destructive operation asks again (typed); cancel stops the script
+	c.ed.SetText("let gone = 0\nif (gone == 0) db.shell_ui.deleteMany({})")
+	c.run(true)
+	h.waitFor("destructive confirmation", func() bool { cf, _ = a.overlay.(*Confirm); return cf != nil })
+	if cf.typeName == "" {
+		t.Fatal("destructive operations need the typed name")
+	}
+	cf.done = true
+	cf.cancelled()
+	a.overlay = nil
+	h.waitFor("stopped", func() bool { return !c.running })
+	if v := count("{}"); v != "1500" {
+		t.Fatalf("cancelled delete ran: %s", v)
+	}
+	if last := c.results[len(c.results)-1]; last.err == nil || !strings.Contains(last.err.Error(), "not confirmed") {
+		t.Fatalf("stopped script: %v", last.err)
+	}
+	stored.Protected = nil
+
+	// read-only connection: scripts read, their writes are refused
+	stored.ReadOnly = true
+	c.closeSession() // the next session is opened read-only
+	runAll("db.shell_ui.countDocuments({half: true}) + 0", 1)
+	if rs := c.results[0]; rs.err != nil || db.FormatValue(rs.rows[0][0], db.KindInt) != "750" {
+		t.Fatalf("read-only read: %v", rs.err)
+	}
+	runAll("for (const id of [2]) db.shell_ui.deleteOne({_id: id})", 1)
+	if rs := c.results[0]; rs.err == nil || !strings.Contains(rs.err.Error(), "read-only") {
+		t.Fatalf("read-only write: %v", rs.err)
+	}
+	if v := count("{_id: 2}"); v != "1" {
+		t.Fatal("read-only write applied")
+	}
+	stored.ReadOnly = false
+}

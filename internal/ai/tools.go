@@ -234,13 +234,18 @@ func (t *Tools) Run(ctx context.Context, call ToolCall) (string, error) {
 // available, the statement runs in a transaction rolled back afterwards).
 func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error) {
 	lang := t.Conn.Language()
-	stmts := lang.Split(sql)
-	if len(stmts) != 1 {
-		return "", fmt.Errorf("refused: run exactly one statement (got %d)", len(stmts))
-	}
-	sql = strings.TrimSuffix(strings.TrimSpace(stmts[0].Text), ";")
-	if k := lang.Classify(sql); k != db.StmtRead {
-		return "", fmt.Errorf("refused: this is a %s statement; only read-only queries can run (use propose_sql)", k)
+	// a script (variables, loops…) runs whole on a session that refuses
+	// every write it attempts (checked operation by operation)
+	dynamic := db.IsDynamic(lang, strings.TrimSpace(sql))
+	if !dynamic {
+		stmts := lang.Split(sql)
+		if len(stmts) != 1 {
+			return "", fmt.Errorf("refused: run exactly one statement (got %d)", len(stmts))
+		}
+		sql = strings.TrimSuffix(strings.TrimSpace(stmts[0].Text), ";")
+		if k := lang.Classify(sql); k != db.StmtRead {
+			return "", fmt.Errorf("refused: this is a %s statement; only read-only queries can run (use propose_sql)", k)
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -249,7 +254,20 @@ func (t *Tools) query(ctx context.Context, sql string, limit int) (string, error
 		return "", err
 	}
 	defer s.Close()
+	if g, ok := s.(db.Guarded); ok {
+		g.SetGuard(func(_ context.Context, k db.StmtKind, desc string) error {
+			if k.Modifies() {
+				return fmt.Errorf("refused: %s is a %s operation; only reads can run (use propose_sql)", desc, k)
+			}
+			return nil
+		})
+	} else if dynamic {
+		return "", errors.New("refused: scripts can't be checked on this database")
+	}
 	if err := s.SetReadOnly(ctx, true); err != nil {
+		if dynamic {
+			return "", fmt.Errorf("refused: can't make the session read-only: %w", err)
+		}
 		if !errors.Is(err, db.ErrNotSupported) {
 			return "", fmt.Errorf("refused: can't make the session read-only: %w", err)
 		}

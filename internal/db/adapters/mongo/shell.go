@@ -212,7 +212,7 @@ func split(script string) []sqlx.Statement {
 						break
 					}
 				}
-				if next != "." && !continues(script[start:end]) {
+				if !continuesWith(next) && !continues(script[start:end]) {
 					flush()
 				}
 			}
@@ -242,10 +242,68 @@ func split(script string) []sqlx.Statement {
 }
 
 // continues reports whether a statement ends with something expecting
-// more (a dot, a comma, an operator).
+// more (a dot, a comma, an operator), or is a JavaScript block header
+// whose body is on the next line (if (x)\n  db.c.drop()).
 func continues(s string) bool {
 	s = strings.TrimSpace(s)
-	return strings.HasSuffix(s, ".") || strings.HasSuffix(s, ",") || strings.HasSuffix(s, ":")
+	if strings.HasSuffix(s, "++") || strings.HasSuffix(s, "--") {
+		return false // i++ ends a statement
+	}
+	for _, suf := range []string{".", ",", ":", "=", "+", "-", "*", "&&", "||", "?", "=>", "!", "<", ">"} {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	// a block keyword with nothing after it: else, do, try
+	words := strings.Fields(s)
+	switch words[len(words)-1] {
+	case "else", "do", "try", "finally":
+		return true
+	}
+	// a header whose body follows: if (…), for (…), while (…)
+	for _, kw := range []string{"if", "for", "while", "switch", "else if"} {
+		rest, ok := strings.CutPrefix(s, kw)
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		if !strings.HasPrefix(rest, "(") {
+			continue
+		}
+		return closingParen(rest) == len(rest)-1
+	}
+	return false
+}
+
+// closingParen returns the index of the parenthesis closing s[0] (-1 when
+// unbalanced); strings are skipped.
+func closingParen(s string) int {
+	depth := 0
+	for _, t := range tokens(s) {
+		if t.Kind != sqlx.TPunct {
+			continue
+		}
+		switch s[t.Start] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return t.Start
+			}
+		}
+	}
+	return -1
+}
+
+// continuesWith reports whether a line starting with tok continues the
+// statement before it (.sort(), else, catch…).
+func continuesWith(tok string) bool {
+	switch tok {
+	case ".", ")", "]", "}", "?", ":", "else", "catch", "finally", "&&", "||", "+", "-", "*", "=":
+		return true
+	}
+	return false
 }
 
 // ---- parser ----
@@ -496,6 +554,12 @@ func (p *parser) helper(isNew bool) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	return helperValue(name, isNew, a)
+}
+
+// helperValue builds the value of a shell helper call (ObjectId("…"),
+// ISODate("…")…) from its arguments; isNew: called with new.
+func helperValue(name string, isNew bool, a []any) (any, error) {
 	str := func(i int) (string, bool) {
 		if i < len(a) {
 			s, ok := a[i].(string)
@@ -781,6 +845,38 @@ type statement struct {
 	dbName string // getSiblingDB("x") ("" = the session database)
 	coll   string
 	calls  []call
+}
+
+// String writes the statement back (operations checked at run time are
+// described with their actual arguments).
+func (s *statement) String() string {
+	switch s.kind {
+	case "use", "show":
+		return s.kind + " " + s.arg
+	}
+	var b strings.Builder
+	b.WriteString("db")
+	if s.dbName != "" {
+		b.WriteString(".getSiblingDB(" + strconv.Quote(s.dbName) + ")")
+	}
+	if s.kind == "coll" {
+		if identRe.MatchString(s.coll) && !dbProps[s.coll] {
+			b.WriteString("." + s.coll)
+		} else {
+			b.WriteString(".getCollection(" + strconv.Quote(s.coll) + ")")
+		}
+	}
+	for _, c := range s.calls {
+		b.WriteString("." + c.name + "(")
+		for i, a := range c.args {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(shellLit(a))
+		}
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 // method is the first call (the operation).
