@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,8 @@ func (j *jsShell) toBSON(v goja.Value) (any, error) {
 	switch x := o.Export().(type) {
 	case *jsBSON:
 		return x.V, nil
+	case *docDyn:
+		return x.toBSON()
 	case time.Time:
 		return bson.NewDateTimeFromTime(x), nil
 	}
@@ -351,11 +354,7 @@ func (j *jsShell) toJS(v any) goja.Value {
 	case bson.Undefined:
 		return goja.Undefined()
 	case bson.D:
-		o := r.NewObject()
-		for _, e := range x {
-			_ = o.Set(e.Key, j.toJS(e.Value))
-		}
-		return o
+		return r.NewDynamicObject(&docDyn{j: j, d: x})
 	case bson.A:
 		items := make([]any, len(x))
 		for i, e := range x {
@@ -777,4 +776,109 @@ func cursorRest(ctx context.Context, res *result) (*result, error) {
 	out := docs(ds)
 	out.cur, res.cur = res.cur, nil
 	return out, nil
+}
+
+// ---- documents ----
+
+// docDyn is a document seen by a script: its fields are converted when
+// read (forEach and map over large cursors don't build every value) and a
+// document left as it came goes back to BSON unchanged, types included.
+type docDyn struct {
+	j    *jsShell
+	d    bson.D
+	vals map[string]goja.Value // fields read or assigned
+	keys []string              // the keys once a field is added or deleted
+}
+
+func (p *docDyn) field(key string) (any, bool) {
+	for _, e := range p.d {
+		if e.Key == key {
+			return e.Value, true
+		}
+	}
+	return nil, false
+}
+
+func (p *docDyn) Get(key string) goja.Value {
+	if v, ok := p.vals[key]; ok {
+		return v
+	}
+	if p.keys != nil && !slices.Contains(p.keys, key) {
+		return nil
+	}
+	raw, ok := p.field(key)
+	if !ok {
+		return nil
+	}
+	v := p.j.toJS(raw)
+	if p.vals == nil {
+		p.vals = map[string]goja.Value{}
+	}
+	p.vals[key] = v
+	return v
+}
+
+func (p *docDyn) Keys() []string {
+	if p.keys != nil {
+		return slices.Clone(p.keys)
+	}
+	out := make([]string, 0, len(p.d))
+	for _, e := range p.d {
+		if !slices.Contains(out, e.Key) {
+			out = append(out, e.Key)
+		}
+	}
+	return out
+}
+
+func (p *docDyn) Has(key string) bool { return slices.Contains(p.Keys(), key) }
+
+func (p *docDyn) Set(key string, v goja.Value) bool {
+	if p.keys == nil {
+		p.keys = p.Keys()
+	}
+	if !slices.Contains(p.keys, key) {
+		p.keys = append(p.keys, key)
+	}
+	if p.vals == nil {
+		p.vals = map[string]goja.Value{}
+	}
+	p.vals[key] = v
+	return true
+}
+
+func (p *docDyn) Delete(key string) bool {
+	p.keys = slices.DeleteFunc(p.Keys(), func(k string) bool { return k == key })
+	delete(p.vals, key)
+	return true
+}
+
+// toBSON returns the document with the fields the script read (they may
+// have been changed in place) or assigned converted back.
+func (p *docDyn) toBSON() (any, error) {
+	if p.vals == nil && p.keys == nil {
+		return p.d, nil
+	}
+	d := bson.D{}
+	for _, k := range p.Keys() {
+		raw, had := p.field(k)
+		if v, ok := p.vals[k]; ok {
+			if _, isObj := v.(*goja.Object); !isObj && had && v.SameAs(p.j.toJS(raw)) {
+				// read, not changed: keep the BSON type (NumberLong(5) stays a long)
+				d = append(d, bson.E{Key: k, Value: raw})
+				continue
+			}
+			b, err := p.j.toBSON(v)
+			if err != nil {
+				return nil, err
+			}
+			if _, u := b.(bson.Undefined); u {
+				continue
+			}
+			d = append(d, bson.E{Key: k, Value: b})
+			continue
+		}
+		d = append(d, bson.E{Key: k, Value: raw})
+	}
+	return d, nil
 }

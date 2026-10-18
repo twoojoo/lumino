@@ -61,7 +61,7 @@ type collInfo struct {
 }
 
 func (k *catalog) collections(ctx context.Context, dbName string, filter bson.D) ([]collInfo, error) {
-	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "filter", Value: filter}})
+	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "filter", Value: filter}}, k.c.readOpts()...)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -135,7 +135,7 @@ func (k *catalog) sample(ctx context.Context, dbName, coll string, n int, random
 	} else {
 		pipe = bson.A{bson.D{{Key: "$limit", Value: n}}}
 	}
-	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "aggregate", Value: coll}, {Key: "pipeline", Value: pipe}, {Key: "cursor", Value: bson.D{}}})
+	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "aggregate", Value: coll}, {Key: "pipeline", Value: pipe}, {Key: "cursor", Value: bson.D{}}}, k.c.readOpts()...)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -153,7 +153,7 @@ func (k *catalog) sample(ctx context.Context, dbName, coll string, n int, random
 
 func (k *catalog) estimate(ctx context.Context, dbName, coll string) int64 {
 	var d bson.D
-	if err := k.c.cl.Database(dbName).RunCommand(ctx, bson.D{{Key: "count", Value: coll}}).Decode(&d); err != nil {
+	if err := k.c.cl.Database(dbName).RunCommand(ctx, bson.D{{Key: "count", Value: coll}}, k.c.readOpts()...).Decode(&d); err != nil {
 		return -1
 	}
 	n, ok := argInt(fieldOr(d, "n"))
@@ -232,7 +232,7 @@ func (k *catalog) Table(ctx context.Context, ref db.ObjectRef) (*db.TableInfo, e
 
 // indexSpecs lists the index specifications of a collection.
 func (k *catalog) indexSpecs(ctx context.Context, dbName, coll string) ([]bson.D, error) {
-	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "listIndexes", Value: coll}})
+	cur, err := k.c.cl.Database(dbName).RunCommandCursor(ctx, bson.D{{Key: "listIndexes", Value: coll}}, k.c.readOpts()...)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -326,50 +326,51 @@ func (k *catalog) DDL(ctx context.Context, ref db.ObjectRef) (string, error) {
 
 func strconvQuote(s string) string { return shellLit(s) }
 
-// maxCompletionCollections bounds the collections sampled for completion.
-const maxCompletionCollections = 200
+// completionSample is how many documents give the completion fields.
+const completionSample = 100
 
-// Completion returns the fields (dotted paths of nested documents, two
-// levels deep) of the collections of a database, from small samples.
+var _ db.FieldCompleter = (*catalog)(nil)
+
+// Completion returns the collections of a database; their fields are
+// sampled one collection at a time by CompletionFields.
 func (k *catalog) Completion(ctx context.Context, schema db.ObjectRef) (map[string][]string, error) {
-	dbName := k.dbName(schema)
-	colls, err := k.collections(ctx, dbName, bson.D{})
+	colls, err := k.collections(ctx, k.dbName(schema), bson.D{})
 	if err != nil {
 		return nil, err
 	}
 	out := map[string][]string{}
-	for i, c := range colls {
-		if strings.HasPrefix(c.name, "system.") {
-			continue
-		}
-		if i >= maxCompletionCollections {
+	for _, c := range colls {
+		if !strings.HasPrefix(c.name, "system.") {
 			out[c.name] = nil
-			continue
 		}
-		ds, err := k.sample(ctx, dbName, c.name, 50, false)
-		if err != nil {
-			out[c.name] = nil
-			continue
-		}
-		seen := map[string]bool{}
-		var fields []string
-		var walk func(prefix string, d bson.D, depth int)
-		walk = func(prefix string, d bson.D, depth int) {
-			for _, e := range d {
-				p := prefix + e.Key
-				if !seen[p] {
-					seen[p] = true
-					fields = append(fields, p)
-				}
-				if sub, ok := e.Value.(bson.D); ok && depth < 2 {
-					walk(p+".", sub, depth+1)
-				}
-			}
-		}
-		for _, d := range ds {
-			walk("", d, 0)
-		}
-		out[c.name] = fields
 	}
 	return out, nil
+}
+
+// CompletionFields returns the fields (dotted paths of nested documents,
+// two levels deep) of a collection, from a small sample.
+func (k *catalog) CompletionFields(ctx context.Context, ref db.ObjectRef) ([]string, error) {
+	ds, err := k.sample(ctx, k.dbName(ref), ref.Name, completionSample, false)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	fields := []string{}
+	var walk func(prefix string, d bson.D, depth int)
+	walk = func(prefix string, d bson.D, depth int) {
+		for _, e := range d {
+			p := prefix + e.Key
+			if !seen[p] {
+				seen[p] = true
+				fields = append(fields, p)
+			}
+			if sub, ok := e.Value.(bson.D); ok && depth < 2 {
+				walk(p+".", sub, depth+1)
+			}
+		}
+	}
+	for _, d := range ds {
+		walk("", d, 0)
+	}
+	return fields, nil
 }

@@ -1379,15 +1379,19 @@ func (t *ConsoleTab) complete(e *CodeEditor) *compRequest {
 		}
 		cs.loadCompletion(kk)
 		m := cs.completion[kk]
-		if cols, ok := m[name]; ok {
-			return cols
-		}
-		for n, cols := range m {
-			if strings.EqualFold(n, name) {
-				return cols
+		cols, ok := m[name]
+		if !ok {
+			for n, c := range m {
+				if strings.EqualFold(n, name) {
+					name, cols, ok = n, c, true
+					break
+				}
 			}
 		}
-		return nil
+		if ok && cols == nil {
+			cs.loadFields(kk, name) // fields listed on demand
+		}
+		return cols
 	}
 	if ctx.Qualifier != "" {
 		// alias/table columns

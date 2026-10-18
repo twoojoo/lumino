@@ -57,7 +57,7 @@ func (a *App) openWatch(connID string, ref db.ObjectRef) {
 }
 
 func (t *WatchTab) clear() {
-	t.rs = &resultSet{sortCol: -1, affected: -1, isQuery: true, docs: []db.DocNode{},
+	t.rs = &resultSet{sortCol: -1, affected: -1, isQuery: true, docs: []db.Document{},
 		cols: textCols("time", "operation", "_id", "fields", "namespace")}
 	t.grid.SetModel(t.rs)
 	t.docs.reset()
@@ -81,7 +81,7 @@ func (t *WatchTab) start() {
 				}
 				row := db.Row{at.Format("15:04:05.000"), ev.Op, ev.Key, ev.Fields, ev.NS}
 				t.rs.rows = append([]db.Row{row}, t.rs.rows...) // newest first
-				t.rs.docs = append([]db.DocNode{ev.Doc}, t.rs.docs...)
+				t.rs.docs = append([]db.Document{db.NodeDocument(ev.Doc)}, t.rs.docs...)
 				if len(t.rs.rows) > maxEvents {
 					t.rs.rows, t.rs.docs = t.rs.rows[:maxEvents], t.rs.docs[:maxEvents]
 				}

@@ -19,7 +19,7 @@ type resultSet struct {
 	stmtStart int // byte offset of the statement in the console text
 	cols      []db.Column
 	rows      []db.Row
-	docs      []db.DocNode // whole documents of the rows (document databases), else nil
+	docs      []db.Document // whole documents of the rows (document databases), else nil
 	res       db.Result
 	more      bool
 	fetching  bool
@@ -73,7 +73,7 @@ func (r *resultSet) growColumns(cols []db.Column) {
 
 // docsOf returns the documents of the rows just fetched from res (nil when
 // res is not a document result).
-func docsOf(res db.Result, n int) []db.DocNode {
+func docsOf(res db.Result, n int) []db.Document {
 	dr, ok := res.(db.DocumentResult)
 	if !ok {
 		return nil
@@ -94,7 +94,7 @@ func (r *resultSet) doc(i int) (db.DocNode, bool) {
 	if !r.hasDocs() || j < 0 || j >= len(r.docs) {
 		return db.DocNode{}, false
 	}
-	return r.docs[j], true
+	return r.docs[j].Node(), true
 }
 
 // row returns the underlying row index of a displayed row.
@@ -163,7 +163,7 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 	withDocs := r.docs != nil
 	go func() {
 		var got []db.Row
-		var gotDocs []db.DocNode
+		var gotDocs []db.Document
 		docs := withDocs
 		more := true
 		var err error
@@ -231,7 +231,7 @@ func (r *resultSet) fetchMore(a *App, n int, all bool, done func()) {
 
 // addDocs appends the documents of appended rows (without them, the
 // result stops carrying documents).
-func (r *resultSet) addDocs(d []db.DocNode, ok bool) {
+func (r *resultSet) addDocs(d []db.Document, ok bool) {
 	if r.docs == nil {
 		return
 	}

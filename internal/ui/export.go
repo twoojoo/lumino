@@ -478,7 +478,7 @@ func (d *ExportDialog) start() {
 				if err != nil {
 					return err
 				}
-				var bdocs []db.DocNode
+				var bdocs []db.Document
 				if isDocs {
 					if bdocs = docsOf(res, len(batch)); bdocs == nil {
 						return fmt.Errorf("the result has no documents")
@@ -487,7 +487,7 @@ func (d *ExportDialog) start() {
 				for i, r := range batch {
 					var err error
 					if isDocs {
-						err = rw.writeDoc(bdocs[i], enc)
+						err = rw.writeDoc(bdocs[i].Node(), enc)
 					} else {
 						err = rw.write(r)
 					}

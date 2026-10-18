@@ -67,6 +67,16 @@ type Info struct {
 	// Folders orders the object types in the navigation tree (nil = the
 	// default order of SQL databases); types not listed follow.
 	Folders []ObjectType
+	// Choices are connection parameters the form offers as a choice
+	// among values (stored in Config.Params).
+	Choices []Choice
+}
+
+// Choice is a connection parameter picked among Values (Values[0] is the
+// default, stored as no parameter); Labels name them in the form.
+type Choice struct {
+	Param, Label, Hint string
+	Values, Labels     []string
 }
 
 // Has reports whether the connection form shows f.
@@ -203,6 +213,14 @@ type Catalog interface {
 	// Completion returns tables and their columns of a schema in one round
 	// trip, for the editor's autocomplete.
 	Completion(ctx context.Context, schema ObjectRef) (map[string][]string, error)
+}
+
+// FieldCompleter is implemented by catalogs whose Completion lists the
+// objects without their columns (nil) because finding them is costly
+// (document databases sample each collection): CompletionFields returns
+// those of one object when the editor needs them.
+type FieldCompleter interface {
+	CompletionFields(ctx context.Context, ref ObjectRef) ([]string, error)
 }
 
 // TLSConfig configures transport encryption.

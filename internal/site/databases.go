@@ -289,6 +289,8 @@ SELECT n FROM customer_count;`,
 			"Cluster status: replica set members with state, health, optime and replication lag, the oplog window and size; on mongos the shards, the balancer, sharded collections with their shard key and chunks per shard, and the primary shard of each database.",
 			"Export to code: a find, aggregate, count, distinct or write statement (or a pipeline from the builder) becomes Go, Python, Node.js, Java or C# code for the official driver, as a snippet or a complete program, with the BSON types kept.",
 			"Transactions on replica sets and sharded clusters, SCRAM, X.509 and AWS IAM authentication, TLS and SSH tunnels.",
+			"A read preference per connection: queries, counts and the navigator can read from secondaries, while writes, edits and transactions use the primary.",
+			"Built for large collections: field completion samples a collection only when a statement uses it, documents are converted for the tree and JSON views only when shown, scripts read the fields they touch, imports insert batches in parallel, and an unfiltered count reads the collection metadata.",
 		},
 		Notes: []string{
 			"MongoDB 5.0 or newer. Transactions need a replica set or a sharded cluster.",

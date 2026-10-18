@@ -198,7 +198,13 @@ func TestLanguage(t *testing.T) {
 	if q, _ := l.Browse(db.ObjectRef{Name: "find"}, db.BrowseQuery{}); q != `db.getCollection("find").find({})` {
 		t.Errorf("shadowing name: %q", q)
 	}
-	if q, _ := l.Count(ref, ""); q != "db.orders.countDocuments({})" {
+	if q, _ := l.Count(ref, " { } "); q != "db.orders.estimatedDocumentCount()" {
+		t.Errorf("count without filter: %s", q)
+	}
+	if q, _ := l.Count(ref, "{a: 1}"); q != "db.orders.countDocuments({a: 1})" {
+		t.Errorf("count with a filter: %s", q)
+	}
+	if q, _ := l.Count(ref, ""); q != "db.orders.estimatedDocumentCount()" {
 		t.Errorf("count %q", q)
 	}
 	if err := l.ValidateFilter("status = 1"); err == nil {

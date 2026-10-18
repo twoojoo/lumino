@@ -48,6 +48,8 @@ type ConnDialog struct {
 	colorBtns                                               []widget.Clickable
 	savePwBtn, sshBtn, roBtn, createBtn, showPw             widget.Clickable
 	testBtn, saveBtn, connectBtn, cancelBtn, urlBtn, advBtn widget.Clickable
+	choiceSel                                               map[string]int // Info.Choices: selected value by parameter
+	choiceBtns                                              map[string][]widget.Clickable
 	advanced, pwVisible                                     bool
 	pwKnown                                                 bool // a password was stored when the form opened
 	testing                                                 bool
@@ -129,7 +131,7 @@ func (d *ConnDialog) load(c *db.Config) {
 	d.initSQL.SetText(c.InitSQL)
 	fileDrv := d.info().Has(db.FieldFile)
 	var ps []string
-	for k, v := range c.Params {
+	for k, v := range d.takeChoices(c.Params) {
 		if fileDrv && k == "create" {
 			continue // shown as the "Create the file" toggle only
 		}
@@ -236,6 +238,7 @@ func (d *ConnDialog) config() (db.Config, error) {
 		}
 		c.Params[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
+	d.setChoices(&c)
 	if info.Has(db.FieldFile) {
 		// the toggle is the only source of "create" (load() keeps it out
 		// of the Parameters text), so unchecking it really turns it off
@@ -376,13 +379,56 @@ func (d *ConnDialog) fillFrom(c db.Config) {
 	d.certFile.SetText(c.TLS.CertFile)
 	d.keyFile.SetText(c.TLS.KeyFile)
 	var ps []string
-	for k, v := range c.Params {
+	for k, v := range d.takeChoices(c.Params) {
 		ps = append(ps, k+"="+v)
 	}
 	sort.Strings(ps)
 	d.params.SetText(strings.Join(ps, "\n"))
 	if len(ps) > 0 || c.TLS.Enabled() {
 		d.advanced = true
+	}
+}
+
+// takeChoices selects the values of the driver's choices found in params
+// and returns the other parameters.
+func (d *ConnDialog) takeChoices(params map[string]string) map[string]string {
+	d.choiceSel = map[string]int{}
+	rest := map[string]string{}
+	for k, v := range params {
+		rest[k] = v
+	}
+	for _, ch := range d.info().Choices {
+		for k, v := range rest {
+			if !strings.EqualFold(k, ch.Param) {
+				continue
+			}
+			for i, cv := range ch.Values {
+				if i > 0 && strings.EqualFold(cv, v) {
+					d.choiceSel[ch.Param] = i
+					delete(rest, k)
+				}
+			}
+		}
+	}
+	return rest
+}
+
+// setChoices stores the selected values of the driver's choices in c.
+func (d *ConnDialog) setChoices(c *db.Config) {
+	for _, ch := range d.info().Choices {
+		i := d.choiceSel[ch.Param]
+		if i <= 0 || i >= len(ch.Values) {
+			continue
+		}
+		for k := range c.Params {
+			if strings.EqualFold(k, ch.Param) {
+				delete(c.Params, k) // the form's choice wins
+			}
+		}
+		if c.Params == nil {
+			c.Params = map[string]string{}
+		}
+		c.Params[ch.Param] = ch.Values[i]
 	}
 }
 
@@ -551,6 +597,24 @@ func (d *ConnDialog) Layout(gtx C) D {
 	if d.createBtn.Clicked(gtx) {
 		d.createFile = !d.createFile
 	}
+	if d.choiceBtns == nil {
+		d.choiceBtns = map[string][]widget.Clickable{}
+	}
+	if d.choiceSel == nil {
+		d.choiceSel = map[string]int{}
+	}
+	for _, ch := range d.info().Choices {
+		btns := d.choiceBtns[ch.Param]
+		if len(btns) != len(ch.Values) {
+			btns = make([]widget.Clickable, len(ch.Values))
+			d.choiceBtns[ch.Param] = btns
+		}
+		for i := range btns {
+			if btns[i].Clicked(gtx) {
+				d.choiceSel[ch.Param] = i
+			}
+		}
+	}
 	if d.advBtn.Clicked(gtx) {
 		d.advanced = !d.advanced
 	}
@@ -669,6 +733,23 @@ func (d *ConnDialog) Layout(gtx C) D {
 					return toggle(gtx, th, &d.savePwBtn, label, d.savePw)
 				})
 			}))
+		}
+		for _, c := range info.Choices {
+			c := c
+			ch = append(ch, layout.Rigid(func(gtx C) D {
+				return formRow(gtx, th, c.Label, lw, func(gtx C) D {
+					return segmented(gtx, th, d.choiceBtns[c.Param], c.Labels, d.choiceSel[c.Param])
+				})
+			}))
+			if c.Hint != "" {
+				ch = append(ch, layout.Rigid(func(gtx C) D {
+					return layout.Inset{Left: lw, Bottom: 4}.Layout(gtx, func(gtx C) D {
+						l := material.Body2(th, c.Hint)
+						l.Color, l.TextSize = pal.TextDim, 11.5
+						return l.Layout(gtx)
+					})
+				}))
+			}
 		}
 		if info.Caps.TLS {
 			ch = append(ch,
