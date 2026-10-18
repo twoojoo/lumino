@@ -324,6 +324,25 @@ func TestFormsMongoURL(t *testing.T) {
 	if c.Driver != "mongodb" || c.Param("replicaSet") != "rs0" || c.Host != "127.0.0.1:55017,127.0.0.1:55018" {
 		t.Fatalf("config %+v", c)
 	}
+	// the read preference is a choice of the form, not a free parameter
+	if err := d.fromURL("mongodb://127.0.0.1:55017/shop?readPreference=secondaryPreferred&w=majority"); err != nil {
+		t.Fatal(err)
+	}
+	if d.params.Text() != "w=majority" || d.choiceSel["readPreference"] != 3 {
+		t.Fatalf("read preference: %q %v", d.params.Text(), d.choiceSel)
+	}
+	d.params.SetText("w=majority\nreadpreference=nearest")
+	if c, err = d.config(); err != nil || c.Param("readPreference") != "secondaryPreferred" || len(c.Params) != 2 {
+		t.Fatalf("config %v %v", c.Params, err)
+	}
+	d.choiceSel["readPreference"] = 0
+	if c, _ = d.config(); c.Params["readpreference"] != "nearest" {
+		t.Fatalf("primary keeps the parameter typed: %v", c.Params)
+	}
+	d.params.SetText("")
+	if c, _ = d.config(); len(c.Params) != 0 {
+		t.Fatalf("primary: %v", c.Params)
+	}
 	if err := d.fromURL("mongodb+srv://cluster0.example.net/"); err != nil || !strings.Contains(d.params.Text(), "srv=true") ||
 		tlsModes[d.tlsMode] != "verify-full" {
 		t.Fatalf("srv: %v %q", err, d.params.Text())

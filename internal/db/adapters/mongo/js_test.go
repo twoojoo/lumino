@@ -71,8 +71,29 @@ func TestJSValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := shellLit(eval(t, j, "doc")); got != shellLit(bson.D{{Key: "_id", Value: id}, {Key: "n", Value: int64(1 << 60)},
-		{Key: "small", Value: int32(5)}, {Key: "d", Value: dec}, {Key: "when", Value: doc[4].Value}, {Key: "arr", Value: doc[5].Value}}) {
+		{Key: "small", Value: int64(5)}, {Key: "d", Value: dec}, {Key: "when", Value: doc[4].Value}, {Key: "arr", Value: doc[5].Value}}) {
 		t.Errorf("round trip %s", got)
+	}
+	// documents are converted as they are read and keep their types
+	for _, c := range [][2]string{
+		{`doc.small + doc.n.toString().length; doc`, shellLit(doc)},
+		{`let c = Object.assign({}, doc); c.small`, "5"},
+		{`doc.arr.push(2); doc.arr`, `[1, "x", 2]`},
+		{`doc.extra = {a: 1}; delete doc.d; Object.keys(doc).join()`, `"_id,n,small,when,arr,extra"`},
+		{`doc.small = 7; [doc.small, doc.extra.a, "d" in doc, "small" in doc]`, `[7, 1, false, true]`},
+		{`JSON.stringify(doc.extra)`, `"{\"a\":1}"`},
+	} {
+		if got := shellLit(eval(t, j, c[0])); got != c[1] {
+			t.Errorf("%s: %s, want %s", c[0], got, c[1])
+		}
+	}
+	if got := shellLit(eval(t, j, "doc")); got != shellLit(bson.D{{Key: "_id", Value: id}, {Key: "n", Value: int64(1 << 60)},
+		{Key: "small", Value: int32(7)}, {Key: "when", Value: doc[4].Value}, {Key: "arr", Value: bson.A{int32(1), "x", int32(2)}},
+		{Key: "extra", Value: bson.D{{Key: "a", Value: int32(1)}}}}) {
+		t.Errorf("changed document %s", got)
+	}
+	if err := j.r.Set("doc", j.toJS(doc)); err != nil {
+		t.Fatal(err)
 	}
 	if got := eval(t, j, "doc.when.getUTCFullYear()"); got != int32(2024) {
 		t.Errorf("date %v", got)

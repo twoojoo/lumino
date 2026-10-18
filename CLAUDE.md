@@ -37,7 +37,11 @@ driver-neutral database API with one adapter per database.
   mongosh statements parsed in `shell.go` and run as server commands, anything else (variables, loops) runs in a
   per-session goja runtime (`js.go`) whose operations are classified with their actual arguments and checked at run
   time: read-only sessions refuse writes, `db.Guard` (console: confirmation on protected connections; AI: refusal)
-  decides the others; `ChangeApplier` edits keep BSON types). Field paths (`db.JoinFieldPath`/`SplitFieldPath`)
+  decides the others; `ChangeApplier` edits keep BSON types; script documents are `docDyn` proxies converted field by
+  field). Results hand out `db.Document`s converted to `DocNode` on first `Node()` (tree/JSON views, edits, exports);
+  `Completion` lists collections only, fields come per collection from `db.FieldCompleter`; the `readPreference`
+  parameter (a `db.Info.Choices` entry of the form) applies to reading statements and the navigator, transactions
+  and edits use the primary. Field paths (`db.JoinFieldPath`/`SplitFieldPath`)
   quote names with dots or a leading `$` (`a."b.c"`): such paths are updated by `$setField` pipelines; nested
   documents are ordered Extended JSON text cells; result columns grow when later documents bring new fields.
   All pure Go.

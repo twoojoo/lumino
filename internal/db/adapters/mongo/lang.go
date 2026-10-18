@@ -553,10 +553,15 @@ func filterText(filter string) (string, error) {
 	return f, nil
 }
 
+// Count counts the documents matching filter; without a filter the count
+// comes from the collection metadata (estimatedDocumentCount: no scan).
 func (l *language) Count(ref db.ObjectRef, filter string) (string, error) {
 	f, err := filterText(filter)
 	if err != nil {
 		return "", err
+	}
+	if d, err := parseDocument(f); err == nil && len(d) == 0 {
+		return collExpr(ref) + ".estimatedDocumentCount()", nil
 	}
 	return collExpr(ref) + ".countDocuments(" + f + ")", nil
 }

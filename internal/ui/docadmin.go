@@ -126,7 +126,7 @@ func (a *App) queryDocs(connID, stmt string, then func([]db.DocNode, error)) {
 					if d == nil {
 						return errors.New("the result has no documents")
 					}
-					docs = append(docs, d...)
+					docs = append(docs, db.Nodes(d)...)
 					if !more {
 						break
 					}

@@ -301,3 +301,16 @@ func TestIndexAdvisor(t *testing.T) {
 		t.Error("bad level accepted")
 	}
 }
+
+func TestLazyDocuments(t *testing.T) {
+	r := &result{last: []bson.D{{{Key: "a", Value: int32(1)}, {Key: "b", Value: bson.D{{Key: "c", Value: "x"}}}}}}
+	ds := r.Documents()
+	l := ds[0].(*lazyDoc)
+	if l.d == nil || len(l.n.Children) != 0 {
+		t.Fatal("converted before it was asked")
+	}
+	n := ds[0].Node()
+	if c, ok := n.Field("b"); !ok || len(c.Children) != 1 || l.d != nil || len(ds[0].Node().Children) != 2 {
+		t.Fatalf("node %+v", n)
+	}
+}

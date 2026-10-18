@@ -38,7 +38,7 @@ func testDocs() *resultSet {
 	}}
 	doc2 := db.DocNode{Type: "object", Kind: db.KindJSON, Children: []db.DocNode{{Name: "_id", Type: "int", Kind: db.KindInt, Value: int64(2), Lit: "2"}}}
 	return &resultSet{cols: []db.Column{{Name: "_id", Kind: db.KindInt}, {Name: "a.b", Kind: db.KindText}},
-		rows: []db.Row{{int64(1), "x"}, {int64(2), nil}}, docs: []db.DocNode{doc, doc2}, sortCol: -1, isQuery: true}
+		rows: []db.Row{{int64(1), "x"}, {int64(2), nil}}, docs: []db.Document{db.NodeDocument(doc), db.NodeDocument(doc2)}, sortCol: -1, isQuery: true}
 }
 
 func mongoLang() db.Language { return mongo.Language() }
@@ -103,7 +103,7 @@ func TestQueryItems(t *testing.T) {
 	if !found {
 		t.Fatal("SQL keywords")
 	}
-	k, ok := docKey(mongo.Language(), testDocs().docs[0])
+	k, ok := docKey(mongo.Language(), testDocs().docs[0].Node())
 	if !ok || k[0].Value != db.Raw("1") {
 		t.Fatalf("key %v", k)
 	}

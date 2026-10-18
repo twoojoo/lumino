@@ -173,3 +173,64 @@ func TestMongoGeneratedGoRuns(t *testing.T) {
 		t.Errorf("distinct with a long:\n%s", o)
 	}
 }
+
+// TestMongoReadPreference: reads follow the connection's read preference,
+// writes and transactions go to the primary. The shards of the test
+// cluster have no secondary, so a read that must use one fails on mongos.
+func TestMongoReadPreference(t *testing.T) {
+	needs(t, "127.0.0.1:55020")
+	ctx := context.Background()
+	var secConn db.Conn
+	open := func(mode string) db.Session {
+		cfg := db.Config{Driver: "mongodb", Host: "127.0.0.1", Port: 55020, Database: "lumino_shard", Params: map[string]string{"readPreference": mode}}
+		c := ping(t, cfg, db.OpenOptions{})
+		if mode == "secondary" {
+			secConn = c
+		}
+		s, err := c.Session(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return s
+	}
+	run := func(s db.Session, stmt string) error {
+		res, err := s.Execute(ctx, stmt)
+		if err == nil {
+			_, _, err = res.Fetch(ctx, 10)
+			res.Close()
+		}
+		return err
+	}
+	sec := open("secondary")
+	if err := run(sec, `db.rp.insertOne({k: 1})`); err != nil {
+		t.Fatalf("write with a secondary read preference: %v", err)
+	}
+	for _, q := range []string{`db.rp.find({}).maxTimeMS(3000)`, `db.rp.countDocuments({}, {maxTimeMS: 3000})`} {
+		// mongos waits for a secondary until the time limit
+		if err := run(sec, q); err == nil || !strings.Contains(strings.ToLower(err.Error()), "read preference") && !strings.Contains(err.Error(), "MaxTimeMSExpired") {
+			t.Errorf("%s ran on a primary: %v", q, err)
+		}
+	}
+	if err := sec.Begin(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sec, `db.rp.find({})`); err != nil {
+		t.Errorf("read in a transaction: %v", err)
+	}
+	if err := sec.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// edits re-read the document from the primary
+	ref := db.ObjectRef{Schema: "lumino_shard", Name: "rp", Type: db.ObjCollection}
+	if _, err := db.Apply(ctx, sec, secConn, ref, []db.Change{{Op: db.OpUpdate, Key: []db.ColValue{{Column: "k", Kind: db.KindInt, Value: int64(1)}},
+		Values: []db.ColValue{{Column: "v", Kind: db.KindInt, Value: int64(2)}}}}); err != nil {
+		t.Errorf("edit with a secondary read preference: %v", err)
+	}
+	if err := run(open("secondaryPreferred"), `db.rp.find({})`); err != nil {
+		t.Errorf("secondaryPreferred: %v", err)
+	}
+	if err := run(open(""), `db.rp.drop()`); err != nil {
+		t.Fatal(err)
+	}
+}

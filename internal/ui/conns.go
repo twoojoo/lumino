@@ -451,6 +451,30 @@ func (cs *connState) loadCompletion(k metaKey) {
 	}, func(v any) { cs.completion[k] = v.(map[string][]string) })
 }
 
+// loadFields loads the completion fields of one object of a catalog that
+// lists them on demand (db.FieldCompleter).
+func (cs *connState) loadFields(k metaKey, name string) {
+	key := "fields:" + k.catalog + "\x00" + k.schema + "\x00" + name
+	if cs.errs[key] != nil {
+		return // not retried on every keystroke
+	}
+	cs.load(key, func(ctx context.Context, c db.Conn) (any, error) {
+		fc, ok := c.Catalog().(db.FieldCompleter)
+		if !ok {
+			return []string{}, nil
+		}
+		return fc.CompletionFields(ctx, db.ObjectRef{Catalog: k.catalog, Schema: k.schema, Name: name})
+	}, func(v any) {
+		if m, ok := cs.completion[k]; ok {
+			f := v.([]string)
+			if f == nil {
+				f = []string{}
+			}
+			m[name] = f
+		}
+	})
+}
+
 // refreshSchema forgets the cached objects of a schema (after DDL).
 func (cs *connState) refreshSchema(k metaKey) {
 	delete(cs.objects, k)
@@ -459,6 +483,7 @@ func (cs *connState) refreshSchema(k metaKey) {
 	sk := k.catalog + "\x00" + k.schema
 	cs.forget("objects:"+sk, true)
 	cs.forget("completion:"+sk, true)
+	cs.forget("fields:"+sk+"\x00", false)
 	cs.forget("table:"+sk+"\x00", false)
 	for r := range cs.tables {
 		if keyOf(r) == k {

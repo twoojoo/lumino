@@ -48,6 +48,10 @@ func (Driver) Info() db.Info {
 		Schemes:       []string{"mongodb", "mongodb+srv"},
 		DialectName:   "mongo",
 		Folders:       []db.ObjectType{db.ObjCollection, db.ObjView},
+		Choices: []db.Choice{{Param: "readPreference", Label: "Read from",
+			Hint:   "Queries, counts and the navigator read from these members; writes and transactions use the primary.",
+			Values: []string{"", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"},
+			Labels: []string{"Primary", "Primary preferred", "Secondary", "Secondary preferred", "Nearest"}}},
 	}
 }
 
@@ -183,6 +187,9 @@ func (Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 		return nil, mapError(err)
 	}
 	c := &conn{cl: cl, cfg: *cfg, database: strings.TrimSpace(cfg.Database)}
+	if rp := o.ReadPreference; rp != nil && rp.Mode() != readpref.PrimaryMode {
+		c.readPref = rp
+	}
 	if c.database == "" {
 		c.database = Driver{}.Info().DefaultDB
 	}
@@ -198,6 +205,7 @@ func (Driver) Open(ctx context.Context, cfg *db.Config) (db.Conn, error) {
 // conn is a client (a connection pool).
 type conn struct {
 	cl       *mongo.Client
+	readPref *readpref.ReadPref // of the connection string; nil = primary
 	cfg      db.Config
 	database string
 	caps     db.Capabilities
@@ -408,4 +416,13 @@ func (Driver) ParseURL(s string) (db.Config, bool, error) {
 		cfg.TLS.Mode = "verify-full" // SRV implies TLS
 	}
 	return cfg, true, nil
+}
+
+// readOpts are the command options of the navigator's reads (catalog,
+// samples, counts): the connection's read preference.
+func (c *conn) readOpts() []options.Lister[options.RunCmdOptions] {
+	if c.readPref == nil {
+		return nil
+	}
+	return []options.Lister[options.RunCmdOptions]{options.RunCmd().SetReadPreference(c.readPref)}
 }

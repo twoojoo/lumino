@@ -17,9 +17,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/twoojoo/lumino/internal/db"
@@ -580,9 +582,17 @@ func (c *conn) Watch(ctx context.Context, ref db.ObjectRef, pipeline string, rea
 
 // ---- import / export ----
 
-// importBatch is how many documents are inserted at once.
-const importBatch = 1000
+// importBatch is how many documents are inserted at once, by
+// importWorkers concurrent unordered inserts.
+const (
+	importBatch   = 1000
+	importWorkers = 4
+)
 
+// Import inserts the documents in parallel batches (unordered inserts: the
+// order of the documents in the collection is not the file's). The first
+// error stops the reading (batches already sent complete); the count is
+// that of the documents inserted.
 func (c *conn) Import(ctx context.Context, ref db.ObjectRef, r io.Reader, o db.ImportOptions, progress func(int64)) (int64, error) {
 	coll := c.cl.Database(c.dbOf(ref)).Collection(ref.Name)
 	if o.Drop {
@@ -590,26 +600,69 @@ func (c *conn) Import(ctx context.Context, ref db.ObjectRef, r io.Reader, o db.I
 			return 0, mapError(err)
 		}
 	}
-	var n int64
+	stop := make(chan struct{})
+	type job struct {
+		first int64 // number of the first document
+		docs  []any
+	}
+	jobs := make(chan job)
+	var (
+		mu       sync.Mutex
+		n        int64
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	opts := options.InsertMany().SetOrdered(false)
+	for range importWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for jb := range jobs {
+				inserted := int64(len(jb.docs))
+				_, err := coll.InsertMany(ctx, jb.docs, opts)
+				if err != nil {
+					var bwe mongo.BulkWriteException
+					if errors.As(err, &bwe) && bwe.WriteConcernError == nil {
+						inserted -= int64(len(bwe.WriteErrors)) // unordered: the others went in
+					} else {
+						inserted = 0
+					}
+				}
+				mu.Lock()
+				n += inserted
+				if err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("documents %d-%d: %w", jb.first, jb.first+int64(len(jb.docs))-1, mapError(err))
+					close(stop)
+				}
+				if progress != nil {
+					progress(n)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	var read int64
 	var batch []any
-	flush := func() error {
+	send := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		if _, err := coll.InsertMany(ctx, batch); err != nil {
-			return fmt.Errorf("documents %d-%d: %w", n+1, n+int64(len(batch)), mapError(err))
+		jb := job{first: read - int64(len(batch)) + 1, docs: batch}
+		batch = make([]any, 0, importBatch)
+		select {
+		case jobs <- jb:
+			return nil
+		case <-stop:
+			return errImportStopped
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		n += int64(len(batch))
-		batch = batch[:0]
-		if progress != nil {
-			progress(n)
-		}
-		return nil
 	}
 	emit := func(d bson.D) error {
+		read++
 		batch = append(batch, d)
 		if len(batch) >= importBatch {
-			return flush()
+			return send()
 		}
 		return nil
 	}
@@ -622,13 +675,20 @@ func (c *conn) Import(ctx context.Context, ref db.ObjectRef, r io.Reader, o db.I
 	case "bson":
 		err = readBSON(r, emit)
 	default:
-		return 0, fmt.Errorf("unknown import format %q", o.Format)
+		err = fmt.Errorf("unknown import format %q", o.Format)
 	}
 	if err == nil {
-		err = flush()
+		err = send()
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		err = firstErr // the reader stopped because of it
 	}
 	return n, err
 }
+
+var errImportStopped = errors.New("import stopped")
 
 // readJSON reads an array of documents or one document per line
 // (Extended JSON, relaxed or canonical).

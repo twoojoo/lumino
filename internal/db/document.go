@@ -46,7 +46,28 @@ func (n DocNode) Field(name string) (DocNode, bool) {
 // Documents returns the whole documents of the rows returned by the last
 // Fetch, in the same order (fields not shown as columns included).
 type DocumentResult interface {
-	Documents() []DocNode
+	Documents() []Document
+}
+
+// Document is a whole document of a result row, converted to a DocNode
+// when first asked: results keep their documents cheaply and only the
+// tree and JSON views (or an edit) pay for the conversion.
+type Document interface {
+	Node() DocNode
+}
+
+// NodeDocument is a Document already converted.
+type NodeDocument DocNode
+
+func (d NodeDocument) Node() DocNode { return DocNode(d) }
+
+// Nodes converts documents.
+func Nodes(docs []Document) []DocNode {
+	out := make([]DocNode, len(docs))
+	for i, d := range docs {
+		out[i] = d.Node()
+	}
+	return out
 }
 
 // unset is the type of Unset.

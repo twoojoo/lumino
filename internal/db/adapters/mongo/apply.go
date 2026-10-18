@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/twoojoo/lumino/internal/db"
 )
@@ -44,7 +45,8 @@ func (s *session) ApplyChanges(ctx context.Context, ref db.ObjectRef, changes []
 	if dbName == "" {
 		dbName = s.database
 	}
-	coll := s.c.cl.Database(dbName).Collection(ref.Name)
+	// the documents are re-read from the primary before they change
+	coll := s.c.cl.Database(dbName).Collection(ref.Name, options.Collection().SetReadPreference(readpref.Primary()))
 	own := false
 	if s.c.caps.Transactions && !s.TxActive() {
 		if err := s.Begin(ctx); err != nil {

@@ -10,6 +10,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/twoojoo/lumino/internal/db"
 )
@@ -41,6 +43,18 @@ func (s *session) SetGuard(g db.Guard) {
 	s.mu.Lock()
 	s.guard = g
 	s.mu.Unlock()
+}
+
+// readPrefKey carries the read preference of a reading statement.
+type readPrefKey struct{}
+
+// readOpts are the command options of a statement: its read preference
+// when it only reads (RunCommand defaults to the primary).
+func readOpts(ctx context.Context) []options.Lister[options.RunCmdOptions] {
+	if rp, ok := ctx.Value(readPrefKey{}).(*readpref.ReadPref); ok {
+		return []options.Lister[options.RunCmdOptions]{options.RunCmd().SetReadPreference(rp)}
+	}
+	return nil
 }
 
 func (s *session) db(name string) *mongo.Database {
@@ -118,7 +132,9 @@ func (s *session) Begin(ctx context.Context) error {
 	if err != nil {
 		return mapError(err)
 	}
-	if err := ms.StartTransaction(); err != nil {
+	// reads in a transaction must use the primary, whatever the
+	// connection's read preference
+	if err := ms.StartTransaction(options.Transaction().SetReadPreference(readpref.Primary())); err != nil {
 		ms.EndSession(ctx)
 		return mapError(err)
 	}
@@ -225,13 +241,26 @@ func (r *result) hasNext(ctx context.Context) (bool, error) {
 
 var _ db.DocumentResult = (*result)(nil)
 
-// Documents returns the whole documents of the last fetched rows.
-func (r *result) Documents() []db.DocNode {
-	out := make([]db.DocNode, len(r.last))
+// Documents returns the whole documents of the last fetched rows,
+// converted when a view asks for them.
+func (r *result) Documents() []db.Document {
+	out := make([]db.Document, len(r.last))
 	for i, d := range r.last {
-		out[i] = docNode("", d)
+		out[i] = &lazyDoc{d: d}
 	}
 	return out
+}
+
+// lazyDoc converts a document on its first Node call.
+type lazyDoc struct {
+	once sync.Once
+	d    bson.D
+	n    db.DocNode
+}
+
+func (l *lazyDoc) Node() db.DocNode {
+	l.once.Do(func() { l.n, l.d = docNode("", l.d), nil })
+	return l.n
 }
 
 func (r *result) Columns() []db.Column {
@@ -335,6 +364,11 @@ func cursorResult(ctx context.Context, cur *mongo.Cursor) (*result, error) {
 // ---- execution ----
 
 func (s *session) run(ctx context.Context, st *statement) (*result, error) {
+	if s.c.readPref != nil && classify(st) == db.StmtRead && mongo.SessionFromContext(ctx) == nil {
+		// reads follow the connection's read preference (transactions
+		// and writes go to the primary)
+		ctx = context.WithValue(ctx, readPrefKey{}, s.c.readPref)
+	}
 	switch st.kind {
 	case "use":
 		s.database = st.arg
@@ -360,7 +394,7 @@ func (s *session) show(ctx context.Context, what string) (*result, error) {
 		}
 		return docs(ds), nil
 	case "collections", "tables":
-		cur, err := s.db("").RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "nameOnly", Value: true}})
+		cur, err := s.db("").RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "nameOnly", Value: true}}, readOpts(ctx)...)
 		if err != nil {
 			return nil, err
 		}
@@ -376,7 +410,7 @@ func (s *session) show(ctx context.Context, what string) (*result, error) {
 // command runs a command and shows its reply as one document.
 func (s *session) command(ctx context.Context, dbName string, cmd bson.D) (*result, error) {
 	var d bson.D
-	if err := s.db(dbName).RunCommand(ctx, cmd).Decode(&d); err != nil {
+	if err := s.db(dbName).RunCommand(ctx, cmd, readOpts(ctx)...).Decode(&d); err != nil {
 		return nil, err
 	}
 	if err := writeErrors(d); err != nil {
@@ -387,7 +421,7 @@ func (s *session) command(ctx context.Context, dbName string, cmd bson.D) (*resu
 
 // cursorCommand runs a command returning a cursor.
 func (s *session) cursorCommand(ctx context.Context, dbName string, cmd bson.D) (*result, error) {
-	cur, err := s.db(dbName).RunCommandCursor(ctx, cmd)
+	cur, err := s.db(dbName).RunCommandCursor(ctx, cmd, readOpts(ctx)...)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +564,7 @@ func (s *session) dbMethod(ctx context.Context, st *statement) (*result, error) 
 		return s.command(ctx, "admin", bson.D{{Key: "hostInfo", Value: 1}})
 	case "version":
 		var bi bson.D
-		if err := s.db("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&bi); err != nil {
+		if err := s.db("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}, readOpts(ctx)...).Decode(&bi); err != nil {
 			return nil, err
 		}
 		v, _ := field(bi, "version")
@@ -742,8 +776,12 @@ func (s *session) collMethod(ctx context.Context, st *statement) (*result, error
 		}
 		return s.count(ctx, dbn, coll, cmd)
 	case "estimatedDocumentCount":
+		if mongo.SessionFromContext(ctx) != nil {
+			// count can't run in a transaction: count the documents
+			return s.count(ctx, dbn, coll, bson.D{{Key: "find", Value: coll}, {Key: "filter", Value: bson.D{}}})
+		}
 		var d bson.D
-		if err := s.db(dbn).RunCommand(ctx, bson.D{{Key: "count", Value: coll}}).Decode(&d); err != nil {
+		if err := s.db(dbn).RunCommand(ctx, bson.D{{Key: "count", Value: coll}}, readOpts(ctx)...).Decode(&d); err != nil {
 			return nil, err
 		}
 		n, _ := field(d, "n")
@@ -758,7 +796,7 @@ func (s *session) collMethod(ctx context.Context, st *statement) (*result, error
 			return nil, err
 		}
 		var d bson.D
-		if err := s.db(dbn).RunCommand(ctx, bson.D{{Key: "distinct", Value: coll}, {Key: "key", Value: k}, {Key: "query", Value: q}}).Decode(&d); err != nil {
+		if err := s.db(dbn).RunCommand(ctx, bson.D{{Key: "distinct", Value: coll}, {Key: "key", Value: k}, {Key: "query", Value: q}}, readOpts(ctx)...).Decode(&d); err != nil {
 			return nil, err
 		}
 		vals, _ := field(d, "values")
@@ -1125,7 +1163,7 @@ func (s *session) count(ctx context.Context, dbName, coll string, find bson.D) (
 			cmd = append(cmd, bson.E{Key: k, Value: v})
 		}
 	}
-	cur, err := s.db(dbName).RunCommandCursor(ctx, cmd)
+	cur, err := s.db(dbName).RunCommandCursor(ctx, cmd, readOpts(ctx)...)
 	if err != nil {
 		return nil, err
 	}

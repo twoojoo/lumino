@@ -181,8 +181,13 @@ func RunDocuments(t *testing.T, tg Target) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Contains(m["customers"], "email") || !slices.Contains(m["customers"], "address.city") {
-			t.Errorf("completion: %v", m["customers"])
+		fields, ok := m["customers"]
+		if !ok || fields != nil {
+			t.Fatalf("completion lists %v (fields are loaded per collection)", m)
+		}
+		fields, err = cat.(db.FieldCompleter).CompletionFields(ctx, ref("customers"))
+		if err != nil || !slices.Contains(fields, "email") || !slices.Contains(fields, "address.city") {
+			t.Errorf("completion fields: %v %v", fields, err)
 		}
 	})
 
@@ -279,20 +284,26 @@ func RunDocuments(t *testing.T, tg Target) {
 			t.Skip("no transactions")
 		}
 		s, other := session(t, conn), session(t, conn)
+		// a filter: without one the count comes from the collection
+		// metadata, which sees the writes of open transactions
+		all := `{_id: {$exists: true}}`
 		if err := s.Begin(ctx); err != nil {
 			t.Fatal(err)
 		}
 		exec(t, s, `db.customers.insertOne({_id: 9001, name: "tx", email: "tx@example.com"})`)
-		if v := count(t, s, "customers", ""); v != "4" {
+		if v := count(t, s, "customers", all); v != "4" {
 			t.Fatalf("inside the transaction: %s", v)
 		}
-		if v := count(t, other, "customers", ""); v != "3" {
+		if v := count(t, s, "customers", ""); v != "4" { // count can't run in a transaction: documents counted
+			t.Fatalf("estimated count inside the transaction: %s", v)
+		}
+		if v := count(t, other, "customers", all); v != "3" {
 			t.Fatalf("uncommitted insert visible: %s", v)
 		}
 		if err := s.Rollback(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if v := count(t, s, "customers", ""); v != "3" || s.TxActive() {
+		if v := count(t, s, "customers", all); v != "3" || s.TxActive() {
 			t.Fatalf("after rollback: %s", v)
 		}
 		if err := s.Begin(ctx); err != nil {
@@ -302,7 +313,7 @@ func RunDocuments(t *testing.T, tg Target) {
 		if err := s.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if v := count(t, other, "customers", ""); v != "4" {
+		if v := count(t, other, "customers", all); v != "4" {
 			t.Fatalf("after commit: %s", v)
 		}
 		exec(t, s, `db.customers.deleteOne({_id: 9002})`)
@@ -512,7 +523,7 @@ func RunDocuments(t *testing.T, tg Target) {
 		if !ok {
 			t.Fatal("no documents")
 		}
-		docs := dr.Documents()
+		docs := db.Nodes(dr.Documents())
 		if len(docs) != len(rows) || len(rows) != 3 {
 			t.Fatalf("%d documents for %d rows", len(docs), len(rows))
 		}
@@ -869,7 +880,7 @@ print("inserted", db.shell_t.countDocuments({}))`)
 			t.Fatal(err)
 		}
 		_, _, _ = res.Fetch(ctx, 10)
-		docs := res.(db.DocumentResult).Documents()
+		docs := db.Nodes(res.(db.DocumentResult).Documents())
 		res.Close()
 		if j, err := tools.ExportDocument(docs[0], "ejson"); err != nil || !strings.Contains(string(j), `"c_oid":{"$oid":"`) {
 			t.Fatalf("relaxed json: %s %v", j, err)
@@ -909,11 +920,35 @@ print("inserted", db.shell_t.countDocuments({}))`)
 				t.Fatal(err)
 			}
 			_, _, _ = r2.Fetch(ctx, 10)
-			back := r2.(db.DocumentResult).Documents()
+			back := db.Nodes(r2.(db.DocumentResult).Documents())
 			r2.Close()
 			if len(back) != 1 || dl.FormatDocument(back[0]) != dl.FormatDocument(docs[0]) {
 				t.Fatalf("%s round trip:\n%v\n%s", c.format, back, dl.FormatDocument(docs[0]))
 			}
+		}
+		// many batches inserted in parallel; a duplicate _id stops the import
+		// with the numbers of the batch where it showed up (either, as they
+		// run at the same time), the count is what went in
+		var big bytes.Buffer
+		for i := 1; i <= 5500; i++ {
+			fmt.Fprintf(&big, "{\"_id\": %d, \"v\": %d}\n", i, i%7)
+		}
+		var last int64
+		n, err := tools.Import(ctx, ref("import_t"), bytes.NewReader(big.Bytes()), db.ImportOptions{Format: "json", Drop: true}, func(k int64) { last = k })
+		if err != nil || n != 5500 || last != 5500 || count(t, s, "import_t", `{}`) != "5500" {
+			t.Fatalf("parallel import: %d %d %v", n, last, err)
+		}
+		big.Reset()
+		for i := 1; i <= 1500; i++ {
+			id := i
+			if i == 1200 {
+				id = 3
+			}
+			fmt.Fprintf(&big, "{\"_id\": %d}\n", id)
+		}
+		n, err = tools.Import(ctx, ref("import_t"), bytes.NewReader(big.Bytes()), db.ImportOptions{Format: "json", Drop: true}, nil)
+		if err == nil || !strings.Contains(err.Error(), "documents 1001-1500") && !strings.Contains(err.Error(), "documents 1-1000") || n != 1499 || count(t, s, "import_t", `{}`) != "1499" {
+			t.Fatalf("import with a duplicate: %d %v", n, err)
 		}
 		exec(t, s, `db.import_t.drop()`)
 		// SQL translation runs
@@ -942,7 +977,7 @@ print("inserted", db.shell_t.countDocuments({}))`)
 		}
 		rows, _, err := res.Fetch(ctx, 10)
 		cols := res.Columns()
-		docs := res.(db.DocumentResult).Documents()
+		docs := db.Nodes(res.(db.DocumentResult).Documents())
 		res.Close()
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("rows %v %v", rows, err)
